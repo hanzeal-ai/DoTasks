@@ -49,18 +49,28 @@ class TaskboardServiceTest(unittest.TestCase):
     def test_task_token_budget_setting_controls_new_tasks(self):
         existing = self.create_ready_task()
         self.assertEqual(60000, existing["token_budget"])
-        self.assertEqual({"task_token_budget": 60000}, self.service.task_settings())
+        self.assertEqual(
+            {"task_token_budget": 60000, "max_batch_appended_tasks": 3},
+            self.service.task_settings(),
+        )
 
         self.assertEqual(
-            {"task_token_budget": 120000},
+            {"task_token_budget": 120000, "max_batch_appended_tasks": 3},
             self.service.update_task_settings({"task_token_budget": 120000}),
         )
         created = self.create_ready_task()
         self.assertEqual(120000, created["token_budget"])
         self.assertEqual(60000, self.service.get_task(existing["id"])["token_budget"])
         self.assertEqual(
-            {"task_token_budget": 120000},
+            {"task_token_budget": 120000, "max_batch_appended_tasks": 3},
             TaskboardService(self.temp.name).task_settings(),
+        )
+
+        self.assertEqual(
+            {"task_token_budget": 120000, "max_batch_appended_tasks": 5},
+            self.service.update_task_settings(
+                {"task_token_budget": 120000, "max_batch_appended_tasks": 5}
+            ),
         )
 
     def test_task_token_budget_setting_rejects_invalid_values(self):
@@ -69,6 +79,14 @@ class TaskboardServiceTest(unittest.TestCase):
                 ValueError, "positive integer"
             ):
                 self.service.update_task_settings({"task_token_budget": value})
+
+        for value in (-1, 21, True, "3"):
+            with self.subTest(batch_value=value), self.assertRaisesRegex(
+                ValueError, "integer between 0 and 20"
+            ):
+                self.service.update_task_settings(
+                    {"task_token_budget": 60000, "max_batch_appended_tasks": value}
+                )
 
     def test_location_schema_uses_generic_names(self):
         with self.service.db.connection() as connection:
@@ -284,6 +302,131 @@ class TaskboardServiceTest(unittest.TestCase):
             if item["relation_type"] == "defect_of"
         )
         self.assertEqual(task["id"], relation["target_task_id"])
+
+    def test_execution_batch_appends_three_tasks_and_completes_atomically(self):
+        owner = self.create_located_task({
+            "title": "批次任务一", "project": str(self.example_project),
+            "modules": ["a-page"], "goal": "完成批次任务一", "scope": ["任务一"],
+            "out_of_scope": [], "acceptance_criteria": ["任务一通过"],
+            "workflow_version": 2,
+        })
+        claim = self.service.claim_next_task("batch-worker", owner["project"])
+        self.service.bind_conversation(
+            owner["id"], "execution", "batch-thread", claim["run"]["id"]
+        )
+        self.service.bind_batch_turn(
+            claim["run"]["id"], "batch-thread", "batch-turn", 1
+        )
+        self.service.transition_task(owner["id"], "implementing")
+
+        appended = [
+            self.create_located_task({
+                "title": f"批次任务{index}", "project": str(self.example_project),
+                "modules": ["a-page"], "goal": f"完成批次任务{index}",
+                "scope": [f"任务{index}"], "out_of_scope": [],
+                "acceptance_criteria": [f"任务{index}通过"], "workflow_version": 2,
+            })
+            for index in range(2, 6)
+        ]
+        batch = self.service.execution_batch(owner["id"])
+        self.assertEqual(3, batch["appended_count"])
+        self.assertEqual(4, len(batch["tasks"]))
+        self.assertEqual("ready", self.service.get_task(appended[-1]["id"])["status"])
+        self.assertIsNone(self.service.execution_batch(appended[-1]["id"]))
+        self.assertEqual(3, len(self.service.pending_batch_steers()))
+
+        criteria = [
+            f"[{task_id}] {criterion}"
+            for task_id, criterion in [
+                (owner["id"], "任务一通过"),
+                (appended[0]["id"], "任务2通过"),
+                (appended[1]["id"], "任务3通过"),
+                (appended[2]["id"], "任务4通过"),
+            ]
+        ]
+        delivery = self.service.submit_delivery(
+            claim["run"]["id"], "批次实现完成", "focused tests passed",
+            [{"file": "src/APage.tsx", "symbols": ["APage"], "summary": "batch"}],
+            [{"criterion": criterion, "evidence": "passed"} for criterion in criteria],
+            batch_revision=batch["revision"],
+        )
+        self.assertFalse(delivery.get("continue_development", False))
+        self.assertEqual("review", self.service.execution_batch(owner["id"])["state"])
+
+        review = self.service.claim_next_code_review_task("review-worker", owner["project"])
+        self.service.bind_conversation(
+            owner["id"], "code_review", "batch-review", review["run"]["id"]
+        )
+        checks = review["run"]["context_snapshot"]["review_checks"]
+        self.assertIn("delivery", review["run"]["context_snapshot"])
+        reviewed = self.service.review_code(
+            owner["id"], review["run"]["id"], "pass", passed_items=checks
+        )
+        self.assertEqual("acceptance", reviewed["status"])
+        self.assertTrue(all(
+            self.service.get_task(task["id"])["status"] == "acceptance"
+            for task in appended[:3]
+        ))
+
+        acceptance = self.service.claim_next_acceptance_task(
+            "acceptance-worker", owner["project"]
+        )
+        self.service.bind_conversation(
+            owner["id"], "acceptance", "batch-acceptance", acceptance["run"]["id"]
+        )
+        acceptance_criteria = acceptance["run"]["context_snapshot"]["acceptance_criteria"]
+        self.service.accept_task(
+            owner["id"], acceptance["run"]["id"], "pass",
+            reasons=["批次验收通过"], passed_criteria=acceptance_criteria,
+        )
+        self.assertEqual("done", self.service.execution_batch(owner["id"])["state"])
+        self.assertTrue(all(
+            self.service.get_task(task_id)["status"] == "done"
+            for task_id in [owner["id"], *(task["id"] for task in appended[:3])]
+        ))
+
+    def test_failed_batch_review_opens_one_regroup_window_then_rework_seals_it(self):
+        owner = self.create_located_task({
+            "title": "返工批次任务一", "project": str(self.example_project),
+            "goal": "实现任务一", "scope": ["任务一"], "out_of_scope": [],
+            "acceptance_criteria": ["任务一通过"], "workflow_version": 2,
+        })
+        claim = self.service.claim_next_task("batch-worker", owner["project"])
+        self.service.bind_conversation(owner["id"], "execution", "batch-thread", claim["run"]["id"])
+        self.service.transition_task(owner["id"], "implementing")
+        second = self.create_located_task({
+            "title": "返工批次任务二", "project": str(self.example_project),
+            "goal": "实现任务二", "scope": ["任务二"], "out_of_scope": [],
+            "acceptance_criteria": ["任务二通过"], "workflow_version": 2,
+        })
+        batch = self.service.execution_batch(owner["id"])
+        criteria = [f"[{owner['id']}] 任务一通过", f"[{second['id']}] 任务二通过"]
+        self.service.submit_delivery(
+            claim["run"]["id"], "实现完成", "tests passed",
+            [{"file": "src/APage.tsx", "symbols": ["APage"], "summary": "batch"}],
+            [{"criterion": item, "evidence": "passed"} for item in criteria],
+            batch_revision=batch["revision"],
+        )
+        review = self.service.claim_next_code_review_task("review-worker", owner["project"])
+        self.service.bind_conversation(owner["id"], "code_review", "review-thread", review["run"]["id"])
+        checks = review["run"]["context_snapshot"]["review_checks"]
+        self.service.review_code(
+            owner["id"], review["run"]["id"], "fail", reasons=["需要修复"],
+            passed_items=checks[1:], failed_criteria=checks[:1],
+        )
+        self.assertEqual("regrouping", self.service.execution_batch(owner["id"])["state"])
+        third = self.create_located_task({
+            "title": "返工批次任务三", "project": str(self.example_project),
+            "goal": "实现任务三", "scope": ["任务三"], "out_of_scope": [],
+            "acceptance_criteria": ["任务三通过"], "workflow_version": 2,
+        })
+        self.assertEqual(owner["id"], self.service.execution_batch(third["id"])["owner_task_id"])
+        rework = self.service.claim_next_task("rework-worker", owner["project"])
+        self.assertIsNotNone(rework, self.service.board())
+        self.assertEqual("rework", rework["run"]["run_type"])
+        sealed = self.service.execution_batch(owner["id"])
+        self.assertEqual("development", sealed["state"])
+        self.assertFalse(sealed["admission_open"])
 
     def test_task_change_detection_uses_current_thread_without_explicit_task_id(self):
         task = self.create_located_task({

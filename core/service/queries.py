@@ -72,6 +72,7 @@ class TaskQueryMixin:
                 task["target_conflicts"] = self._target_conflicts(connection, task["id"])
                 task["project_blockers"] = self._project_blockers(connection, task["id"])
                 task["conversation_openable"] = task.get("active_run_status") not in ACTIVE_RUN_STATUSES
+                task["execution_batch"] = self.execution_batch(task["id"])
                 task["conversations"] = [
                     {
                         "role": item["role"], "thread_id": item["thread_id"],
@@ -96,6 +97,7 @@ class TaskQueryMixin:
                 (task.get("active_run_id"), task_id),
             ).fetchone() if task.get("active_run_id") else None
             task["conversation_openable"] = not bool(active and active["status"] in ACTIVE_RUN_STATUSES)
+        task["execution_batch"] = self.execution_batch(task_id)
         return task
 
     def task_details(self, task_id: str) -> dict[str, Any]:
@@ -109,6 +111,7 @@ class TaskQueryMixin:
             "acceptance_checks": self.list_acceptance_checks(task_id),
             "revisions": self.list_task_revisions(task_id),
             "events": self.list_events("task", task_id) + self.list_events("run", task_id=task_id),
+            "execution_batch": self.execution_batch(task_id),
         }
 
     def list_events(self, entity_type: str, entity_id: str | None = None, task_id: str | None = None) -> list[dict[str, Any]]:

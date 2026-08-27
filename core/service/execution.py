@@ -571,6 +571,11 @@ class TaskLifecycleMixin:
                     WHERE candidate_target.task_id=tasks.id
                       AND locked_task.project=tasks.project
                       AND locked_task.status IN ('claimed','investigating','implementing','waiting_confirmation','review','failed','blocked')
+                      AND NOT EXISTS (
+                        SELECT 1 FROM execution_batch_tasks mine
+                        JOIN execution_batch_tasks theirs ON theirs.batch_id=mine.batch_id
+                        WHERE mine.task_id=tasks.id AND theirs.task_id=locked_task.id
+                      )
                 )""",
             ]
             values: list[Any] = []
@@ -645,6 +650,7 @@ class TaskLifecycleMixin:
             )
             if cursor.rowcount != 1:
                 raise ValueError("Task changed concurrently; retry dispatch")
+            batch_id = self._ensure_execution_batch(connection, task, run_id, run_type)
             self._event(
                 connection,
                 "run",
@@ -658,6 +664,7 @@ class TaskLifecycleMixin:
             )
         try:
             context = self.build_execution_context(task["id"], task.get("project"))
+            context = self._merge_batch_execution_context(context, batch_id)
             context["workspace_baseline"] = retry_baseline or self._workspace_state(
                 task.get("project")
             )
@@ -1005,6 +1012,15 @@ class TaskLifecycleMixin:
                 "UPDATE tasks SET active_run_id=?, assigned_to=? WHERE id=? AND status='code_review'",
                 (run_id, worker_id, task["id"]),
             )
+            batch_row = connection.execute(
+                """SELECT batch.* FROM execution_batches batch
+                   JOIN execution_batch_runs mapping ON mapping.batch_id=batch.id
+                   WHERE mapping.run_id=?""",
+                (delivery["id"],),
+            ).fetchone()
+            batch = dict(batch_row) if batch_row else None
+            if batch:
+                self._attach_batch_run(connection, batch["id"], run_id, "review")
         delivery_snapshot = _decode_row(delivery, RUN_JSON_FIELDS)
         context = self.build_code_review_context(task["id"], task.get("project"))
         context.update(
@@ -1013,6 +1029,19 @@ class TaskLifecycleMixin:
                 "delivery": self._model_delivery(delivery_snapshot, include_diff=True),
             }
         )
+        confirmed_checks = [
+            str(
+                item.get("id") or item.get("criterion") or item.get("description") or ""
+            ).strip()
+            if isinstance(item, dict)
+            else str(item).strip()
+            for item in (task.get("review_contract") or {}).get("checks", [])
+        ]
+        confirmed_checks = [item for item in confirmed_checks if item]
+        if batch and int(batch.get("appended_count") or 0) > 0:
+            context, confirmed_checks = self._merge_batch_code_review_context(
+                context, batch["id"]
+            )
         context = freeze_run_context(
             context,
             task=task,
@@ -1025,15 +1054,6 @@ class TaskLifecycleMixin:
                 "UPDATE task_runs SET context_snapshot=? WHERE id=?",
                 (json.dumps(context, ensure_ascii=False), run_id),
             )
-        confirmed_checks = [
-            str(
-                item.get("id") or item.get("criterion") or item.get("description") or ""
-            ).strip()
-            if isinstance(item, dict)
-            else str(item).strip()
-            for item in (task.get("review_contract") or {}).get("checks", [])
-        ]
-        confirmed_checks = [item for item in confirmed_checks if item]
         return {
             "task": self.get_task(task["id"]),
             "run": self.get_run(run_id),
@@ -1060,6 +1080,7 @@ class TaskLifecycleMixin:
     ) -> dict[str, Any]:
         task = self.get_task(task_id)
         run = self.get_run(run_id)
+        batch = self._batch_for_run(run_id)
         if (
             task.get("active_run_id") != run_id
             or task["status"] != "code_review"
@@ -1076,24 +1097,29 @@ class TaskLifecycleMixin:
             str(x).strip() for x in (failed_criteria or []) if str(x).strip()
         ]
         contract = task.get("review_contract") or {}
-        review_items = []
-        for item in contract.get("checks", []) or []:
-            if isinstance(item, dict):
-                review_items.append(
-                    str(
-                        item.get("id")
-                        or item.get("criterion")
-                        or item.get("description")
-                        or ""
-                    ).strip()
-                )
-            else:
-                review_items.append(str(item).strip())
+        review_items = (
+            self._batch_review_items(task_id)
+            if batch and int(batch.get("appended_count") or 0) > 0
+            else []
+        )
         if not review_items:
-            review_items = [
-                str(item).strip() for item in (contract.get("rules", []) or [])
-            ]
-        review_items = [item for item in review_items if item]
+            for item in contract.get("checks", []) or []:
+                if isinstance(item, dict):
+                    review_items.append(
+                        str(
+                            item.get("id")
+                            or item.get("criterion")
+                            or item.get("description")
+                            or ""
+                        ).strip()
+                    )
+                else:
+                    review_items.append(str(item).strip())
+            if not review_items:
+                review_items = [
+                    str(item).strip() for item in (contract.get("rules", []) or [])
+                ]
+            review_items = [item for item in review_items if item]
         criteria = set(review_items)
         if len(passed_items) != len(set(passed_items)) or len(failed_criteria) != len(
             set(failed_criteria)
@@ -1155,6 +1181,16 @@ class TaskLifecycleMixin:
                     task_id,
                 ),
             )
+            if batch:
+                self._propagate_batch_review(
+                    connection,
+                    batch,
+                    task_id,
+                    verdict,
+                    reasons,
+                    passed_items,
+                    failed_criteria,
+                )
             self._event(
                 connection,
                 "task",
@@ -1243,6 +1279,15 @@ class TaskLifecycleMixin:
                 "UPDATE tasks SET active_run_id=?, assigned_to=? WHERE id=? AND status='acceptance'",
                 (run_id, worker_id, task["id"]),
             )
+            batch_row = connection.execute(
+                """SELECT batch.* FROM execution_batches batch
+                   JOIN execution_batch_runs mapping ON mapping.batch_id=batch.id
+                   WHERE mapping.run_id=?""",
+                (delivery["id"],),
+            ).fetchone()
+            batch = dict(batch_row) if batch_row else None
+            if batch:
+                self._attach_batch_run(connection, batch["id"], run_id, "acceptance")
         delivery_snapshot = _decode_row(delivery, RUN_JSON_FIELDS)
         context = self.build_acceptance_context(task["id"], task.get("project"))
         needs_diff = any(
@@ -1257,6 +1302,12 @@ class TaskLifecycleMixin:
                 ),
             }
         )
+        if batch and int(batch.get("appended_count") or 0) > 0:
+            context = self._merge_batch_acceptance_context(context, batch["id"])
+            context["delivery_run_id"] = delivery["id"]
+            context["delivery"] = self._model_delivery(
+                delivery_snapshot, include_diff=needs_diff
+            )
         context = freeze_run_context(
             context,
             task=task,
@@ -1294,6 +1345,7 @@ class TaskLifecycleMixin:
     ) -> dict[str, Any]:
         task = self.get_task(task_id)
         run = self.get_run(run_id)
+        batch = self._batch_for_run(run_id)
         if (
             task.get("active_run_id") != run_id
             or task["status"] != "acceptance"
@@ -1303,7 +1355,11 @@ class TaskLifecycleMixin:
             raise ValueError("A running acceptance run is required")
         verdict = str(verdict).lower().strip()
         reasons = [str(x).strip() for x in (reasons or []) if str(x).strip()]
-        criteria = [str(x) for x in task.get("acceptance_criteria", [])]
+        criteria = (
+            self._batch_acceptance_items(task_id)
+            if batch and int(batch.get("appended_count") or 0) > 0
+            else [str(x) for x in task.get("acceptance_criteria", [])]
+        )
         passed_criteria = [str(x) for x in (passed_criteria or [])]
         failed_criteria = [str(x) for x in (failed_criteria or [])]
         if verdict not in {"pass", "fail"}:
@@ -1331,6 +1387,7 @@ class TaskLifecycleMixin:
             )
         bug_id = None
         parent_task_id = None
+        completed_batch_task_ids: list[str] = []
         with self.db.transaction() as connection:
             round_no = connection.execute(
                 "SELECT COALESCE(MAX(round),0)+1 value FROM acceptance_results WHERE task_id=?",
@@ -1370,6 +1427,20 @@ class TaskLifecycleMixin:
                     )
                     if cursor.rowcount:
                         parent_task_id = parent["target_task_id"]
+                        parent_batch = connection.execute(
+                            """SELECT member.batch_id FROM execution_batch_tasks member
+                               JOIN execution_batches batch ON batch.id=member.batch_id
+                               WHERE member.task_id=? AND batch.state='acceptance_failed'""",
+                            (parent_task_id,),
+                        ).fetchone()
+                        if parent_batch:
+                            connection.execute(
+                                """UPDATE tasks SET status='acceptance', active_run_id=NULL,
+                                   assigned_to=NULL WHERE status='acceptance_blocked' AND id IN (
+                                     SELECT task_id FROM execution_batch_tasks WHERE batch_id=?
+                                   )""",
+                                (parent_batch["batch_id"],),
+                            )
                         self._event(
                             connection,
                             "task",
@@ -1426,6 +1497,19 @@ class TaskLifecycleMixin:
                     {"source_task_id": task_id, "acceptance_run_id": run_id},
                 )
                 self._queue_obsidian_sync(connection, "task", bug_id)
+            if batch:
+                completed_batch_task_ids = self._propagate_batch_acceptance(
+                    connection,
+                    batch,
+                    task_id,
+                    run_id,
+                    verdict,
+                    reasons,
+                    passed_criteria,
+                    failed_criteria,
+                    failure_locations or [],
+                    bug_id,
+                )
             connection.execute(
                 "UPDATE task_conversations SET status='completed', updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
                 (run_id,),
@@ -1453,11 +1537,16 @@ class TaskLifecycleMixin:
         updated = self.get_task(task_id)
         if verdict == "pass":
             self._create_experience(updated)
+            for member_task_id in completed_batch_task_ids:
+                self._create_experience(self.get_task(member_task_id))
         self.flush_integration_outbox()
         return updated
 
     def auto_accept_automated_task(self, task_id: str, run_id: str) -> dict[str, Any]:
         """Complete acceptance without a model when every criterion is an automated check."""
+        batch = self._batch_for_run(run_id)
+        if batch and int(batch.get("appended_count") or 0) > 0:
+            return {"eligible": False, "completed": False}
         task = self.get_task(task_id)
         run = self.get_run(run_id)
         snapshot = run.get("context_snapshot") or {}
@@ -1593,10 +1682,18 @@ class TaskLifecycleMixin:
                 f"这是失败或中断后的显式重试；上次停止原因：{task.get('last_failure_reason') or '未记录'}。"
                 "继续使用保存的重试链工作区基线，交付时必须报告失败前后累计产生的全部改动。"
             )
+        batch = context.get("batch") or {}
+        batch_note = (
+            f"这是执行批次 {batch.get('id')} 的第 {batch.get('revision')} 版；"
+            f"交付时 submit_task_delivery 必须传 batch_revision={batch.get('revision')}，"
+            "并完整覆盖 RUN_CONTEXT_JSON.tasks 中的全部任务。"
+            if int(batch.get("appended_count") or 0) > 0
+            else ""
+        )
         return (
             "$codex-taskboard-lifecycle\n\n"
             f"任务 {task['id']}（运行 {run_id}，类型 {run_type}）。"
-            f"{retry_note}"
+            f"{retry_note}{batch_note}"
             "以 RUN_CONTEXT_JSON 为唯一任务输入，只读取已定位目标及正确性所需的直接依赖，不再获取任务详情。"
             "实现并验证后调用 submit_task_delivery；需要用户决策或无法继续时调用 report_run_blocked。"
             f"\n\nRUN_CONTEXT_JSON={prompt_context(context)}"

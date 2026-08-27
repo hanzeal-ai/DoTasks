@@ -212,6 +212,55 @@ CREATE TABLE IF NOT EXISTS task_run_conversations (
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS execution_batches (
+  id TEXT PRIMARY KEY,
+  project TEXT NOT NULL,
+  owner_task_id TEXT NOT NULL REFERENCES tasks(id),
+  owner_run_id TEXT REFERENCES task_runs(id),
+  state TEXT NOT NULL DEFAULT 'development',
+  revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+  max_appended_tasks INTEGER NOT NULL DEFAULT 3 CHECK(max_appended_tasks >= 0),
+  appended_count INTEGER NOT NULL DEFAULT 0 CHECK(appended_count >= 0),
+  admission_open INTEGER NOT NULL DEFAULT 1 CHECK(admission_open IN (0,1)),
+  thread_id TEXT NOT NULL DEFAULT '',
+  active_turn_id TEXT NOT NULL DEFAULT '',
+  delivery_run_id TEXT REFERENCES task_runs(id),
+  sealed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS execution_batch_tasks (
+  batch_id TEXT NOT NULL REFERENCES execution_batches(id) ON DELETE CASCADE,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  role TEXT NOT NULL DEFAULT 'appended',
+  join_order INTEGER NOT NULL,
+  joined_revision INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(batch_id, task_id),
+  UNIQUE(task_id),
+  UNIQUE(batch_id, join_order)
+);
+
+CREATE TABLE IF NOT EXISTS execution_batch_runs (
+  run_id TEXT PRIMARY KEY REFERENCES task_runs(id) ON DELETE CASCADE,
+  batch_id TEXT NOT NULL REFERENCES execution_batches(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS batch_steer_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id TEXT NOT NULL REFERENCES execution_batches(id) ON DELETE CASCADE,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(batch_id, task_id, revision)
+);
+
 CREATE TABLE IF NOT EXISTS task_relations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   source_task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -342,6 +391,10 @@ CREATE INDEX IF NOT EXISTS idx_location_reports_state ON location_reports(state,
 CREATE INDEX IF NOT EXISTS idx_task_conversations_task ON task_conversations(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_task_run_conversations_task ON task_run_conversations(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_task_run_conversations_thread ON task_run_conversations(task_id, thread_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_execution_batches_project_state ON execution_batches(project, state, admission_open, created_at);
+CREATE INDEX IF NOT EXISTS idx_execution_batch_tasks_task ON execution_batch_tasks(task_id);
+CREATE INDEX IF NOT EXISTS idx_execution_batch_runs_batch ON execution_batch_runs(batch_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_batch_steer_events_pending ON batch_steer_events(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_task_targets_lookup ON task_targets(file, symbol, task_id);
 CREATE INDEX IF NOT EXISTS idx_task_change_requests_status ON task_change_requests(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_task_revisions_task ON task_revisions(task_id, version);
@@ -351,7 +404,7 @@ CREATE INDEX IF NOT EXISTS idx_integration_outbox_pending ON integration_outbox(
 
 # Version 2 re-applies v2 run/conversation validation triggers. Version 1 may
 # have been overwritten by a still-running pre-v2 MCP process.
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 class Database:
@@ -402,6 +455,17 @@ class Database:
             return True
         check_columns = {row["name"] for row in connection.execute("PRAGMA table_info(acceptance_check_runs)")}
         if not {"workspace_fingerprint", "cache_hit"}.issubset(check_columns):
+            return True
+        required_batch_tables = {
+            "execution_batches", "execution_batch_tasks", "execution_batch_runs",
+            "batch_steer_events",
+        }
+        existing_tables = {
+            row["name"] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if not required_batch_tables.issubset(existing_tables):
             return True
         analysis_columns = {row["name"] for row in connection.execute("PRAGMA table_info(location_analyses)")}
         if not {"location_plan", "location_evidence"}.issubset(analysis_columns):
@@ -685,6 +749,9 @@ class Database:
         )
         connection.execute(
             "INSERT OR IGNORE INTO system_settings(key, value) VALUES('dispatcher_enabled', '0')"
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO system_settings(key, value) VALUES('max_batch_appended_tasks', '3')"
         )
         # Convert a legacy in-place review row back into its delivery role. New
         # reviews always receive a distinct run and point at this delivery.

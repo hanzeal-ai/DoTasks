@@ -7,8 +7,8 @@ from typing import Any
 from taskboard.version import VERSION
 
 
-RUN_CONTEXT_SCHEMA_VERSION = 5
-LIFECYCLE_TOOL_SCHEMA_REVISION = 5
+RUN_CONTEXT_SCHEMA_VERSION = 6
+LIFECYCLE_TOOL_SCHEMA_REVISION = 6
 
 LIFECYCLE_TOOL_NAMES = frozenset({
     "get_task_context",

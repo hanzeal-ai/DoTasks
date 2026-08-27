@@ -220,12 +220,13 @@ TOOLS = [
     },
     {
         "name": "submit_task_delivery",
-        "description": "Submit an execution run's compact delivery summary and verification result, then move the task to review. Validation failures leave the run active: correct changed_locations from RUN_CONTEXT_JSON and retry instead of reporting the run blocked.",
+        "description": "Submit an execution run's compact delivery summary and verification result, then move the task or sealed execution batch to review. When RUN_CONTEXT_JSON.batch has appended tasks, pass its exact batch_revision. Validation failures leave the run active: correct the payload and retry instead of reporting the run blocked.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "run_id": {"type": "string"}, "delivery_summary": {"type": "string"},
                 "verification_result": {"type": "string"},
+                "batch_revision": {"type": "integer", "minimum": 1},
                 "changed_locations": {"type": "array", "items": {"type": "object"}},
                 "acceptance_evidence": {"type": "array", "items": {"type": "object"}},
             },
@@ -418,7 +419,7 @@ TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "finalize_task_intake": SERVICE.finalize_task_intake,
     "dispatch_next_task": lambda arguments: SERVICE.claim_next_task(arguments["worker_id"], arguments.get("project"), arguments.get("lease_seconds", 1800)),
     "bind_task_conversation": lambda arguments: SERVICE.bind_conversation(arguments["task_id"], arguments["role"], arguments["thread_id"], arguments.get("run_id"), arguments.get("title", "")),
-    "submit_task_delivery": lambda arguments: SERVICE.submit_delivery(arguments["run_id"], arguments["delivery_summary"], arguments["verification_result"], arguments["changed_locations"], arguments["acceptance_evidence"]),
+    "submit_task_delivery": lambda arguments: SERVICE.submit_delivery(arguments["run_id"], arguments["delivery_summary"], arguments["verification_result"], arguments["changed_locations"], arguments["acceptance_evidence"], batch_revision=arguments.get("batch_revision")),
     "report_run_blocked": lambda arguments: SERVICE.report_run_blocked(
         arguments["task_id"], arguments["run_id"], arguments["status"], arguments["reason"],
     ),
@@ -524,6 +525,8 @@ def _compact_lifecycle_result(name: str, result: Any) -> Any:
             "run_id": run.get("id"),
             "next_stage": (result.get("task") or {}).get("status"),
             "review_dispatch_required": bool(result.get("review_dispatch_required")),
+            "continue_development": bool(result.get("continue_development")),
+            "batch": result.get("batch"),
         })
     return compact
 

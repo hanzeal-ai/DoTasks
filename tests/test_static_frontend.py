@@ -217,6 +217,7 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
         self.assertLess(html.index('id="attention-tasks"'), html.index('id="settings-button"'))
         self.assertIn('id="task-settings-form"', app)
         self.assertIn('name="task_token_budget"', app)
+        self.assertIn('name="max_batch_appended_tasks"', app)
         self.assertIn('api("/api/settings"', app)
 
     def test_frontend_loads_workflow_metadata_instead_of_duplicating_statuses(self):

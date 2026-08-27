@@ -11,6 +11,7 @@ from taskboard.location import LocationAdapter
 from taskboard.obsidian import ObsidianAdapter
 from taskboard.project_guard import ProjectWorkspaceGuard
 from .execution import TaskLifecycleMixin
+from .batching import TaskBatchMixin
 from .changes import TaskChangeMixin
 from .planning import TaskPlanningMixin
 from .queries import TaskQueryMixin
@@ -25,6 +26,7 @@ class TaskboardService(
     TaskPlanningMixin,
     TaskChangeMixin,
     TaskQueryMixin,
+    TaskBatchMixin,
     TaskLifecycleMixin,
     TaskRunMixin,
     TaskReviewMixin,

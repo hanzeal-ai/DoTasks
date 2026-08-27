@@ -18,6 +18,7 @@ class FakeClient:
         self.notifications = []
         self.turn_status = "inProgress"
         self.fail_thread_name = False
+        self.fail_turn_steer = False
         self.stop_calls = 0
 
     def start(self):
@@ -31,6 +32,8 @@ class FakeClient:
         self.calls.append((method, params))
         if method == "thread/name/set" and self.fail_thread_name:
             raise AppServerError("thread/name/set: failed to update thread metadata")
+        if method == "turn/steer" and self.fail_turn_steer:
+            raise AppServerError("turn/steer: active turn already completed")
         if method == "thread/start":
             return {"thread": {"id": "thread-123"}}
         if method == "turn/start":
@@ -121,6 +124,39 @@ class FakeService:
 class TaskDispatcherTest(unittest.TestCase):
     def test_app_server_declares_experimental_api_capability(self):
         self.assertTrue(app_server_initialize_params()["capabilities"]["experimentalApi"])
+
+    def test_batch_append_steers_the_exact_active_turn_and_persists_failure(self):
+        with tempfile.TemporaryDirectory() as project:
+            service = FakeService(project)
+            event = {
+                "id": 7,
+                "thread_id": "batch-thread",
+                "active_turn_id": "active-turn",
+                "input": {"batch_id": "BATCH-0001", "batch_revision": 2},
+            }
+            service.pending_batch_steers = lambda: [event]
+            sent = []
+            pending = []
+            service.mark_batch_steer_sent = sent.append
+            service.mark_batch_steer_pending = lambda event_id, error: pending.append(
+                (event_id, error)
+            )
+            client = FakeClient()
+            client.start()
+            dispatcher = TaskDispatcher(service, client=client)
+            dispatcher._active_clients["batch-thread"] = client
+
+            dispatcher._flush_batch_steers()
+
+            steer = next(params for method, params in client.calls if method == "turn/steer")
+            self.assertEqual("active-turn", steer["expectedTurnId"])
+            self.assertIn('"batch_revision":2', steer["input"][0]["text"])
+            self.assertEqual([7], sent)
+
+            client.fail_turn_steer = True
+            dispatcher._flush_batch_steers()
+            self.assertEqual(7, pending[-1][0])
+            self.assertIn("already completed", pending[-1][1])
 
     def test_stage_tool_profiles_are_minimal_without_losing_manual_acceptance(self):
         automated = {

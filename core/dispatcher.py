@@ -302,6 +302,7 @@ class TaskDispatcher:
             self.service.flush_integration_outbox()
         if not self.service.dispatcher_enabled():
             return 0
+        self._flush_batch_steers()
         dispatched = 0
         capacity = max(0, min(max(1, int(limit)), 3) - len(self._active_clients))
         for _ in range(capacity):
@@ -390,6 +391,14 @@ class TaskDispatcher:
                     task_turn_start_params(thread_id, prompt, run["run_type"], high_risk, low_risk),
                 )
                 self.service.bind_conversation(task["id"], role, thread_id, run["id"], title)
+                if hasattr(self.service, "bind_batch_turn"):
+                    batch = (run.get("context_snapshot") or {}).get("batch") or {}
+                    self.service.bind_batch_turn(
+                        run["id"],
+                        thread_id,
+                        str((turn_result.get("turn") or {}).get("id") or ""),
+                        int(batch.get("revision") or 0),
+                    )
                 self._active_clients[thread_id] = client
                 self._client_started_at[thread_id] = time.monotonic()
                 self._active_runs[thread_id] = {
@@ -418,6 +427,37 @@ class TaskDispatcher:
                 if run["status"] in {"awaiting_thread", "running"}:
                     self.service.interrupt_unsubmitted_run(run["id"], f"Codex 会话创建失败：{exc}")
         return dispatched
+
+    def _flush_batch_steers(self) -> None:
+        if not hasattr(self.service, "pending_batch_steers"):
+            return
+        for event in self.service.pending_batch_steers():
+            thread_id = str(event.get("thread_id") or "")
+            turn_id = str(event.get("active_turn_id") or "")
+            client = self._active_clients.get(thread_id)
+            if not client or not client.connected or not turn_id:
+                continue
+            prompt = (
+                "$codex-taskboard-lifecycle\n\n"
+                "执行批次在开发阶段新增了一个任务。将以下增量需求合并到当前实现；"
+                "不要交付旧批次版本，最终 submit_task_delivery 必须携带新的 batch_revision。\n\n"
+                "BATCH_APPEND_JSON="
+                + json.dumps(event["input"], ensure_ascii=False, separators=(",", ":"))
+            )
+            try:
+                client.request(
+                    "turn/steer",
+                    {
+                        "threadId": thread_id,
+                        "input": [{"type": "text", "text": prompt}],
+                        "expectedTurnId": turn_id,
+                    },
+                )
+                self.service.mark_batch_steer_sent(int(event["id"]))
+            except AppServerError as exc:
+                # A turn may finish between polling and steering. Keep the event
+                # pending so a resumed development turn can include it.
+                self.service.mark_batch_steer_pending(int(event["id"]), str(exc))
 
     def _run(self) -> None:
         while not self._stop.is_set():

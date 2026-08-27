@@ -327,9 +327,18 @@ class TaskPlanningMixin:
                     raise ValueError(f"Related task not found: {target if source == task_id else source}")
                 self._insert_relation_in_connection(connection, source, target, relation_type, str(relation.get("description") or ""))
             conflicts = self._target_conflicts(connection, task_id)
+            batch_id = self._try_join_open_batch(connection, task_id)
             self._event(connection, "task", task_id, "created", payload)
             if conflicts:
                 self._event(connection, "task", task_id, "target_conflict_detected", {"conflicts": conflicts})
+            if batch_id:
+                self._event(
+                    connection,
+                    "task",
+                    task_id,
+                    "auto_batched",
+                    {"batch_id": batch_id},
+                )
             self._queue_obsidian_sync(connection, "task", task_id)
         task = self.get_task(task_id)
         self.flush_integration_outbox()

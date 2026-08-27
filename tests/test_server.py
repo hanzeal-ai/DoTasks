@@ -42,19 +42,25 @@ class TaskboardHTTPServerTest(unittest.TestCase):
     def test_task_token_budget_settings_can_be_read_and_updated(self) -> None:
         status, _, payload = self.request("GET", "/api/settings")
         self.assertEqual(200, status)
-        self.assertEqual({"task_token_budget": 60000}, payload)
+        self.assertEqual(
+            {"task_token_budget": 60000, "max_batch_appended_tasks": 3}, payload
+        )
 
         status, _, payload = self.request(
             "POST",
             "/api/settings",
-            json.dumps({"task_token_budget": 120000}).encode("utf-8"),
+            json.dumps(
+                {"task_token_budget": 120000, "max_batch_appended_tasks": 4}
+            ).encode("utf-8"),
             Origin=self.origin,
             **{"Content-Type": "application/json"},
         )
         self.assertEqual(200, status)
-        self.assertEqual({"task_token_budget": 120000}, payload)
         self.assertEqual(
-            {"task_token_budget": 120000},
+            {"task_token_budget": 120000, "max_batch_appended_tasks": 4}, payload
+        )
+        self.assertEqual(
+            {"task_token_budget": 120000, "max_batch_appended_tasks": 4},
             self.server.RequestHandlerClass.service.task_settings(),
         )
 

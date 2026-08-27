@@ -14,10 +14,18 @@ from ..runtime import project_runtime_environment
 class TaskReviewMixin:
     """Delivery validation, automated checks, review decisions, and acceptance records."""
 
-    def _validate_changed_locations(self, task_id: str, changed_locations: list[dict[str, Any]]) -> None:
+    def _validate_changed_locations(
+        self,
+        task_id: str,
+        changed_locations: list[dict[str, Any]],
+        task_ids: list[str] | None = None,
+    ) -> None:
+        task_ids = task_ids or [task_id]
+        placeholders = ",".join("?" for _ in task_ids)
         with self.db.connection() as connection:
             rows = connection.execute(
-                "SELECT file, symbol FROM task_targets WHERE task_id=?", (task_id,)
+                f"SELECT file, symbol FROM task_targets WHERE task_id IN ({placeholders})",
+                task_ids,
             ).fetchall()
         locked: dict[str, set[str]] = {}
         for row in rows:
@@ -41,8 +49,9 @@ class TaskReviewMixin:
 
     def _validate_workspace_delta(
         self, task: dict[str, Any], run: dict[str, Any], changed_locations: list[dict[str, Any]],
-        current: dict[str, Any] | None = None,
+        current: dict[str, Any] | None = None, task_ids: list[str] | None = None,
     ) -> dict[str, Any]:
+        task_ids = task_ids or [task["id"]]
         baseline = (run.get("context_snapshot") or {}).get("workspace_baseline") or {}
         if not baseline.get("available"):
             return current or {}
@@ -73,9 +82,13 @@ class TaskReviewMixin:
             for item in changed_locations if str(item.get("file") or "").strip()
         }
         with self.db.connection() as connection:
+            placeholders = ",".join("?" for _ in task_ids)
             locked = {
                 posixpath.normpath(row["file"])
-                for row in connection.execute("SELECT file FROM task_targets WHERE task_id=?", (task["id"],)).fetchall()
+                for row in connection.execute(
+                    f"SELECT file FROM task_targets WHERE task_id IN ({placeholders})",
+                    task_ids,
+                ).fetchall()
             }
         outside = actual - locked
         if outside:
@@ -88,9 +101,32 @@ class TaskReviewMixin:
             raise ValueError(f"Reported changed locations have no Git workspace delta: {', '.join(sorted(unsupported))}")
         return current
 
-    def submit_delivery(self, run_id: str, delivery_summary: str, verification_result: str, changed_locations: list[dict[str, Any]], acceptance_evidence: list[dict[str, Any]], token_used: int = 0) -> dict[str, Any]:
+    def submit_delivery(
+        self,
+        run_id: str,
+        delivery_summary: str,
+        verification_result: str,
+        changed_locations: list[dict[str, Any]],
+        acceptance_evidence: list[dict[str, Any]],
+        token_used: int = 0,
+        *,
+        batch_revision: int | None = None,
+    ) -> dict[str, Any]:
         run = self.get_run(run_id)
         task = self.get_task(run["task_id"])
+        batch = self._batch_for_run(run_id)
+        batch_tasks = self._batch_member_tasks(batch["id"]) if batch else [task]
+        batch_task_ids = [item["id"] for item in batch_tasks]
+        if batch and len(batch_tasks) > 1:
+            current_revision = int(batch["revision"])
+            if batch_revision is None or int(batch_revision) != current_revision:
+                return {
+                    "task": task,
+                    "run": run,
+                    "batch": self.execution_batch(task["id"]),
+                    "continue_development": True,
+                    "review_dispatch_required": False,
+                }
         if run["run_type"] not in {"execution", "rework", "bugfix"} or run["status"] != "running":
             raise ValueError("Execution run must be active before delivery")
         if task["status"] not in {"investigating", "implementing", "rework"}:
@@ -113,12 +149,18 @@ class TaskReviewMixin:
                 raise ValueError("Changed location symbols must be an array of strings")
             location["symbols"] = [symbol.strip() for symbol in symbols if symbol.strip()]
             location.setdefault("summary", "")
-        self._validate_changed_locations(task["id"], changed_locations)
+        self._validate_changed_locations(task["id"], changed_locations, batch_task_ids)
         workspace_state = self._workspace_state(task.get("project"))
-        self._validate_workspace_delta(task, run, changed_locations, workspace_state)
+        self._validate_workspace_delta(
+            task, run, changed_locations, workspace_state, batch_task_ids
+        )
         if not isinstance(acceptance_evidence, list) or not acceptance_evidence or any(not isinstance(item, dict) for item in acceptance_evidence):
             raise ValueError("acceptance_evidence is required")
-        criteria = set(task.get("acceptance_criteria", []))
+        criteria = set(
+            self._batch_acceptance_items(task["id"])
+            if batch and len(batch_tasks) > 1
+            else task.get("acceptance_criteria", [])
+        )
         covered = {item.get("criterion") for item in acceptance_evidence}
         missing_criteria = criteria - covered
         if missing_criteria:
@@ -141,6 +183,22 @@ class TaskReviewMixin:
         if token_used:
             self.record_run_token_usage(run_id, token_used)
         with self.db.transaction() as connection:
+            if batch:
+                sealed = connection.execute(
+                    """UPDATE execution_batches
+                       SET admission_open=0, state='review', delivery_run_id=?,
+                           sealed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+                       WHERE id=? AND revision=? AND state='development'""",
+                    (run_id, batch["id"], int(batch["revision"])),
+                )
+                if sealed.rowcount != 1:
+                    return {
+                        "task": self.get_task(task["id"]),
+                        "run": self.get_run(run_id),
+                        "batch": self.execution_batch(task["id"]),
+                        "continue_development": True,
+                        "review_dispatch_required": False,
+                    }
             run_cursor = connection.execute(
                 """UPDATE task_runs SET status='waiting_review', delivery_summary=?, verification_result=?, changed_locations=?, acceptance_evidence=?, artifact_snapshot=?, token_used=MAX(token_used, ?),
                    updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running'""",
@@ -163,6 +221,18 @@ class TaskReviewMixin:
             )
             if task_cursor.rowcount != 1:
                 raise ValueError("Task changed concurrently during delivery")
+            if batch and len(batch_tasks) > 1:
+                self._create_batch_member_deliveries(
+                    connection,
+                    batch,
+                    task,
+                    run,
+                    delivery_summary.strip(),
+                    verification_result.strip(),
+                    changed_locations,
+                    acceptance_evidence,
+                    artifact_snapshot,
+                )
             self._event(connection, "run", run_id, "delivery_submitted", {"task_id": task["id"]})
             connection.execute(
                 "UPDATE task_conversations SET status='waiting_review', updated_at=CURRENT_TIMESTAMP WHERE run_id=?",

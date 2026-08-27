@@ -569,7 +569,8 @@ function renderProject() {
 
 function renderSettings() {
   const budget = Number(state.settings?.task_token_budget) || 60000;
-  document.querySelector("#content").innerHTML = `<section class="settings-page"><form id="task-settings-form" class="settings-panel"><div class="settings-panel-head"><div><p class="eyebrow">TASK DEFAULTS</p><h2>任务设置</h2></div></div><label class="settings-field" for="task-token-budget"><span>任务 Token 预算</span><input id="task-token-budget" name="task_token_budget" type="number" min="1" step="1" value="${budget}" required /><small>用于新建任务的有效 Token 上限；达到预算后任务将暂停并等待确认。已创建任务不受影响。</small></label><div class="settings-actions"><button class="primary" type="submit">保存设置</button></div></form></section>`;
+  const maxAppendedTasks = Number.isInteger(Number(state.settings?.max_batch_appended_tasks)) ? Number(state.settings.max_batch_appended_tasks) : 3;
+  document.querySelector("#content").innerHTML = `<section class="settings-page"><form id="task-settings-form" class="settings-panel"><div class="settings-panel-head"><div><p class="eyebrow">TASK DEFAULTS</p><h2>任务设置</h2></div></div><label class="settings-field" for="task-token-budget"><span>任务 Token 预算</span><input id="task-token-budget" name="task_token_budget" type="number" min="1" step="1" value="${budget}" required /><small>用于新建任务的有效 Token 上限；达到预算后任务将暂停并等待确认。已创建任务不受影响。</small></label><label class="settings-field" for="max-batch-appended-tasks"><span>批次最多追加任务数</span><input id="max-batch-appended-tasks" name="max_batch_appended_tasks" type="number" min="0" max="20" step="1" value="${maxAppendedTasks}" required /><small>默认 3，表示一个开发批次最多包含初始任务和 3 个追加任务；设置为 0 可禁用自动追加。</small></label><div class="settings-actions"><button class="primary" type="submit">保存设置</button></div></form></section>`;
 }
 
 function render() {
@@ -964,22 +965,30 @@ document.addEventListener("submit", async event => {
   if (event.target.id === "task-settings-form") {
     event.preventDefault();
     const input = document.querySelector("#task-token-budget");
+    const appendedInput = document.querySelector("#max-batch-appended-tasks");
     const taskTokenBudget = Number(input.value);
+    const maxBatchAppendedTasks = Number(appendedInput.value);
     if (!Number.isInteger(taskTokenBudget) || taskTokenBudget <= 0) {
       input.setCustomValidity("请输入大于 0 的整数");
       input.reportValidity();
       return;
     }
     input.setCustomValidity("");
+    if (!Number.isInteger(maxBatchAppendedTasks) || maxBatchAppendedTasks < 0 || maxBatchAppendedTasks > 20) {
+      appendedInput.setCustomValidity("请输入 0 到 20 的整数");
+      appendedInput.reportValidity();
+      return;
+    }
+    appendedInput.setCustomValidity("");
     const button = event.target.querySelector('button[type="submit"]');
     button.disabled = true;
     try {
       state.settings = await api("/api/settings", {
         method: "POST",
-        body: JSON.stringify({task_token_budget: taskTokenBudget}),
+        body: JSON.stringify({task_token_budget: taskTokenBudget, max_batch_appended_tasks: maxBatchAppendedTasks}),
       });
       renderSettings();
-      toast("设置已保存，新建任务将使用新的 Token 预算");
+      toast("设置已保存，新批次将使用新的任务追加上限");
     } catch (error) {
       button.disabled = false;
       toast(error.message);
