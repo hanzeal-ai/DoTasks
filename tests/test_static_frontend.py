@@ -99,8 +99,8 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
         html = (WEB_SOURCE / "App.jsx").read_text(encoding="utf-8")
         css = (WEB_SOURCE / "styles.css").read_text(encoding="utf-8")
 
-        def declarations(selector: str) -> dict[str, str]:
-            match = re.search(rf"{re.escape(selector)}\s*\{{([^}}]*)\}}", css)
+        def declarations(selector: str, source: str = css) -> dict[str, str]:
+            match = re.search(rf"{re.escape(selector)}\s*\{{([^}}]*)\}}", source)
             self.assertIsNotNone(match, f"missing CSS rule for {selector}")
             return {
                 name.strip(): value.strip()
@@ -136,6 +136,17 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
         html = (WEB_SOURCE / "App.jsx").read_text(encoding="utf-8")
         app = (WEB_SOURCE / "legacy-app.js").read_text(encoding="utf-8")
         css = (WEB_SOURCE / "styles.css").read_text(encoding="utf-8")
+
+        def declaration_value(source: str, selector: str, name: str) -> str:
+            match = re.search(rf"{re.escape(selector)}\s*\{{([^}}]*)\}}", source)
+            self.assertIsNotNone(match, f"missing CSS rule for {selector}")
+            declarations = dict(
+                item.strip().split(":", 1)
+                for item in match.group(1).split(";")
+                if ":" in item
+            )
+            return declarations[name].strip()
+
         for control_id in (
             "board-nav",
             "dispatcher-toggle",
@@ -153,9 +164,14 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
         self.assertIn('event.target.closest("#settings-button")', app)
         self.assertIn('event.target.closest("#attention-tasks")', app)
         self.assertIn('event.target.closest("#dispatcher-toggle")', app)
-        self.assertIn("@media (max-width: 760px)", css)
-        self.assertIn(".sidebar { flex-basis: 182px; }", css)
-        self.assertIn("#content.board-columns > .board { padding: 12px; }", css)
+        responsive = css.split("@media (max-width: 760px)", 1)[1].split(
+            "@media (prefers-color-scheme: dark)", 1
+        )[0]
+        self.assertEqual("182px", declaration_value(responsive, ".sidebar", "flex-basis"))
+        self.assertEqual(
+            "12px",
+            declaration_value(responsive, "#content.board-columns > .board", "padding"),
+        )
 
     def test_project_archive_view_and_actions_are_wired(self):
         html = (WEB_SOURCE / "App.jsx").read_text(encoding="utf-8")
