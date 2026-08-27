@@ -180,6 +180,8 @@ class TaskPlanningMixin:
         title = str(payload.get("title") or "").strip()
         if not title:
             raise ValueError("title is required")
+        task_type = str(payload.get("type") or "feature").strip().lower()
+        task_id_prefix = "BUG" if task_type == "bug" else "TASK"
         list_values = {field: self._string_list(payload, field) for field in JSON_FIELDS}
         priority = str(payload.get("priority", "P2"))
         if priority not in {"P0", "P1", "P2", "P3"}:
@@ -273,7 +275,7 @@ class TaskPlanningMixin:
                 separate_acceptance = review_contract.get("separate_acceptance_session", False)
                 if not isinstance(separate_acceptance, bool):
                     raise ValueError("review_contract.separate_acceptance_session must be boolean")
-            task_id = self.db.next_id(connection, "TASK")
+            task_id = self.db.next_id(connection, task_id_prefix)
             connection.execute(
                 """INSERT INTO tasks(
                     id, requirement_id, title, type, project, modules, status,
@@ -283,7 +285,7 @@ class TaskPlanningMixin:
                     parent_acceptance_task_id, workflow_version
                 ) VALUES(?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    task_id, title, payload.get("type", "feature"), project,
+                    task_id, title, task_type, project,
                     json.dumps(list_values["modules"], ensure_ascii=False), payload.get("status", "draft"),
                     priority, payload.get("goal", ""),
                     json.dumps(list_values["scope"], ensure_ascii=False),

@@ -213,6 +213,78 @@ class TaskboardServiceTest(unittest.TestCase):
         self.service.transition_task(task["id"], "ready", auto_dispatch=False)
         self.assertEqual(1, self.service.board()["counts"]["attention"])
 
+    def test_task_ids_use_type_specific_prefixes_and_board_preserves_ids(self):
+        task = self.create_ready_task()
+        bug = self.create_located_task({
+            "title": "修复导入入口", "type": " BUG ",
+            "project": str(self.example_project), "modules": ["a-page"],
+            "goal": "修复导入入口", "scope": ["修复按钮"],
+            "out_of_scope": [], "acceptance_criteria": ["入口可用"],
+        })
+
+        self.assertRegex(task["id"], r"^TASK-\d+$")
+        self.assertRegex(bug["id"], r"^BUG-\d+$")
+        self.assertEqual("bug", bug["type"])
+        self.assertEqual(task["id"], self.service.get_task(task["id"])["id"])
+        self.assertEqual(bug["id"], self.service.get_task(bug["id"])["id"])
+        board_ids = {item["id"] for item in self.service.board()["tasks"]}
+        self.assertIn(task["id"], board_ids)
+        self.assertIn(bug["id"], board_ids)
+
+    def test_task_card_renders_persisted_task_id_without_rewriting_prefix(self):
+        source = (
+            Path(__file__).parents[1] / "web" / "src" / "legacy-app.js"
+        ).read_text(encoding="utf-8")
+        task_card = source[
+            source.index("function taskCard(task)"):
+            source.index("function traceSection", source.index("function taskCard(task)"))
+        ]
+
+        self.assertIn("<span>${task.id}</span>", task_card)
+        self.assertNotIn("TASK-", task_card)
+        self.assertNotIn("BUG-", task_card)
+
+    def test_acceptance_failure_still_creates_bug_id_and_defect_relation(self):
+        task = self.create_located_task({
+            "title": "实现待验收入口", "project": str(self.example_project),
+            "modules": ["a-page"], "goal": "增加待验收入口",
+            "scope": ["新增按钮"], "out_of_scope": [],
+            "acceptance_criteria": ["入口验收通过"], "workflow_version": 2,
+        })
+        task = self.submit_delivery(task, "execution-acceptance-failure")
+        review = self.service.claim_next_code_review_task(
+            "review-worker", task["project"],
+        )
+        self.service.bind_conversation(
+            task["id"], "code_review", "review-acceptance-failure",
+            review["run"]["id"],
+        )
+        task = self.service.review_code(
+            task["id"], review["run"]["id"], "pass",
+            passed_items=task["review_contract"]["checks"],
+        )
+        self.assertEqual("acceptance", task["status"])
+        acceptance = self.service.claim_next_acceptance_task(
+            "acceptance-worker", task["project"],
+        )
+        self.service.bind_conversation(
+            task["id"], "acceptance", "acceptance-failure-thread",
+            acceptance["run"]["id"],
+        )
+        self.service.accept_task(
+            task["id"], acceptance["run"]["id"], "fail",
+            reasons=["入口不可用"], failed_criteria=task["acceptance_criteria"],
+        )
+
+        bugs = [item for item in self.service.board()["tasks"] if item["type"] == "bug"]
+        self.assertEqual(1, len(bugs))
+        self.assertRegex(bugs[0]["id"], r"^BUG-\d+$")
+        relation = next(
+            item for item in self.service.task_relations(bugs[0]["id"])
+            if item["relation_type"] == "defect_of"
+        )
+        self.assertEqual(task["id"], relation["target_task_id"])
+
     def test_task_change_detection_uses_current_thread_without_explicit_task_id(self):
         task = self.create_located_task({
             "title": "A 页面加法计算", "project": str(self.example_project),
