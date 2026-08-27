@@ -1,0 +1,34 @@
+{
+  "name": "codex-taskboard",
+  "version": "0.1.0+codex.20260827022502",
+  "description": "Confirm minimum task boundaries and orchestrate traceable, token-aware multi-conversation delivery tasks.",
+  "author": {
+    "name": "sanmws"
+  },
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "taskboard",
+    "confirmation",
+    "workflow"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Taskboard",
+    "shortDescription": "Orchestrate independent execution and review tasks",
+    "longDescription": "Manually invoke Taskboard to analyze a minimum implementation boundary, create a ready task, dispatch independent implementation, review and rework conversations, send project notifications, and retain compact project knowledge through CodeGraph and Obsidian integrations.",
+    "developerName": "sanmws",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "\u6309\u6700\u5c0f\u5b9e\u73b0\u5206\u6790\u8fd9\u4e2a\u9700\u6c42\uff0c\u5fc5\u8981\u8fb9\u754c\u4e00\u6b21\u6027\u5411\u6211\u786e\u8ba4\uff0c\u7b54\u6848\u8db3\u591f\u540e\u76f4\u63a5\u52a0\u5165\u4efb\u52a1\u961f\u5217",
+      "\u6253\u5f00\u4efb\u52a1\u770b\u677f",
+      "\u663e\u793a\u7b49\u5f85\u6211\u9a8c\u6536\u7684\u4efb\u52a1"
+    ],
+    "brandColor": "#315CF5"
+  },
+  "mcpServers": "./.mcp.json"
+}

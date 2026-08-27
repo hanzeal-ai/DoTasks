@@ -1,0 +1,168 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+OUTPUT_ROOT=${CODEX_TASKBOARD_HELPER_OUTPUT_DIR:-"$PROJECT_ROOT/dist"}
+APP_NAME="Taskboard Helper.app"
+APP_PATH="$OUTPUT_ROOT/$APP_NAME"
+SIGN_IDENTITY=${CODEX_TASKBOARD_CODESIGN_IDENTITY:--}
+INSTALL=false
+
+if [ "${1:-}" = "--install" ]; then
+  INSTALL=true
+elif [ "$#" -gt 0 ]; then
+  echo "Usage: $0 [--install]" >&2
+  exit 2
+fi
+
+case "$APP_PATH" in
+  */dist/"$APP_NAME"|*/TaskboardHelperBuild*/"$APP_NAME") ;;
+  *)
+    echo "Refusing to replace unexpected helper path: $APP_PATH" >&2
+    exit 1
+    ;;
+esac
+
+NPM_BIN=${CODEX_TASKBOARD_NPM_BIN:-}
+if [ -z "$NPM_BIN" ]; then
+  for candidate in /opt/homebrew/bin/npm /usr/local/bin/npm "$HOME"/.nvm/versions/node/*/bin/npm; do
+    if [ -x "$candidate" ]; then
+      NPM_BIN=$candidate
+    fi
+  done
+fi
+if [ -z "$NPM_BIN" ]; then
+  NPM_BIN=$(command -v npm || true)
+fi
+if [ -z "$NPM_BIN" ] || [ ! -x "$NPM_BIN" ]; then
+  echo "npm not found" >&2
+  exit 1
+fi
+NODE_BIN=$(dirname "$NPM_BIN")/node
+if [ ! -x "$NODE_BIN" ]; then
+  echo "node not found next to npm: $NPM_BIN" >&2
+  exit 1
+fi
+PATH="$(dirname "$NPM_BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
+SWIFTC_BIN=/usr/bin/swiftc
+if [ -z "$SWIFTC_BIN" ] || [ ! -x "$SWIFTC_BIN" ]; then
+  echo "swiftc not found" >&2
+  exit 1
+fi
+
+UV_BIN=${CODEX_TASKBOARD_UV_BIN:-}
+if [ -z "$UV_BIN" ]; then
+  for candidate in /opt/homebrew/bin/uv /usr/local/bin/uv "$HOME/.local/bin/uv"; do
+    if [ -x "$candidate" ]; then
+      UV_BIN=$candidate
+      break
+    fi
+  done
+fi
+if [ -z "$UV_BIN" ]; then
+  UV_BIN=$(command -v uv || true)
+fi
+if [ -z "$UV_BIN" ] || [ ! -x "$UV_BIN" ]; then
+  echo "uv not found; it is required to install locked Helper dependencies" >&2
+  exit 1
+fi
+
+"$NPM_BIN" --prefix "$PROJECT_ROOT/web" run build
+
+/bin/rm -rf "$APP_PATH"
+/bin/mkdir -p \
+  "$APP_PATH/Contents/MacOS" \
+  "$APP_PATH/Contents/Resources/runtime/core" \
+  "$APP_PATH/Contents/Resources/runtime/taskboard" \
+  "$APP_PATH/Contents/Resources/runtime/scripts" \
+  "$APP_PATH/Contents/Resources/runtime/skills" \
+  "$APP_PATH/Contents/Resources/runtime/static" \
+  "$APP_PATH/Contents/Resources/runtime/vendor"
+/bin/cp "$PROJECT_ROOT/macos/HelperInfo.plist" "$APP_PATH/Contents/Info.plist"
+/usr/bin/plutil -insert TaskboardBootstrapProject -string "$PROJECT_ROOT" "$APP_PATH/Contents/Info.plist"
+"$SWIFTC_BIN" \
+  -parse-as-library \
+  -framework AppKit \
+  -o "$APP_PATH/Contents/MacOS/TaskboardHelper" \
+  "$PROJECT_ROOT/macos/TaskboardHelper.swift"
+/bin/cp -R "$PROJECT_ROOT"/core/* "$APP_PATH/Contents/Resources/runtime/core/"
+/bin/cp -R "$PROJECT_ROOT"/taskboard/* "$APP_PATH/Contents/Resources/runtime/taskboard/"
+/bin/cp "$PROJECT_ROOT/scripts/start" "$APP_PATH/Contents/Resources/runtime/scripts/start"
+/bin/cp "$PROJECT_ROOT/scripts/mcp-server" "$APP_PATH/Contents/Resources/runtime/scripts/mcp-server"
+/bin/cp "$PROJECT_ROOT/scripts/token-regression" "$APP_PATH/Contents/Resources/runtime/scripts/token-regression"
+/bin/cp -R "$PROJECT_ROOT"/skills/* "$APP_PATH/Contents/Resources/runtime/skills/"
+/bin/cp -R "$PROJECT_ROOT"/static/* "$APP_PATH/Contents/Resources/runtime/static/"
+"$UV_BIN" pip install \
+  --target "$APP_PATH/Contents/Resources/runtime/vendor" \
+  --require-hashes \
+  --python-version 3.9.25 \
+  --python-platform macos \
+  --only-binary :all: \
+  --no-deps \
+  -r "$PROJECT_ROOT/requirements.lock"
+/bin/chmod 755 \
+  "$APP_PATH/Contents/MacOS/TaskboardHelper" \
+  "$APP_PATH/Contents/Resources/runtime/scripts/start" \
+  "$APP_PATH/Contents/Resources/runtime/scripts/mcp-server" \
+  "$APP_PATH/Contents/Resources/runtime/scripts/token-regression"
+/usr/bin/find "$APP_PATH" -type d -name __pycache__ -prune -exec /bin/rm -rf {} +
+/usr/bin/codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" "$APP_PATH" >/dev/null
+/usr/bin/codesign --verify --deep --strict "$APP_PATH"
+
+echo "Built: $APP_PATH"
+
+if [ "$INSTALL" = true ]; then
+  DATA_HOME=${CODEX_TASKBOARD_HOME:-"$HOME/Library/Application Support/Codex Taskboard"}
+  INSTALL_PATH="$DATA_HOME/$APP_NAME"
+  HELPER_LABEL="local.sanmws.codex-taskboard-helper"
+  LAUNCH_AGENT="$HOME/Library/LaunchAgents/$HELPER_LABEL.plist"
+  /bin/mkdir -p "$DATA_HOME"
+  case "$INSTALL_PATH" in
+    "$HOME"/Library/Application\ Support/Codex\ Taskboard/"$APP_NAME") ;;
+    *)
+      echo "Refusing to replace unexpected helper install path: $INSTALL_PATH" >&2
+      exit 1
+      ;;
+  esac
+
+  SERVICE_DOMAIN="gui/$(/usr/bin/id -u)"
+  SERVICE_LABEL="com.codex-taskboard.server"
+  if /bin/launchctl print "$SERVICE_DOMAIN/$SERVICE_LABEL" >/dev/null 2>&1; then
+    /bin/launchctl bootout "$SERVICE_DOMAIN/$SERVICE_LABEL"
+  fi
+  if /bin/launchctl print "$SERVICE_DOMAIN/$HELPER_LABEL" >/dev/null 2>&1; then
+    /bin/launchctl bootout "$SERVICE_DOMAIN/$HELPER_LABEL"
+  fi
+
+  if [ -x "$INSTALL_PATH/Contents/MacOS/TaskboardHelper" ]; then
+    /usr/bin/open -g "codex-taskboard-helper://quit" >/dev/null 2>&1 || true
+    /bin/sleep 1
+  fi
+  /bin/rm -rf "$INSTALL_PATH"
+  /usr/bin/ditto "$APP_PATH" "$INSTALL_PATH"
+  /usr/bin/codesign --verify --deep --strict "$INSTALL_PATH"
+  LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+  if [ -x "$LSREGISTER" ]; then
+    "$LSREGISTER" -f "$INSTALL_PATH"
+  fi
+
+  /bin/mkdir -p "$HOME/Library/LaunchAgents" "$DATA_HOME/logs"
+  TEMP_AGENT=$(/usr/bin/mktemp "$DATA_HOME/.helper-launch-agent.XXXXXX")
+  /usr/bin/plutil -create xml1 "$TEMP_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :Label string $HELPER_LABEL" "$TEMP_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :ProgramArguments array" "$TEMP_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :ProgramArguments:0 string $INSTALL_PATH/Contents/MacOS/TaskboardHelper" "$TEMP_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :RunAtLoad bool true" "$TEMP_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :KeepAlive bool true" "$TEMP_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :ProcessType string Interactive" "$TEMP_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :StandardOutPath string $DATA_HOME/logs/helper.out.log" "$TEMP_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :StandardErrorPath string $DATA_HOME/logs/helper.err.log" "$TEMP_AGENT"
+  /bin/mv "$TEMP_AGENT" "$LAUNCH_AGENT"
+  /bin/chmod 600 "$LAUNCH_AGENT"
+  /bin/launchctl bootstrap "$SERVICE_DOMAIN" "$LAUNCH_AGENT"
+  /bin/launchctl kickstart -k "$SERVICE_DOMAIN/$HELPER_LABEL"
+  echo "Installed and launched: $INSTALL_PATH"
+fi

@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+data/*.db
+data/*.db-shm
+data/*.db-wal
+.mcp.json
+.DS_Store
+dist/
+e2e-workspaces/
+Taskboard Helper.app/
+web/node_modules/

@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PROJECT_DIR=$(dirname "$SCRIPT_DIR")
+cd "$PROJECT_DIR"
+
+PYTHON_BIN=${CODEX_TASKBOARD_PYTHON_BIN:-}
+if [ -z "$PYTHON_BIN" ] && [ -x /opt/homebrew/bin/python3 ]; then
+  PYTHON_BIN=/opt/homebrew/bin/python3
+fi
+if [ -z "$PYTHON_BIN" ]; then
+  PYTHON_BIN=$(command -v python3 || true)
+fi
+if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
+  echo "Codex Taskboard requires Python 3.9 or newer" >&2
+  exit 1
+fi
+if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)'; then
+  echo "Codex Taskboard requires Python 3.9 or newer" >&2
+  exit 1
+fi
+
+VENDOR_DIR="$PROJECT_DIR/vendor"
+if [ -d "$VENDOR_DIR" ]; then
+  PYTHONPATH="$VENDOR_DIR${PYTHONPATH:+:$PYTHONPATH}"
+  export PYTHONPATH
+fi
+
+exec "$PYTHON_BIN" -B -m taskboard.mcp_server

@@ -1,0 +1,7 @@
+[project]
+name = "codex-taskboard"
+version = "0.4.0"
+requires-python = ">=3.9"
+dependencies = [
+    "tomli==2.4.1; python_version < '3.11'",
+]
