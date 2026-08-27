@@ -139,6 +139,55 @@ class MacosHelperTest(unittest.TestCase):
             self.assertIn('VENDOR_DIR="$PROJECT_DIR/vendor"', script)
             self.assertIn(f'exec "$PYTHON_BIN" -B -m {module}', script)
 
+    def test_mcp_server_enables_installed_helper_authorization_guard(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="TaskboardMcpGuard") as temporary:
+            home = Path(temporary)
+            data_home = home / "Taskboard Data"
+            helper = data_home / "Taskboard Helper.app" / "Contents" / "MacOS" / "TaskboardHelper"
+            helper.parent.mkdir(parents=True)
+            helper.write_text("#!/bin/sh\n", encoding="utf-8")
+            helper.chmod(0o755)
+
+            capture = home / "environment.json"
+            python = home / "python3"
+            python.write_text(
+                "#!/bin/sh\n"
+                "if [ \"${1:-}\" = \"-c\" ]; then exit 0; fi\n"
+                "python3 - <<'PY'\n"
+                "import json, os\n"
+                "from pathlib import Path\n"
+                "Path(os.environ['CAPTURE_PATH']).write_text(json.dumps({\n"
+                "    'home': os.environ.get('CODEX_TASKBOARD_HOME'),\n"
+                "    'helper': os.environ.get('CODEX_TASKBOARD_HELPER_APP'),\n"
+                "}))\n"
+                "PY\n",
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "HOME": str(home),
+                    "CODEX_TASKBOARD_HOME": str(data_home),
+                    "CODEX_TASKBOARD_PYTHON_BIN": str(python),
+                    "CAPTURE_PATH": str(capture),
+                }
+            )
+            environment.pop("CODEX_TASKBOARD_HELPER_APP", None)
+
+            subprocess.run(
+                ["/bin/sh", str(ROOT / "scripts" / "mcp-server")],
+                cwd=ROOT,
+                env=environment,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            payload = json.loads(capture.read_text(encoding="utf-8"))
+            self.assertEqual(str(data_home), payload["home"])
+            self.assertEqual(str(data_home / "Taskboard Helper.app"), payload["helper"])
+
     def test_helper_supplies_stable_launch_agent_tool_paths(self) -> None:
         source = (ROOT / "macos" / "TaskboardHelper.swift").read_text()
         self.assertIn('"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"', source)

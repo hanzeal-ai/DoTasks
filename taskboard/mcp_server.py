@@ -220,7 +220,7 @@ TOOLS = [
     },
     {
         "name": "submit_task_delivery",
-        "description": "Submit an execution run's compact delivery summary and verification result, then move the task to review.",
+        "description": "Submit an execution run's compact delivery summary and verification result, then move the task to review. Validation failures leave the run active: correct changed_locations from RUN_CONTEXT_JSON and retry instead of reporting the run blocked.",
         "inputSchema": {
             "type": "object",
             "properties": {

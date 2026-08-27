@@ -18,10 +18,12 @@ description: Run only an explicitly invoked Codex Taskboard development, rework,
 2. Start with `target_snippet` when present, then use `located_targets`, `implementation_steps`, and `acceptance_commands`. Each current `acceptance_commands` entry groups one check with its `criteria`: run that check once and retain criterion-level evidence for every nested item. For a legacy flat snapshot, treat its top-level `criterion` as a single nested item and still run identical commands only once. The snippet is a bounded starting point, not permission to skip needed context: read the complete target file or direct dependencies whenever correctness requires it.
 3. Verify the snippet hash against the current target before relying on it. If the target moved or the saved lock is stale, stop for a new bounded location analysis instead of searching tool registries or scanning the whole project.
 4. Execution tasks already enter `implementing` when claimed. Implement only the confirmed scope and run relevant verification.
-5. Call `submit_task_delivery` with exact changed files and symbols, criterion-level evidence, a compact delivery summary, and verification results. Stop for a new bounded location analysis if legitimate work falls outside the saved target lock.
+5. Before delivery, preflight every `changed_locations` entry against `RUN_CONTEXT_JSON.located_targets`: every file must be locked and every submitted symbol must be an exact saved symbol for that file. Match actual changed declarations to saved target names; do not infer symbols from diff-hunk context or a neighboring declaration. For a newly added declaration, use its declared name as saved in the lock. Then call `submit_task_delivery` with exact changed files and symbols, criterion-level evidence, a compact delivery summary, and verification results. Stop for a new bounded location analysis only when legitimate work actually falls outside the saved target lock.
 6. Put decisions, verification, and remaining risk in the compact `submit_task_delivery` summary; do not make a second summary tool call.
 
-If investigation reveals a major scope decision, call `report_run_blocked` with `waiting_confirmation`. If execution cannot continue, call it with `blocked` and a concrete reason.
+Delivery contract validation errors are recoverable and leave the run active. When `submit_task_delivery` reports submitted and allowed locations or symbols, correct the arguments and retry the same run; never call `report_run_blocked` for a correctable delivery payload mismatch.
+
+If investigation reveals a major scope decision, call `report_run_blocked` with `waiting_confirmation`. If execution cannot continue after recoverable validation issues have been corrected, call it with `blocked` and a concrete reason.
 
 ## Code Review
 

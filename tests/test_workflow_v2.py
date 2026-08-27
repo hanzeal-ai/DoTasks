@@ -192,8 +192,29 @@ class WorkflowV2Test(unittest.TestCase):
         )
         self.assertEqual("code_review", delivery["task"]["status"])
         second_review = self.service.claim_next_code_review_task("reviewer")
-        self.service.bind_conversation(task["id"], "code_review", "review-thread-2", second_review["run"]["id"])
+        self.assertEqual("review-thread", second_review["resume_thread_id"])
+        self.assertNotEqual(review["run"]["id"], second_review["run"]["id"])
+        self.service.bind_conversation(task["id"], "code_review", "review-thread", second_review["run"]["id"])
+        with self.service.db.connection() as connection:
+            review_runs = connection.execute(
+                """SELECT runs.id, runs.delivery_run_id, runs.attempt, runs.status, mapping.thread_id
+                   FROM task_runs runs
+                   JOIN task_run_conversations mapping ON mapping.run_id=runs.id
+                   WHERE runs.task_id=? AND runs.run_type='code_review'
+                   ORDER BY runs.attempt""",
+                (task["id"],),
+            ).fetchall()
+        self.assertEqual(2, len(review_runs))
+        self.assertEqual(2, len({row["id"] for row in review_runs}))
+        self.assertEqual(2, len({row["delivery_run_id"] for row in review_runs}))
+        self.assertEqual(2, len({row["attempt"] for row in review_runs}))
+        self.assertEqual({"review-thread"}, {row["thread_id"] for row in review_runs})
+        self.assertEqual("completed", review_runs[0]["status"])
+        self.assertEqual("running", review_runs[1]["status"])
         self.service.review_code(task["id"], second_review["run"]["id"], "pass", passed_items=["遵守项目规范"])
+        reviews = self.service.list_reviews(task["id"])
+        self.assertEqual([1, 2], [item["round"] for item in reviews])
+        self.assertEqual(["fail", "pass"], [item["verdict"] for item in reviews])
         acceptance = self.service.claim_next_acceptance_task("acceptance")
         self.service.bind_conversation(task["id"], "acceptance", "acceptance-thread", acceptance["run"]["id"])
         completed = self.service.accept_task(

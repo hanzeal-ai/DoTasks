@@ -98,6 +98,19 @@ export function formatTokenCount(value) {
   return Math.max(0, Number(value) || 0).toLocaleString("zh-CN");
 }
 
+export function formatMetricTokenCount(value) {
+  const count = Math.max(0, Number(value) || 0);
+  const unit = count >= 1_000_000_000
+    ? [1_000_000_000, "B"]
+    : count >= 1_000_000
+      ? [1_000_000, "M"]
+      : count >= 1_000
+        ? [1_000, "K"]
+        : null;
+  if (!unit) return String(count);
+  return `${Number((count / unit[0]).toFixed(1))}${unit[1]}`;
+}
+
 export function formatCompactTokenCount(value) {
   return new Intl.NumberFormat("zh-CN", {notation:"compact", maximumFractionDigits:1}).format(Math.max(0, Number(value) || 0));
 }

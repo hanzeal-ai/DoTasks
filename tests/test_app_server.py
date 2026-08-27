@@ -230,6 +230,7 @@ class TaskboardCodexHomeTest(unittest.TestCase):
 
             environment = popen.call_args.kwargs["env"]
             self.assertEqual(str(python_home.resolve()), environment["PATH"].split(os.pathsep)[0])
+            self.assertIn("/usr/local/go/bin", environment["PATH"].split(os.pathsep))
 
     def test_app_server_initialize_does_not_retry_protocol_errors(self):
         client = CodexAppServerClient(executable=__file__)

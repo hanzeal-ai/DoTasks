@@ -44,6 +44,32 @@ if (guard.isCurrent(second, "project-b")) throw new Error("invalidated request r
 """)
         self.assertEqual(0, completed.returncode, completed.stderr)
 
+    def test_metric_token_count_uses_compact_english_units(self):
+        completed = self.run_module_script("""
+const cases = new Map([
+  [0, "0"],
+  [1000, "1K"],
+  [30_885_482, "30.9M"],
+  [2_200_000_000, "2.2B"],
+]);
+for (const [value, expected] of cases) {
+  const actual = module.formatMetricTokenCount(value);
+  if (actual !== expected) throw new Error(`${value} formatted as ${actual}, expected ${expected}`);
+}
+""")
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
+    def test_only_period_token_cards_use_metric_formatting(self):
+        app = (WEB_SOURCE / "legacy-app.js").read_text(encoding="utf-8")
+        period_summary = app.split(
+            'return `<div class="token-summary token-period-summary">', 1
+        )[1].split('</div><div class="token-chart-grid">', 1)[0]
+        for period in ("today", "week", "month"):
+            self.assertIn(f"formatMetricTokenCount(periods.{period})", period_summary)
+        self.assertEqual(3, period_summary.count("formatMetricTokenCount("))
+        self.assertIn("formatTokenCount(item.value)", app)
+        self.assertIn("formatTokenCount(metric.token_used)", app)
+
     def test_json_client_handles_html_errors_and_only_sets_content_type_for_bodies(self):
         completed = self.run_module_script("""
 let getOptions;

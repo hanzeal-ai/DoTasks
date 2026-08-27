@@ -178,7 +178,9 @@ Helper 安装在：
 http://127.0.0.1:8765
 ```
 
-开发时仍可直接运行 `./scripts/start`，此模式不启用打包态的 Helper 授权闸门。
+开发时仍可直接运行 `./scripts/start`，此模式不启用打包态的 Helper 授权闸门。插件 MCP
+入口会自动检测已安装的 Helper，并启用同一份逐项目书签校验，避免 MCP 与独立 App
+分别维护出“已登记但未授权”的项目状态。
 
 默认构建使用 ad-hoc 签名和 hardened runtime；如有长期稳定的 macOS 代码签名证书，可通过 `CODEX_TASKBOARD_CODESIGN_IDENTITY` 指定签名身份后重新安装。
 

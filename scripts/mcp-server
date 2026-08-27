@@ -26,4 +26,17 @@ if [ -d "$VENDOR_DIR" ]; then
   export PYTHONPATH
 fi
 
+# The MCP process is launched by Codex rather than by Taskboard Helper, so it
+# does not inherit the Helper environment. Detect the installed Helper and
+# opt into the same bookmark guard used by the packaged HTTP service. This
+# prevents MCP-created tasks from registering projects that the Helper has
+# never authorized through the macOS folder picker.
+TASKBOARD_DATA_HOME=${CODEX_TASKBOARD_HOME:-"$HOME/Library/Application Support/Codex Taskboard"}
+TASKBOARD_HELPER_APP=${CODEX_TASKBOARD_HELPER_APP:-"$TASKBOARD_DATA_HOME/Taskboard Helper.app"}
+if [ -x "$TASKBOARD_HELPER_APP/Contents/MacOS/TaskboardHelper" ]; then
+  CODEX_TASKBOARD_HOME=$TASKBOARD_DATA_HOME
+  CODEX_TASKBOARD_HELPER_APP=$TASKBOARD_HELPER_APP
+  export CODEX_TASKBOARD_HOME CODEX_TASKBOARD_HELPER_APP
+fi
+
 exec "$PYTHON_BIN" -B -m taskboard.mcp_server

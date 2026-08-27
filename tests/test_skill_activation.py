@@ -22,6 +22,9 @@ class SkillActivationTest(unittest.TestCase):
         self.assertIn("$codex-taskboard-lifecycle", lifecycle_skill)
         self.assertIn("TASK-*", lifecycle_skill)
         self.assertIn("RUN-*", lifecycle_skill)
+        self.assertIn("preflight every `changed_locations` entry", lifecycle_skill)
+        self.assertIn("retry the same run", lifecycle_skill)
+        self.assertIn("never call `report_run_blocked`", lifecycle_skill)
         self.assertIn("Do not use", manual_skill.split("---", 2)[1])
 
     def test_new_task_skill_keeps_management_details_progressive(self):

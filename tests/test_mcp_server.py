@@ -34,6 +34,10 @@ class TaskboardMcpServerTest(unittest.TestCase):
         self.assertNotIn(
             "token_used", tools["submit_task_delivery"]["inputSchema"]["properties"],
         )
+        self.assertIn(
+            "retry instead of reporting the run blocked",
+            tools["submit_task_delivery"]["description"],
+        )
         self.assertEqual(
             ["waiting_confirmation", "blocked"],
             tools["report_run_blocked"]["inputSchema"]["properties"]["status"]["enum"],

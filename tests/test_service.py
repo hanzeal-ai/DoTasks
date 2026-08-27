@@ -1222,6 +1222,54 @@ class TaskboardServiceTest(unittest.TestCase):
                 [{"criterion": criterion, "evidence": "passed"} for criterion in task["acceptance_criteria"]],
             )
 
+    def test_delivery_symbol_mismatch_is_actionable_and_retriable(self):
+        task = self.create_located_task({
+            "title": "新增 Token 格式化函数",
+            "project": str(self.example_project),
+            "goal": "新增紧凑格式化函数",
+            "scope": ["新增 formatMetricTokenCount"],
+            "out_of_scope": [],
+            "acceptance_criteria": ["格式化函数可用"],
+        }, [{
+            "file": "web/src/ui-core.js",
+            "symbols": ["formatMetricTokenCount"],
+            "reason": "new formatter",
+        }])
+        dispatched = self.service.claim_next_task("worker", task["project"])
+        run = dispatched["run"]
+        self.service.bind_conversation(task["id"], "execution", "thread", run["id"])
+        self.service.transition_task(task["id"], "implementing")
+
+        with self.assertRaises(ValueError) as raised:
+            self.service.submit_delivery(
+                run["id"], "done", "tests passed",
+                [{
+                    "file": "web/src/ui-core.js",
+                    "symbols": ["formatCompactTokenCount"],
+                    "summary": "changed",
+                }],
+                [{"criterion": "格式化函数可用", "evidence": "passed"}],
+            )
+
+        message = str(raised.exception)
+        self.assertIn('submitted=["formatCompactTokenCount"]', message)
+        self.assertIn('allowed=["formatMetricTokenCount"]', message)
+        self.assertIn("retry the same active run", message)
+        self.assertEqual("implementing", self.service.get_task(task["id"])["status"])
+        self.assertEqual("running", self.service.get_run(run["id"])["status"])
+
+        delivered = self.service.submit_delivery(
+            run["id"], "done", "tests passed",
+            [{
+                "file": "web/src/ui-core.js",
+                "symbols": ["formatMetricTokenCount"],
+                "summary": "changed",
+            }],
+            [{"criterion": "格式化函数可用", "evidence": "passed"}],
+        )
+        self.assertEqual("review", delivered["task"]["status"])
+        self.assertEqual("waiting_review", delivered["run"]["status"])
+
     def test_expired_location_report_is_stale(self):
         project = str(self.example_project)
         self.service.report_location_status(

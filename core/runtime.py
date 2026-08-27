@@ -10,6 +10,8 @@ from typing import Mapping
 DEFAULT_TOOL_DIRECTORIES = (
     "/opt/homebrew/bin",
     "/usr/local/bin",
+    "/usr/local/go/bin",
+    "/opt/homebrew/opt/go/libexec/bin",
     "/usr/bin",
     "/bin",
     "/usr/sbin",
@@ -49,6 +51,7 @@ def project_runtime_environment(
 
     home = Path(environment.get("HOME") or Path.home()).expanduser()
     _prepend_unique(directories, home / ".local" / "bin")
+    _prepend_unique(directories, home / "go" / "bin")
     nvm_bins = sorted(
         (path for path in (home / ".nvm" / "versions" / "node").glob("*/bin") if path.is_dir()),
         key=_nvm_version_key,

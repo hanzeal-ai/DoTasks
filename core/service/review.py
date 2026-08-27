@@ -31,7 +31,13 @@ class TaskReviewMixin:
             allowed_symbols = locked[file]
             submitted_symbols = {str(value).strip() for value in location.get("symbols", []) if str(value).strip()}
             if "" not in allowed_symbols and (not submitted_symbols or not submitted_symbols.issubset(allowed_symbols)):
-                raise ValueError(f"Changed symbols are outside the task target lock: {file}")
+                raise ValueError(
+                    f"Changed symbols are outside the task target lock: {file}; "
+                    f"submitted={json.dumps(sorted(submitted_symbols), ensure_ascii=False)}; "
+                    f"allowed={json.dumps(sorted(allowed_symbols), ensure_ascii=False)}. "
+                    "Use the exact symbols from RUN_CONTEXT_JSON.located_targets "
+                    "and retry the same active run."
+                )
 
     def _validate_workspace_delta(
         self, task: dict[str, Any], run: dict[str, Any], changed_locations: list[dict[str, Any]],

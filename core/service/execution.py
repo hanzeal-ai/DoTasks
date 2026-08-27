@@ -977,10 +977,9 @@ class TaskLifecycleMixin:
                 """SELECT mapping.thread_id FROM task_run_conversations mapping
                    JOIN task_runs prior ON prior.id=mapping.run_id
                    WHERE prior.task_id=? AND prior.run_type='code_review'
-                     AND prior.delivery_run_id=? AND prior.status IN ('interrupted','expired')
                      AND mapping.thread_id IS NOT NULL AND trim(mapping.thread_id)!=''
-                   ORDER BY prior.attempt DESC, prior.created_at DESC LIMIT 1""",
-                (task["id"], delivery["id"]),
+                   ORDER BY prior.attempt, prior.created_at LIMIT 1""",
+                (task["id"],),
             ).fetchone()
             attempt = connection.execute(
                 "SELECT COALESCE(MAX(attempt),0)+1 value FROM task_runs WHERE task_id=?",

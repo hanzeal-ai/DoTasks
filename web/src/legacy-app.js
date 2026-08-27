@@ -4,6 +4,7 @@ import {
   expandTaskboardSlashCommand,
   formatCompactTokenCount,
   formatDuration,
+  formatMetricTokenCount,
   formatTimestamp,
   formatTokenCount,
   LatestRequest,
@@ -441,7 +442,7 @@ function renderTokenCharts(tasks) {
     title: project,
     value,
   }));
-  return `<div class="token-summary token-period-summary"><article><span>当天 Token</span><strong>${formatTokenCount(periods.today)}</strong></article><article><span>本周 Token</span><strong>${formatTokenCount(periods.week)}</strong></article><article><span>本月 Token</span><strong>${formatTokenCount(periods.month)}</strong></article></div><div class="token-chart-grid"><article class="token-chart-card token-trend-card"><div class="token-chart-head"><div><span>使用趋势</span><h2>本月每日 Token</h2></div><small>按 Token 增量记录时间统计</small></div>${renderTokenTrend(analytics.daily || [])}</article><article class="token-chart-card"><div class="token-chart-head"><div><span>任务排行</span><h2>${taskUsage.length > 10 ? "Token 消耗前 10 任务" : "各任务 Token 使用量"}</h2></div><small>${taskUsage.length > 10 ? `共 ${taskUsage.length} 个已记录任务` : "按总使用量降序"}</small></div>${renderTokenBarList(topTasks, "暂无任务 Token 记录")}</article><article class="token-chart-card"><div class="token-chart-head"><div><span>项目分布</span><h2>各项目 Token 使用量</h2></div><small>按任务所属项目汇总</small></div>${renderTokenBarList(projects, "暂无项目 Token 记录")}</article></div>`;
+  return `<div class="token-summary token-period-summary"><article><span>当天 Token</span><strong>${formatMetricTokenCount(periods.today)}</strong></article><article><span>本周 Token</span><strong>${formatMetricTokenCount(periods.week)}</strong></article><article><span>本月 Token</span><strong>${formatMetricTokenCount(periods.month)}</strong></article></div><div class="token-chart-grid"><article class="token-chart-card token-trend-card"><div class="token-chart-head"><div><span>使用趋势</span><h2>本月每日 Token</h2></div><small>按 Token 增量记录时间统计</small></div>${renderTokenTrend(analytics.daily || [])}</article><article class="token-chart-card"><div class="token-chart-head"><div><span>任务排行</span><h2>${taskUsage.length > 10 ? "Token 消耗前 10 任务" : "各任务 Token 使用量"}</h2></div><small>${taskUsage.length > 10 ? `共 ${taskUsage.length} 个已记录任务` : "按总使用量降序"}</small></div>${renderTokenBarList(topTasks, "暂无任务 Token 记录")}</article><article class="token-chart-card"><div class="token-chart-head"><div><span>项目分布</span><h2>各项目 Token 使用量</h2></div><small>按任务所属项目汇总</small></div>${renderTokenBarList(projects, "暂无项目 Token 记录")}</article></div>`;
 }
 
 function renderTokenDetails(tasks) {

@@ -241,6 +241,17 @@ class CodexWorkspaceServiceTest(unittest.TestCase):
                 "INSERT INTO task_conversations(task_id, role, thread_id, title) VALUES('TASK-0001', ?, ?, '历史长标题')",
                 [(role, thread_id) for thread_id, role in roles],
             )
+            connection.executemany(
+                """INSERT INTO task_runs(
+                       id, task_id, run_type, attempt, status, lease_token, lease_expires_at
+                   ) VALUES(?, 'TASK-0001', 'code_review', ?, 'completed', ?, CURRENT_TIMESTAMP)""",
+                (("RUN-0001", 1, "lease-1"), ("RUN-0002", 2, "lease-2")),
+            )
+            connection.executemany(
+                """INSERT INTO task_run_conversations(run_id, task_id, role, thread_id, status)
+                   VALUES(?, 'TASK-0001', 'code_review', 'thread-review', 'completed')""",
+                (("RUN-0001",), ("RUN-0002",)),
+            )
         client = FakeCodexClient([
             {"id": thread_id, "cwd": str(self.project_a), "name": "任务 TASK-0001：历史长标题"}
             for thread_id, _ in roles
@@ -251,6 +262,7 @@ class CodexWorkspaceServiceTest(unittest.TestCase):
 
         self.assertEqual({"TASK-001"}, {thread["groupName"] for thread in threads})
         self.assertEqual({"开发", "Review", "验收"}, {thread["displayName"] for thread in threads})
+        self.assertEqual(1, [thread["displayName"] for thread in threads].count("Review"))
         self.assertEqual("Review", workspace.read_thread("thread-review")["displayName"])
 
     def test_start_turn_refuses_an_active_thread(self):
