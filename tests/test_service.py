@@ -4,10 +4,12 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from core.db import Database
 from core.service import TaskboardService
@@ -1539,6 +1541,34 @@ class TaskboardServiceTest(unittest.TestCase):
         )
         self.assertEqual("done", done["status"])
         self.assertEqual(4, len(self.service.list_acceptance_checks(task["id"])))
+
+    def test_automated_acceptance_uses_project_python_when_server_path_has_no_python(self):
+        task = self.submit_delivery(self.create_ready_task(), "project-python-acceptance")
+        claim = self.service.claim_next_review_task("reviewer", task["project"])
+        analysis_id = claim["run"]["context_snapshot"]["review_location_analysis_id"]
+        completed = self.service.complete_location_analysis(
+            analysis_id, {"query": "impact", "files": ["src/APage.tsx"]},
+            [{"file": "src/APage.tsx", "symbols": ["APage"]}],
+            [{
+                "criterion": criterion, "file": "src/APage.tsx", "symbol": "APage",
+                "method": "automated check", "check_type": "automated",
+                "command": "python -c 'import sys; assert sys.version_info >= (3, 9)'",
+                "expected": "project Python runs",
+            } for criterion in task["acceptance_criteria"]],
+        )
+        prepared = self.service.prepare_review_run(task["id"], completed["id"])
+        self.service.bind_conversation(
+            task["id"], "review", "project-python-review", prepared["run"]["id"],
+        )
+        python_bin = self.example_project / ".venv" / "bin" / "python"
+        python_bin.parent.mkdir(parents=True)
+        python_bin.symlink_to(sys.executable)
+
+        with patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}):
+            checks = self.service.run_acceptance_checks(task["id"], prepared["run"]["id"])
+
+        self.assertTrue(checks["all_required_passed"])
+        self.assertEqual(["passed", "passed"], [item["status"] for item in checks["checks"]])
 
     def test_run_conversation_role_must_match_run_type(self):
         task = self.create_ready_task()

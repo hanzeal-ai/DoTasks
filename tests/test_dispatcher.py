@@ -280,7 +280,7 @@ class TaskDispatcherTest(unittest.TestCase):
             client = FakeClient()
             dispatcher = TaskDispatcher(service, client=client)
             dispatcher.dispatch_once()
-            dispatcher._active_runs["thread-123"]["last_renewed"] = 0
+            dispatcher._active_runs["thread-123"]["last_renewed"] = time.monotonic() - 61
             dispatcher.dispatch_once()
             self.assertEqual([("RUN-0001", "lease-1", 1800)], service.renewals)
 

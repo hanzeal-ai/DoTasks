@@ -207,6 +207,30 @@ class TaskboardCodexHomeTest(unittest.TestCase):
         stop.assert_called_once_with()
         sleep.assert_called_once()
 
+    def test_app_server_worker_inherits_project_virtual_environment(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            python_home = project / ".venv" / "bin"
+            python_home.mkdir(parents=True)
+            (python_home / "python").touch(mode=0o755)
+            client = CodexAppServerClient(executable=__file__, project=project)
+            process = SimpleNamespace(
+                poll=lambda: None,
+                stdin=io.StringIO(),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            with (
+                patch("taskboard.app_server.subprocess.Popen", return_value=process) as popen,
+                patch("taskboard.app_server.threading.Thread"),
+                patch.object(client, "request"),
+                patch.object(client, "notify"),
+            ):
+                client._start_connection(project / "codex-home")
+
+            environment = popen.call_args.kwargs["env"]
+            self.assertEqual(str(python_home.resolve()), environment["PATH"].split(os.pathsep)[0])
+
     def test_app_server_initialize_does_not_retry_protocol_errors(self):
         client = CodexAppServerClient(executable=__file__)
         with (

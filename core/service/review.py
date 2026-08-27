@@ -8,6 +8,8 @@ import uuid
 from collections import Counter
 from typing import Any
 
+from ..runtime import project_runtime_environment
+
 
 class TaskReviewMixin:
     """Delivery validation, automated checks, review decisions, and acceptance records."""
@@ -331,6 +333,7 @@ class TaskReviewMixin:
                 completed = subprocess.run(
                     command,
                     cwd=task["project"],
+                    env=project_runtime_environment(task["project"]),
                     shell=True,
                     executable="/bin/zsh",
                     capture_output=True,

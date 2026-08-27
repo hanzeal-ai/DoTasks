@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from core.runtime import project_runtime_environment
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.9 and 3.10
@@ -309,6 +311,7 @@ class CodexAppServerClient:
         taskboard_runtime_home: str | Path | None = None,
         taskboard_data_home: str | Path | None = None,
         tool_profile: str = "",
+        project: str | Path | None = None,
     ):
         default = "/Applications/ChatGPT.app/Contents/Resources/codex"
         self.executable = (
@@ -344,6 +347,7 @@ class CodexAppServerClient:
             else self.codex_home.parent
         )
         self.tool_profile = str(tool_profile or "").strip()
+        self.project = Path(project).expanduser().resolve() if project else None
         self.process: subprocess.Popen[str] | None = None
         self._reader: threading.Thread | None = None
         self._stderr_reader: threading.Thread | None = None
@@ -391,7 +395,7 @@ class CodexAppServerClient:
                 time.sleep(APP_SERVER_INITIALIZE_RETRY_DELAY_SECONDS)
 
     def _start_connection(self, isolated_home: Path) -> None:
-        environment = os.environ.copy()
+        environment = project_runtime_environment(self.project)
         environment["CODEX_HOME"] = str(isolated_home)
         if self.tool_profile:
             environment["CODEX_TASKBOARD_TOOL_PROFILE"] = self.tool_profile

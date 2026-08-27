@@ -105,7 +105,9 @@ class TaskDispatcher:
             "last_error": self.last_error,
         }
 
-    def _new_client(self, tool_profile: str = "") -> CodexAppServerClient:
+    def _new_client(
+        self, tool_profile: str = "", project: str | Path | None = None,
+    ) -> CodexAppServerClient:
         if self._injected_client is not None:
             return self._injected_client
         return CodexAppServerClient(
@@ -113,6 +115,7 @@ class TaskDispatcher:
             taskboard_runtime_home=self.service.package_home,
             taskboard_data_home=self.service.data_home,
             tool_profile=tool_profile,
+            project=project,
         )
 
     @staticmethod
@@ -356,9 +359,10 @@ class TaskDispatcher:
             client: CodexAppServerClient | None = None
             try:
                 resume_thread_id = str(claim.get("resume_thread_id") or "")
-                client = self._new_client(self._tool_profile_for_run(
-                    run["run_type"], task, resume_thread_id,
-                ))
+                client = self._new_client(
+                    self._tool_profile_for_run(run["run_type"], task, resume_thread_id),
+                    project,
+                )
                 client.start()
                 if resume_thread_id:
                     try:
