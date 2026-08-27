@@ -359,6 +359,9 @@ class TaskboardServiceTest(unittest.TestCase):
         )
         checks = review["run"]["context_snapshot"]["review_checks"]
         self.assertIn("delivery", review["run"]["context_snapshot"])
+        self.assertNotIn("diff", review["run"]["context_snapshot"]["delivery"])
+        self.assertIn("diff_scope", review["run"]["context_snapshot"])
+        self.assertIn("git diff", review["dispatch_prompt"])
         reviewed = self.service.review_code(
             owner["id"], review["run"]["id"], "pass", passed_items=checks
         )
@@ -1470,6 +1473,44 @@ class TaskboardServiceTest(unittest.TestCase):
             self.service.transition_task(
                 task["id"], "ready", token_budget=task["token_budget"] * 2,
             )
+
+    def test_stage_budget_preflight_pauses_before_creating_run(self):
+        task = self.create_ready_task()
+        with self.service.db.transaction() as connection:
+            connection.execute(
+                "UPDATE tasks SET effective_token_used=? WHERE id=?",
+                (task["token_budget"] - 1, task["id"]),
+            )
+        with self.service.db.connection() as connection:
+            before = connection.execute(
+                "SELECT COUNT(*) count FROM task_runs WHERE task_id=?", (task["id"],)
+            ).fetchone()["count"]
+
+        self.assertIsNone(self.service.claim_next_task("worker", task["project"]))
+
+        paused = self.service.get_task(task["id"])
+        self.assertEqual("waiting_confirmation", paused["status"])
+        self.assertFalse(paused["auto_dispatch"])
+        self.assertIn("阶段预算预检未通过", paused["last_failure_reason"])
+        with self.service.db.connection() as connection:
+            after = connection.execute(
+                "SELECT COUNT(*) count FROM task_runs WHERE task_id=?", (task["id"],)
+            ).fetchone()["count"]
+        self.assertEqual(before, after)
+
+    def test_visual_reference_is_copied_into_managed_artifacts(self):
+        source = Path(self.temp.name) / "temporary-reference.png"
+        source.write_bytes(b"png-reference")
+
+        managed = self.service._manage_visual_references(
+            "LOC-visual", [{"path": str(source), "purpose": "match selector layout"}]
+        )
+
+        self.assertEqual(1, len(managed))
+        self.assertTrue(managed[0]["artifact_id"].startswith("artifact://intake/LOC-visual/"))
+        self.assertTrue(Path(managed[0]["path"]).is_file())
+        source.unlink()
+        self.assertTrue(Path(managed[0]["path"]).is_file())
 
     def test_creation_rejects_acceptance_plan_mismatch_without_consuming_location(self):
         payload = {

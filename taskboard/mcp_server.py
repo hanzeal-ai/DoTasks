@@ -70,7 +70,7 @@ TOOLS = [
                     "targets": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"file": {"type": "string", "minLength": 1}, "symbols": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}}, "required": ["file", "symbols"]}},
                     "ordered_steps": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"file": {"type": "string", "minLength": 1}, "symbol": {"type": "string", "minLength": 1}, "action": {"type": "string", "minLength": 1}}, "required": ["file", "symbol", "action"]}}
                 }, "required": ["targets", "ordered_steps"]},
-                "review_contract": {"type": "object", "description": "v2 requires code-review checks. Acceptance reuses the review session unless separate_acceptance_session is true.", "properties": {"checks": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "separate_acceptance_session": {"type": "boolean", "default": False}}, "required": ["checks"]},
+                "review_contract": {"type": "object", "description": "v2 code/static review only; functional, runtime, and visual checks belong in acceptance_plan.", "properties": {"checks": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"id": {"type": "string", "minLength": 1}, "description": {"type": "string", "minLength": 1}, "kind": {"type": "string", "enum": ["code", "static"]}}, "required": ["id", "description", "kind"]}}, "separate_acceptance_session": {"type": "boolean", "default": False}}, "required": ["checks"]},
                 "acceptance_plan": {"type": "array", "items": {"type": "object", "properties": {
                     "criterion": {"type": "string"}, "file": {"type": "string"}, "symbol": {"type": "string"},
                     "method": {"type": "string"}, "command": {"type": "string"}, "expected": {"type": "string"},
@@ -83,7 +83,7 @@ TOOLS = [
     },
     {
         "name": "finalize_task_intake",
-        "description": "Create a ready v2 task from one non-duplicated intake bundle. The service reuses prepared history, reports location evidence, classifies dependencies, derives acceptance criteria and contracts, then creates the task. Returns requires_confirmation instead of creating when a strong active dependency candidate exists.",
+        "description": "Create a ready v2 task from one non-duplicated intake bundle. Pass every requirement screenshot or other visual attachment through visual_references so Taskboard copies it out of temporary chat storage. Code Review checks must be code/static only; runtime and visual checks belong in acceptance_plan. Returns requires_confirmation instead of creating when a strong active dependency candidate exists.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -111,13 +111,15 @@ TOOLS = [
                 "ordered_steps": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
                     "file": {"type": "string", "minLength": 1}, "symbol": {"type": "string", "minLength": 1}, "action": {"type": "string", "minLength": 1}
                 }, "required": ["file", "symbol", "action"]}},
-                "review_checks": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+                "visual_references": {"type": "array", "description": "All requirement screenshots and visual references; each source path is copied immediately into Taskboard-managed storage.", "items": {"type": "object", "properties": {"path": {"type": "string", "minLength": 1}, "purpose": {"type": "string"}}, "required": ["path"]}},
+                "review_checks": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"id": {"type": "string", "minLength": 1}, "description": {"type": "string", "minLength": 1}, "kind": {"type": "string", "enum": ["code", "static"]}}, "required": ["id", "description", "kind"]}},
                 "separate_acceptance_session": {"type": "boolean", "default": False},
                 "acceptance_plan": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
                     "criterion": {"type": "string"}, "file": {"type": "string"}, "symbol": {"type": "string"},
                     "method": {"type": "string"}, "command": {"type": "string"}, "expected": {"type": "string"},
                     "check_type": {"type": "string", "enum": ["automated", "static_review", "manual_runtime"]},
-                    "required": {"type": "boolean", "default": True}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}
+                    "required": {"type": "boolean", "default": True}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+                    "artifact_refs": {"type": "array", "items": {"type": "string"}}
                 }, "required": ["criterion", "file", "symbol", "method", "expected", "check_type"]}},
                 "dependency_analysis": {"type": "object", "description": "Omit for automatic classification. Supply an explicit independent, depends_on, or continues_from decision only after resolving a returned strong candidate."},
                 "relations": {"type": "array", "items": {"type": "object"}},
@@ -228,7 +230,7 @@ TOOLS = [
                 "verification_result": {"type": "string"},
                 "batch_revision": {"type": "integer", "minimum": 1},
                 "changed_locations": {"type": "array", "items": {"type": "object"}},
-                "acceptance_evidence": {"type": "array", "items": {"type": "object"}},
+                "acceptance_evidence": {"type": "array", "items": {"type": "object", "properties": {"criterion": {"type": "string", "minLength": 1}, "status": {"type": "string", "enum": ["passed", "failed", "blocked", "pending"]}, "evidence": {"type": "string", "minLength": 1}, "artifact_refs": {"type": "array", "items": {"type": "string"}}}, "required": ["criterion", "status", "evidence"]}},
             },
             "required": ["run_id", "delivery_summary", "verification_result", "changed_locations", "acceptance_evidence"],
         },
@@ -255,7 +257,7 @@ TOOLS = [
     {
         "name": "accept_task",
         "description": "Complete the independent functional acceptance stage; failures create a linked bug for normal tasks.",
-        "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}, "run_id": {"type": "string"}, "verdict": {"type": "string", "enum": ["pass", "fail"]}, "reasons": {"type": "array", "items": {"type": "string"}}, "passed_criteria": {"type": "array", "items": {"type": "string"}}, "failed_criteria": {"type": "array", "items": {"type": "string"}}, "failure_locations": {"type": "array", "items": {"type": "object"}}}, "required": ["task_id", "run_id", "verdict", "passed_criteria", "failed_criteria"]},
+        "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}, "run_id": {"type": "string"}, "verdict": {"type": "string", "enum": ["pass", "fail"]}, "reasons": {"type": "array", "items": {"type": "string"}}, "passed_criteria": {"type": "array", "items": {"type": "string"}}, "failed_criteria": {"type": "array", "items": {"type": "string"}}, "failure_locations": {"type": "array", "items": {"type": "object"}}, "criterion_results": {"type": "array", "items": {"type": "object", "properties": {"criterion": {"type": "string", "minLength": 1}, "status": {"type": "string", "enum": ["passed", "failed", "blocked"]}, "evidence": {"type": "string", "minLength": 1}, "artifact_refs": {"type": "array", "items": {"type": "string", "minLength": 1}}}, "required": ["criterion", "status", "evidence", "artifact_refs"]}}}, "required": ["task_id", "run_id", "verdict", "passed_criteria", "failed_criteria", "criterion_results"]},
     },
     {
         "name": "prepare_review_location",
@@ -431,7 +433,7 @@ TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     ),
     "review_task": lambda arguments: SERVICE.review_task(arguments["task_id"], arguments["verdict"], arguments.get("reasons"), arguments.get("passed_items"), arguments.get("run_id"), arguments.get("failed_criteria")),
     "review_code": lambda arguments: SERVICE.review_code(arguments["task_id"], arguments["run_id"], arguments["verdict"], arguments.get("reasons"), arguments.get("passed_items"), arguments.get("failed_criteria")),
-    "accept_task": lambda arguments: SERVICE.accept_task(arguments["task_id"], arguments["run_id"], arguments["verdict"], arguments.get("reasons"), arguments.get("passed_criteria"), arguments.get("failed_criteria"), arguments.get("failure_locations")),
+    "accept_task": lambda arguments: SERVICE.accept_task(arguments["task_id"], arguments["run_id"], arguments["verdict"], arguments.get("reasons"), arguments.get("passed_criteria"), arguments.get("failed_criteria"), arguments.get("failure_locations"), arguments.get("criterion_results")),
     "relate_tasks": lambda arguments: SERVICE.add_relation(arguments["source_task_id"], arguments["target_task_id"], arguments["relation_type"], arguments.get("description", "")),
     "suggest_task_relations": lambda arguments: SERVICE.suggest_relations(arguments["task_id"], arguments.get("limit", 8)),
     "get_task_context": lambda arguments: (

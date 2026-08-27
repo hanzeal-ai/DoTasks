@@ -161,16 +161,71 @@ class TaskReviewMixin:
             if batch and len(batch_tasks) > 1
             else task.get("acceptance_criteria", [])
         )
-        covered = {item.get("criterion") for item in acceptance_evidence}
-        missing_criteria = criteria - covered
+        covered = [item.get("criterion") for item in acceptance_evidence]
+        if len(covered) != len(set(covered)):
+            raise ValueError("Acceptance evidence criteria must not contain duplicates")
+        covered_set = set(covered)
+        missing_criteria = criteria - covered_set
         if missing_criteria:
             raise ValueError(f"Missing acceptance evidence for: {', '.join(sorted(missing_criteria))}")
+        allowed_statuses = {"passed", "failed", "blocked", "pending"}
         invalid_evidence = [
             item.get("criterion") for item in acceptance_evidence
-            if item.get("criterion") not in criteria or not str(item.get("evidence") or "").strip()
+            if item.get("criterion") not in criteria
+            or not str(item.get("evidence") or "").strip()
+            or (
+                item.get("status") not in (None, "")
+                and str(item.get("status")).strip().lower() not in allowed_statuses
+            )
         ]
         if invalid_evidence:
-            raise ValueError("Every acceptance criterion requires non-empty evidence and an exact criterion match")
+            raise ValueError("Every acceptance criterion requires an exact match, status, and non-empty evidence")
+        if batch and len(batch_tasks) > 1:
+            plan_by_criterion = {
+                f"[{member['id']}] {str(plan.get('criterion') or '').strip()}": plan
+                for member in batch_tasks
+                for plan in member.get("acceptance_plan") or []
+                if isinstance(plan, dict)
+                and str(plan.get("criterion") or "").strip()
+            }
+        else:
+            plan_by_criterion = {
+                str(item.get("criterion") or ""): item
+                for item in task.get("acceptance_plan") or []
+                if isinstance(item, dict)
+            }
+        normalized_evidence: list[dict[str, Any]] = []
+        incomplete_automated: list[str] = []
+        for item in acceptance_evidence:
+            normalized = dict(item)
+            criterion = str(normalized.get("criterion") or "")
+            plan = plan_by_criterion.get(criterion, {})
+            check_type = str(
+                plan.get("check_type")
+                or ("automated" if plan.get("command") else "static_review")
+            )
+            status = str(
+                normalized.get("status")
+                or ("passed" if check_type == "automated" else "pending")
+            ).strip().lower()
+            normalized["status"] = status
+            if check_type != "automated" and status not in {"pending", "blocked"}:
+                raise ValueError(
+                    "Development must leave static_review and manual_runtime criteria pending or blocked for acceptance"
+                )
+            if (
+                check_type == "automated"
+                and bool(plan.get("required", True))
+                and status != "passed"
+            ):
+                incomplete_automated.append(criterion)
+            normalized_evidence.append(normalized)
+        if incomplete_automated:
+            raise ValueError(
+                "Required automated verification must pass before delivery: "
+                + ", ".join(incomplete_automated)
+            )
+        acceptance_evidence = normalized_evidence
         baseline = (run.get("context_snapshot") or {}).get("workspace_baseline") or {}
         artifact_snapshot = {
             "context_version": int(task.get("context_version") or 1),

@@ -550,7 +550,6 @@ class TaskChangeMixin:
             if isinstance(implementation, dict)
             else None
         )
-        checks = review.get("checks") if isinstance(review, dict) else None
         if not isinstance(targets, list) or not targets:
             raise ValueError("implementation_contract.targets is required")
         located_keys = {
@@ -601,13 +600,4 @@ class TaskChangeMixin:
                 for target_file, symbols in contract_keys
             ):
                 raise ValueError("Implementation step target is outside locked targets")
-        if (
-            not isinstance(checks, list)
-            or not checks
-            or any(not isinstance(item, str) or not item.strip() for item in checks)
-        ):
-            raise ValueError("review_contract.checks must be a non-empty array")
-        if not isinstance(review.get("separate_acceptance_session", False), bool):
-            raise ValueError(
-                "review_contract.separate_acceptance_session must be boolean"
-            )
+        self._normalize_review_contract(review)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import shutil
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +23,103 @@ from .domain import (
 
 class TaskPlanningMixin:
     """Task creation, dependency analysis, target locks, and bounded location gates."""
+
+    def _store_managed_artifacts(
+        self, namespace: str, references: list[str],
+    ) -> list[str]:
+        if not isinstance(references, list):
+            raise ValueError("artifact references must be an array")
+        safe_namespace = "/".join(
+            part for part in str(namespace).split("/") if part and part not in {".", ".."}
+        )
+        destination = self.data_home / "artifacts" / safe_namespace
+        destination.mkdir(parents=True, exist_ok=True)
+        stored: list[str] = []
+        for reference in references:
+            value = str(reference or "").strip()
+            if not value:
+                raise ValueError("artifact reference must not be empty")
+            if value.startswith("artifact://"):
+                relative = Path(value.removeprefix("artifact://"))
+                resolved = (self.data_home / "artifacts" / relative).resolve()
+                artifact_root = (self.data_home / "artifacts").resolve()
+                if artifact_root not in resolved.parents or not resolved.is_file():
+                    raise ValueError(f"Managed artifact does not exist: {value}")
+                stored.append(value)
+                continue
+            source = Path(value).expanduser().resolve()
+            if not source.is_file():
+                raise ValueError(f"Artifact file does not exist: {source}")
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            suffix = source.suffix.lower()
+            target = destination / f"{digest[:16]}{suffix}"
+            if not target.exists():
+                shutil.copy2(source, target)
+            relative = target.relative_to(self.data_home / "artifacts")
+            stored.append(f"artifact://{relative.as_posix()}")
+        return list(dict.fromkeys(stored))
+
+    def _manage_visual_references(
+        self, analysis_id: str, references: Any,
+    ) -> list[dict[str, Any]]:
+        if references in (None, []):
+            return []
+        if not isinstance(references, list) or any(
+            not isinstance(item, dict) for item in references
+        ):
+            raise ValueError("visual_references must be an array of objects")
+        managed: list[dict[str, Any]] = []
+        for item in references:
+            source = str(item.get("path") or item.get("artifact_id") or "").strip()
+            if not source:
+                raise ValueError("Every visual reference requires path or artifact_id")
+            artifact_id = self._store_managed_artifacts(
+                f"intake/{analysis_id}", [source]
+            )[0]
+            relative = Path(artifact_id.removeprefix("artifact://"))
+            target = (self.data_home / "artifacts" / relative).resolve()
+            managed.append({
+                "artifact_id": artifact_id,
+                "path": str(target),
+                "purpose": str(item.get("purpose") or "visual acceptance reference").strip(),
+                "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+            })
+        return managed
+
+    @staticmethod
+    def _normalize_review_contract(contract: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(contract, dict):
+            raise ValueError("review_contract must be an object")
+        raw_checks = contract.get("checks")
+        if not isinstance(raw_checks, list) or not raw_checks:
+            raise ValueError("v2 review_contract.checks must be a non-empty array")
+        checks: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for raw in raw_checks:
+            if isinstance(raw, str):
+                check_id = raw.strip()
+                description = check_id
+                kind = "static"
+            elif isinstance(raw, dict):
+                check_id = str(
+                    raw.get("id") or raw.get("criterion") or raw.get("description") or ""
+                ).strip()
+                description = str(raw.get("description") or check_id).strip()
+                kind = str(raw.get("kind") or "static").strip()
+            else:
+                raise ValueError("Every code review check must be a string or object")
+            if not check_id or not description:
+                raise ValueError("Every code review check requires id and description")
+            if kind not in {"code", "static"}:
+                raise ValueError("Code review check kind must be code or static")
+            if check_id in seen:
+                raise ValueError("Code review check ids must be unique")
+            seen.add(check_id)
+            checks.append({"id": check_id, "description": description, "kind": kind})
+        separate = contract.get("separate_acceptance_session", False)
+        if not isinstance(separate, bool):
+            raise ValueError("review_contract.separate_acceptance_session must be boolean")
+        return {**contract, "checks": checks, "separate_acceptance_session": separate}
 
     def _validate_implementation_contract(
         self, contract: dict[str, Any], located_targets: list[dict[str, Any]] | None = None,
@@ -88,6 +187,17 @@ class TaskPlanningMixin:
         canonical = dict(contract)
         canonical["targets"] = targets
         canonical["ordered_steps"] = steps
+        visual_references = canonical.get("visual_references") or []
+        if not isinstance(visual_references, list) or any(
+            not isinstance(item, dict)
+            or not str(item.get("artifact_id") or "").strip()
+            or not str(item.get("path") or "").strip()
+            for item in visual_references
+        ):
+            raise ValueError(
+                "implementation_contract.visual_references must contain managed artifact_id and path"
+            )
+        canonical["visual_references"] = visual_references
         return canonical
 
     def _validate_connected_location_evidence(
@@ -240,8 +350,7 @@ class TaskPlanningMixin:
                 )
                 if not isinstance(implementation_contract, dict) or not implementation_contract.get("targets"):
                     raise ValueError("implementation_contract.targets is required")
-                if not isinstance(review_contract, dict):
-                    raise ValueError("review_contract must be an object")
+                review_contract = self._normalize_review_contract(review_contract)
                 targets = implementation_contract.get("targets")
                 if not isinstance(targets, list) or not targets:
                     raise ValueError("v2 implementation_contract.targets must be non-empty")
@@ -269,12 +378,6 @@ class TaskPlanningMixin:
                     step_key = (self._normalize_target_file(step["file"]), str(step["symbol"]).strip())
                     if not any(step_key[0] == file and step_key[1] in symbols for file, symbols in target_keys):
                         raise ValueError("Implementation step target is outside locked targets")
-                checks = review_contract.get("checks")
-                if not isinstance(checks, list) or not checks or any(not isinstance(item, str) or not item.strip() for item in checks):
-                    raise ValueError("v2 review_contract.checks must be a non-empty array")
-                separate_acceptance = review_contract.get("separate_acceptance_session", False)
-                if not isinstance(separate_acceptance, bool):
-                    raise ValueError("review_contract.separate_acceptance_session must be boolean")
             task_id = self.db.next_id(connection, task_id_prefix)
             connection.execute(
                 """INSERT INTO tasks(
@@ -703,8 +806,8 @@ class TaskPlanningMixin:
             raise ValueError("ordered_steps must be a non-empty array")
         if not isinstance(acceptance_plan, list) or not acceptance_plan:
             raise ValueError("acceptance_plan must be a non-empty array")
-        review_checks = self._string_list(payload, "review_checks")
-        if not review_checks:
+        review_checks = payload.get("review_checks")
+        if not isinstance(review_checks, list) or not review_checks:
             raise ValueError("review_checks must be a non-empty array")
 
         self.report_location_status(
@@ -761,11 +864,17 @@ class TaskPlanningMixin:
             ):
                 relations.append({"target_task_id": target_task_id, "relation_type": decision})
 
-        implementation_contract = {"targets": targets, "ordered_steps": ordered_steps}
-        review_contract = {
+        implementation_contract = {
+            "targets": targets,
+            "ordered_steps": ordered_steps,
+            "visual_references": self._manage_visual_references(
+                analysis_id, payload.get("visual_references")
+            ),
+        }
+        review_contract = self._normalize_review_contract({
             "checks": review_checks,
             "separate_acceptance_session": bool(payload.get("separate_acceptance_session", False)),
-        }
+        })
         completed = self.complete_location_analysis(
             analysis_id, evidence, targets, acceptance_plan, dependency_analysis,
             implementation_contract, review_contract,
@@ -848,6 +957,8 @@ class TaskPlanningMixin:
             implementation_contract = self._validate_implementation_contract(
                 implementation_contract, targets,
             )
+        if review_contract is not None:
+            review_contract = self._normalize_review_contract(review_contract)
         if analysis["stage"] == "review":
             task = self.get_task(analysis["task_id"])
             if not analysis.get("delivery_run_id"):

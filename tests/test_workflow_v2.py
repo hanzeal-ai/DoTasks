@@ -84,7 +84,11 @@ class WorkflowV2Test(unittest.TestCase):
             },
             "targets": [{"file": "src/APage.tsx", "symbols": ["APage"], "reason": "主组件"}],
             "ordered_steps": [{"file": "src/APage.tsx", "symbol": "APage", "action": "修改组件"}],
-            "review_checks": ["遵守项目规范"],
+            "review_checks": [{
+                "id": "遵守项目规范",
+                "description": "遵守项目规范",
+                "kind": "static",
+            }],
             "acceptance_plan": [{
                 "criterion": "功能可用", "file": "src/APage.tsx", "symbol": "APage",
                 "method": "运行聚焦测试", "command": "test -f src/APage.tsx",
@@ -100,7 +104,10 @@ class WorkflowV2Test(unittest.TestCase):
             [{"file": "src/APage.tsx", "symbols": ["APage"], "reason": "主组件"}],
             task["implementation_contract"]["targets"],
         )
-        self.assertEqual(["遵守项目规范"], task["review_contract"]["checks"])
+        self.assertEqual(
+            [{"id": "遵守项目规范", "description": "遵守项目规范", "kind": "static"}],
+            task["review_contract"]["checks"],
+        )
         self.assertEqual("independent", task["dependency_analysis"]["decision"])
         self.assertNotIn("dependency_candidates", prepared["obsidian"])
         self.assertEqual(1, len(history_queries))

@@ -329,6 +329,7 @@ CREATE TABLE IF NOT EXISTS acceptance_results (
   passed_criteria TEXT NOT NULL DEFAULT '[]',
   failed_criteria TEXT NOT NULL DEFAULT '[]',
   failure_locations TEXT NOT NULL DEFAULT '[]',
+  criterion_results TEXT NOT NULL DEFAULT '[]',
   created_bug_task_id TEXT REFERENCES tasks(id),
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -404,7 +405,7 @@ CREATE INDEX IF NOT EXISTS idx_integration_outbox_pending ON integration_outbox(
 
 # Version 2 re-applies v2 run/conversation validation triggers. Version 1 may
 # have been overwritten by a still-running pre-v2 MCP process.
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 class Database:
@@ -455,6 +456,9 @@ class Database:
             return True
         check_columns = {row["name"] for row in connection.execute("PRAGMA table_info(acceptance_check_runs)")}
         if not {"workspace_fingerprint", "cache_hit"}.issubset(check_columns):
+            return True
+        result_columns = {row["name"] for row in connection.execute("PRAGMA table_info(acceptance_results)")}
+        if "criterion_results" not in result_columns:
             return True
         required_batch_tables = {
             "execution_batches", "execution_batch_tasks", "execution_batch_runs",
@@ -694,9 +698,18 @@ class Database:
             passed_criteria TEXT NOT NULL DEFAULT '[]',
             failed_criteria TEXT NOT NULL DEFAULT '[]',
             failure_locations TEXT NOT NULL DEFAULT '[]',
+            criterion_results TEXT NOT NULL DEFAULT '[]',
             created_bug_task_id TEXT REFERENCES tasks(id),
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )""")
+        acceptance_result_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(acceptance_results)")
+        }
+        if "criterion_results" not in acceptance_result_columns:
+            connection.execute(
+                "ALTER TABLE acceptance_results ADD COLUMN criterion_results TEXT NOT NULL DEFAULT '[]'"
+            )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_acceptance_results_task ON acceptance_results(task_id, round, created_at)")
         # Status notifications and their dedicated conversations were removed.
         # Drop legacy data so upgraded databases match fresh installations.

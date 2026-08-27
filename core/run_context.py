@@ -7,8 +7,8 @@ from typing import Any
 from taskboard.version import VERSION
 
 
-RUN_CONTEXT_SCHEMA_VERSION = 6
-LIFECYCLE_TOOL_SCHEMA_REVISION = 6
+RUN_CONTEXT_SCHEMA_VERSION = 7
+LIFECYCLE_TOOL_SCHEMA_REVISION = 7
 
 LIFECYCLE_TOOL_NAMES = frozenset({
     "get_task_context",
@@ -118,11 +118,15 @@ def compact_acceptance_commands(items: list[dict[str, Any]]) -> list[dict[str, A
         if not isinstance(criteria, list):
             criterion = {
                 field: item.get(field)
-                for field in ("criterion", "expected")
+                for field in (
+                    "criterion", "file", "symbol", "method", "expected",
+                    "required", "artifact_refs",
+                )
                 if item.get(field) not in (None, "", [], {})
             }
-            if item.get("required") is False:
-                criterion["required"] = False
+            # Required is a contract field, not an optimization hint. Keep its
+            # effective value even when the intake omitted the default.
+            criterion["required"] = bool(item.get("required", True))
             criteria = [criterion] if criterion else []
         else:
             criteria = [dict(criterion) for criterion in criteria if isinstance(criterion, dict)]

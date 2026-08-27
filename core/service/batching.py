@@ -8,6 +8,14 @@ from ..run_context import compact_acceptance_commands
 from .domain import _decode_row
 
 
+def _review_check_label(check: Any) -> str:
+    if isinstance(check, dict):
+        return str(
+            check.get("id") or check.get("criterion") or check.get("description") or ""
+        ).strip()
+    return str(check or "").strip()
+
+
 def batch_item_label(task_id: str, value: str) -> str:
     return f"[{task_id}] {str(value).strip()}"
 
@@ -290,8 +298,9 @@ class TaskBatchMixin:
             targets.extend(implementation.get("targets") or [])
             steps.extend({**step, "task_id": task["id"]} for step in implementation.get("ordered_steps") or [])
             checks.extend(
-                batch_item_label(task["id"], item)
+                batch_item_label(task["id"], _review_check_label(item))
                 for item in (task.get("review_contract") or {}).get("checks") or []
+                if _review_check_label(item)
             )
         return ({
             **context,
@@ -333,9 +342,10 @@ class TaskBatchMixin:
         if not batch:
             return []
         return [
-            batch_item_label(task["id"], check)
+            batch_item_label(task["id"], _review_check_label(check))
             for task in self._batch_member_tasks(batch["id"])
             for check in (task.get("review_contract") or {}).get("checks") or []
+            if _review_check_label(check)
         ]
 
     def _batch_acceptance_items(self, task_id: str) -> list[str]:
@@ -493,6 +503,7 @@ class TaskBatchMixin:
         failed_criteria: list[str],
         failure_locations: list[dict[str, Any]],
         created_bug_task_id: str | None,
+        criterion_results: list[dict[str, Any]],
     ) -> list[str]:
         completed_task_ids: list[str] = []
         for task in self._batch_member_tasks_in(connection, batch["id"]):
@@ -501,6 +512,11 @@ class TaskBatchMixin:
             prefix = f"[{task['id']}] "
             task_passed = [item[len(prefix):] for item in passed_criteria if item.startswith(prefix)]
             task_failed = [item[len(prefix):] for item in failed_criteria if item.startswith(prefix)]
+            task_results = [
+                {**item, "criterion": str(item.get("criterion") or "")[len(prefix):]}
+                for item in criterion_results
+                if str(item.get("criterion") or "").startswith(prefix)
+            ]
             round_no = connection.execute(
                 "SELECT COALESCE(MAX(round),0)+1 value FROM acceptance_results WHERE task_id=?",
                 (task["id"],),
@@ -508,8 +524,9 @@ class TaskBatchMixin:
             connection.execute(
                 """INSERT INTO acceptance_results(
                        task_id,run_id,delivery_run_id,round,verdict,reasons,
-                       passed_criteria,failed_criteria,failure_locations,created_bug_task_id
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                       passed_criteria,failed_criteria,failure_locations,
+                       created_bug_task_id,criterion_results
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     task["id"], run_id, task.get("primary_run_id"), round_no, verdict,
                     json.dumps(reasons, ensure_ascii=False),
@@ -517,6 +534,7 @@ class TaskBatchMixin:
                     json.dumps(task_failed, ensure_ascii=False),
                     json.dumps(failure_locations, ensure_ascii=False),
                     created_bug_task_id,
+                    json.dumps(task_results, ensure_ascii=False),
                 ),
             )
             next_status = "done" if verdict == "pass" else "acceptance_blocked"

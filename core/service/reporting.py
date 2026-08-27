@@ -205,6 +205,7 @@ class TaskReportingMixin:
             "task": task_context,
             "located_targets": location_context.get("targets") or [],
             "implementation_steps": implementation_contract.get("ordered_steps") or [],
+            "visual_references": implementation_contract.get("visual_references") or [],
             "acceptance_commands": acceptance_commands,
         }
 
@@ -229,6 +230,7 @@ class TaskReportingMixin:
                 "targets": implementation.get("targets") or [],
                 "steps": implementation.get("ordered_steps") or [],
             },
+            "visual_references": implementation.get("visual_references") or [],
             "review_checks": review.get("checks") or [],
         }
 
@@ -245,7 +247,7 @@ class TaskReportingMixin:
                 key: item.get(key)
                 for key in (
                     "criterion", "file", "symbol", "method", "command", "expected",
-                    "check_type", "required", "timeout_seconds",
+                    "check_type", "required", "timeout_seconds", "artifact_refs",
                 )
                 if item.get(key) not in (None, "", [], {})
             })
@@ -257,6 +259,9 @@ class TaskReportingMixin:
             },
             "acceptance_criteria": task.get("acceptance_criteria") or [],
             "acceptance": acceptance,
+            "visual_references": (
+                (task.get("implementation_contract") or {}).get("visual_references") or []
+            ),
         }
 
     def get_run_context(

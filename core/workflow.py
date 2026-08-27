@@ -6,7 +6,7 @@ from typing import Any, Iterable
 # are derived from these values instead of maintaining separate copies.
 TASK_TRANSITIONS = {
     "draft": {"ready", "paused", "cancelled"},
-    "ready": {"claimed", "paused", "cancelled", "blocked"},
+    "ready": {"claimed", "waiting_confirmation", "paused", "cancelled", "blocked"},
     "claimed": {"investigating", "ready", "failed", "paused", "blocked"},
     "investigating": {
         "implementing",
@@ -36,9 +36,9 @@ TASK_TRANSITIONS = {
     },
     "paused": {"cancelled"},
     "failed": {"ready", "paused", "blocked", "cancelled"},
-    "review": {"paused", "blocked", "cancelled", "acceptance"},
-    "code_review": {"paused", "blocked", "cancelled", "rework", "acceptance"},
-    "acceptance": {"paused", "blocked", "cancelled", "done", "acceptance_blocked"},
+    "review": {"waiting_confirmation", "paused", "blocked", "cancelled", "acceptance"},
+    "code_review": {"waiting_confirmation", "paused", "blocked", "cancelled", "rework", "acceptance"},
+    "acceptance": {"waiting_confirmation", "paused", "blocked", "cancelled", "done", "acceptance_blocked"},
     "acceptance_blocked": {"paused", "cancelled", "acceptance"},
     "rework": {"claimed", "waiting_confirmation", "paused", "blocked", "cancelled"},
     "done": set(),

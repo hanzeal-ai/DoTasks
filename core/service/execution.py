@@ -27,6 +27,54 @@ from .domain import (
 class TaskLifecycleMixin:
     """Task state transitions and atomic claims for execution and review stages."""
 
+    @staticmethod
+    def _stage_token_reserve(task: dict[str, Any], run_type: str) -> int:
+        """Keep enough budget for a stage before creating a run or model turn."""
+        budget = max(0, int(task.get("token_budget") or 0))
+        if budget <= 0:
+            return 0
+        if run_type == "acceptance":
+            return min(100_000, max(10_000, budget // 5))
+        if run_type in {"code_review", "review"}:
+            return min(50_000, max(5_000, budget // 10))
+        return min(150_000, max(10_000, budget // 5))
+
+    def _pause_for_stage_budget_preflight(
+        self, connection: Any, task: dict[str, Any], run_type: str,
+    ) -> bool:
+        reserve = self._stage_token_reserve(task, run_type)
+        budget = int(task.get("token_budget") or 0)
+        used = int(task.get("effective_token_used") or 0)
+        remaining = max(0, budget - used)
+        if reserve <= 0 or remaining >= reserve:
+            return False
+        reason = (
+            f"阶段预算预检未通过：{run_type} 至少需要预留 {reserve} 有效 Token，"
+            f"当前仅剩 {remaining}（已用 {used}/{budget}）"
+        )
+        connection.execute(
+            """UPDATE tasks SET status='waiting_confirmation', active_run_id=NULL,
+               assigned_to=NULL, auto_dispatch=0, last_failure_reason=?,
+               last_failure_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+               WHERE id=?""",
+            (reason, task["id"]),
+        )
+        self._event(
+            connection,
+            "task",
+            task["id"],
+            "stage_budget_preflight_blocked",
+            {
+                "run_type": run_type,
+                "required_reserve": reserve,
+                "remaining": remaining,
+                "effective_token_used": used,
+                "token_budget": budget,
+            },
+        )
+        self._queue_obsidian_sync(connection, "task", task["id"])
+        return True
+
     def transition_task(
         self, task_id: str, status: str, reason: str = "", **updates: Any
     ) -> dict[str, Any]:
@@ -83,8 +131,13 @@ class TaskLifecycleMixin:
             budget_restart = (
                 current["status"] == "waiting_confirmation"
                 and status in {"ready", "rework"}
-                and int(current.get("effective_token_used") or 0)
-                >= int(current.get("token_budget") or 0)
+                and (
+                    int(current.get("effective_token_used") or 0)
+                    >= int(current.get("token_budget") or 0)
+                    or str(current.get("last_failure_reason") or "").startswith(
+                        "阶段预算预检未通过："
+                    )
+                )
                 and token_budget > int(current.get("effective_token_used") or 0)
                 and token_budget > int(current.get("token_budget") or 0)
             )
@@ -597,6 +650,8 @@ class TaskLifecycleMixin:
                 if task["status"] == "rework" or task.get("retry_run_type") == "rework"
                 else ("bugfix" if task.get("type") == "bug" else "execution")
             )
+            if self._pause_for_stage_budget_preflight(connection, task, run_type):
+                return None
             retry_baseline: dict[str, Any] | None = None
             retry_chain_root_run_id = ""
             if task.get("retry_required"):
@@ -976,6 +1031,10 @@ class TaskLifecycleMixin:
             if not row:
                 return None
             task = _decode_row(row)
+            if self._pause_for_stage_budget_preflight(
+                connection, task, "code_review"
+            ):
+                return None
             delivery = connection.execute(
                 "SELECT * FROM task_runs WHERE id=? AND status='waiting_review'",
                 (task["primary_run_id"],),
@@ -1023,10 +1082,27 @@ class TaskLifecycleMixin:
                 self._attach_batch_run(connection, batch["id"], run_id, "review")
         delivery_snapshot = _decode_row(delivery, RUN_JSON_FIELDS)
         context = self.build_code_review_context(task["id"], task.get("project"))
+        review_delivery = self._model_delivery(delivery_snapshot, include_diff=False)
+        review_delivery.pop("acceptance_evidence", None)
         context.update(
             {
                 "delivery_run_id": delivery["id"],
-                "delivery": self._model_delivery(delivery_snapshot, include_diff=True),
+                # The reviewer derives the patch from the trusted server
+                # baseline and the locked changed files. Development output is
+                # never used as the review diff source.
+                "delivery": review_delivery,
+                "diff_scope": {
+                    "base_revision": str(
+                        ((delivery_snapshot.get("artifact_snapshot") or {}).get("diff") or {}).get("base_revision")
+                        or ((delivery_snapshot.get("context_snapshot") or {}).get("workspace_baseline") or {}).get("revision")
+                        or ""
+                    ),
+                    "changed_files": [
+                        str(item.get("file") or "")
+                        for item in delivery_snapshot.get("changed_locations") or []
+                        if str(item.get("file") or "").strip()
+                    ],
+                },
             }
         )
         confirmed_checks = [
@@ -1092,9 +1168,25 @@ class TaskLifecycleMixin:
         if verdict not in {"pass", "fail"}:
             raise ValueError("verdict must be pass or fail")
         reasons = [str(x).strip() for x in (reasons or []) if str(x).strip()]
-        passed_items = [str(x).strip() for x in (passed_items or []) if str(x).strip()]
+        def review_result_label(item: Any) -> str:
+            if isinstance(item, dict):
+                return str(
+                    item.get("id")
+                    or item.get("criterion")
+                    or item.get("description")
+                    or ""
+                ).strip()
+            return str(item or "").strip()
+
+        passed_items = [
+            review_result_label(item)
+            for item in (passed_items or [])
+            if review_result_label(item)
+        ]
         failed_criteria = [
-            str(x).strip() for x in (failed_criteria or []) if str(x).strip()
+            review_result_label(item)
+            for item in (failed_criteria or [])
+            if review_result_label(item)
         ]
         contract = task.get("review_contract") or {}
         review_items = (
@@ -1226,6 +1318,10 @@ class TaskLifecycleMixin:
             if not row:
                 return None
             task = _decode_row(row)
+            if self._pause_for_stage_budget_preflight(
+                connection, task, "acceptance"
+            ):
+                return None
             delivery = connection.execute(
                 "SELECT * FROM task_runs WHERE task_id=? AND run_type IN ('execution','rework','bugfix') AND status='completed' ORDER BY attempt DESC LIMIT 1",
                 (task["id"],),
@@ -1290,24 +1386,16 @@ class TaskLifecycleMixin:
                 self._attach_batch_run(connection, batch["id"], run_id, "acceptance")
         delivery_snapshot = _decode_row(delivery, RUN_JSON_FIELDS)
         context = self.build_acceptance_context(task["id"], task.get("project"))
-        needs_diff = any(
-            str(item.get("check_type") or "") != "automated"
-            for item in context.get("acceptance") or []
-        )
         context.update(
             {
                 "delivery_run_id": delivery["id"],
-                "delivery": self._model_delivery(
-                    delivery_snapshot, include_diff=needs_diff
-                ),
+                "delivery": self._model_delivery(delivery_snapshot, include_diff=False),
             }
         )
         if batch and int(batch.get("appended_count") or 0) > 0:
             context = self._merge_batch_acceptance_context(context, batch["id"])
             context["delivery_run_id"] = delivery["id"]
-            context["delivery"] = self._model_delivery(
-                delivery_snapshot, include_diff=needs_diff
-            )
+            context["delivery"] = self._model_delivery(delivery_snapshot, include_diff=False)
         context = freeze_run_context(
             context,
             task=task,
@@ -1342,6 +1430,7 @@ class TaskLifecycleMixin:
         passed_criteria: list[str] | None = None,
         failed_criteria: list[str] | None = None,
         failure_locations: list[dict[str, Any]] | None = None,
+        criterion_results: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         task = self.get_task(task_id)
         run = self.get_run(run_id)
@@ -1385,6 +1474,76 @@ class TaskLifecycleMixin:
                 run_id,
                 snapshot.get("acceptance") or snapshot.get("acceptance_plan") or [],
             )
+        if criterion_results is None:
+            fallback_evidence = "；".join(reasons) or "Acceptance criterion verified"
+            criterion_results = [
+                {
+                    "criterion": criterion,
+                    "status": "passed" if criterion in passed_criteria else "failed",
+                    "evidence": fallback_evidence,
+                    "artifact_refs": [],
+                }
+                for criterion in criteria
+            ]
+        if not isinstance(criterion_results, list) or any(
+            not isinstance(item, dict) for item in criterion_results
+        ):
+            raise ValueError("criterion_results must be an array of objects")
+        result_criteria = [
+            str(item.get("criterion") or "").strip() for item in criterion_results
+        ]
+        if len(result_criteria) != len(set(result_criteria)) or set(result_criteria) != set(criteria):
+            raise ValueError("criterion_results must exactly cover every criterion once")
+        normalized_results: list[dict[str, Any]] = []
+        acceptance_plan_by_criterion = {
+            str(item.get("criterion") or ""): item
+            for item in task.get("acceptance_plan") or []
+            if isinstance(item, dict)
+        }
+        has_visual_references = bool(
+            (task.get("implementation_contract") or {}).get("visual_references")
+        )
+        for item in criterion_results:
+            normalized = dict(item)
+            criterion = str(normalized.get("criterion") or "").strip()
+            status = str(normalized.get("status") or "").strip().lower()
+            evidence = str(normalized.get("evidence") or "").strip()
+            artifact_refs = normalized.get("artifact_refs") or []
+            if status not in {"passed", "failed", "blocked"}:
+                raise ValueError("Acceptance criterion status must be passed, failed, or blocked")
+            if not evidence:
+                raise ValueError("Every acceptance criterion result requires evidence")
+            if not isinstance(artifact_refs, list) or any(
+                not isinstance(ref, str) or not ref.strip() for ref in artifact_refs
+            ):
+                raise ValueError("criterion_results.artifact_refs must be an array of non-empty strings")
+            if criterion in passed_criteria and status != "passed":
+                raise ValueError("passed_criteria must match passed criterion_results")
+            if criterion in failed_criteria and status not in {"failed", "blocked"}:
+                raise ValueError("failed_criteria must match failed or blocked criterion_results")
+            plan = acceptance_plan_by_criterion.get(criterion) or {}
+            if (
+                status == "passed"
+                and has_visual_references
+                and str(plan.get("check_type") or "") == "manual_runtime"
+                and not artifact_refs
+            ):
+                raise ValueError(
+                    "Passed manual_runtime criteria with visual references require artifact_refs"
+                )
+            managed_artifacts = self._store_managed_artifacts(
+                f"acceptance/{run_id}", artifact_refs
+            )
+            normalized.update(
+                {
+                    "criterion": criterion,
+                    "status": status,
+                    "evidence": evidence,
+                    "artifact_refs": managed_artifacts,
+                }
+            )
+            normalized_results.append(normalized)
+        criterion_results = normalized_results
         bug_id = None
         parent_task_id = None
         completed_batch_task_ids: list[str] = []
@@ -1394,7 +1553,7 @@ class TaskLifecycleMixin:
                 (task_id,),
             ).fetchone()["value"]
             connection.execute(
-                "INSERT INTO acceptance_results(task_id,run_id,delivery_run_id,round,verdict,reasons,passed_criteria,failed_criteria,failure_locations) VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO acceptance_results(task_id,run_id,delivery_run_id,round,verdict,reasons,passed_criteria,failed_criteria,failure_locations,criterion_results) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     task_id,
                     run_id,
@@ -1405,6 +1564,7 @@ class TaskLifecycleMixin:
                     json.dumps(passed_criteria, ensure_ascii=False),
                     json.dumps(failed_criteria, ensure_ascii=False),
                     json.dumps(failure_locations or [], ensure_ascii=False),
+                    json.dumps(criterion_results, ensure_ascii=False),
                 ),
             )
             connection.execute(
@@ -1509,6 +1669,7 @@ class TaskLifecycleMixin:
                     failed_criteria,
                     failure_locations or [],
                     bug_id,
+                    criterion_results,
                 )
             connection.execute(
                 "UPDATE task_conversations SET status='completed', updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
@@ -1629,6 +1790,7 @@ class TaskLifecycleMixin:
                 "passed_criteria",
                 "failed_criteria",
                 "failure_locations",
+                "criterion_results",
             ):
                 item[field] = json.loads(item[field] or "[]")
             result.append(item)
@@ -1671,11 +1833,12 @@ class TaskLifecycleMixin:
                 else []
             )
             retry_note = (
-                "这是验收不通过后的原会话返工。验收失败原因："
+                "这是 Code Review 不通过后的原开发会话返工。Code Review 失败原因："
                 + "；".join(review_reasons)
-                + "。未通过标准："
+                + "。未通过的代码审查项："
                 + "；".join(task.get("last_failed_criteria") or [])
-                + "。请像收到人工反馈一样在当前会话继续修复，并重新提交交付。"
+                + "。只修复失败审查项及其直接相关问题；不要把已通过项当作返工要求。"
+                "请像收到人工反馈一样在当前开发会话继续修复，并重新提交交付。"
             )
         if task.get("retry_required"):
             retry_note += (
@@ -1695,7 +1858,10 @@ class TaskLifecycleMixin:
             f"任务 {task['id']}（运行 {run_id}，类型 {run_type}）。"
             f"{retry_note}{batch_note}"
             "以 RUN_CONTEXT_JSON 为唯一任务输入，只读取已定位目标及正确性所需的直接依赖，不再获取任务详情。"
-            "实现并验证后调用 submit_task_delivery；需要用户决策或无法继续时调用 report_run_blocked。"
+            "实现并完成开发阶段的自动化验证后调用 submit_task_delivery。acceptance_evidence 每项必须包含 "
+            "criterion、status（passed/failed/blocked/pending）和 evidence；自动检查必须真实通过后才能标记 passed，"
+            "static_review/manual_runtime 只能标记 pending 或 blocked，留给功能验收阶段执行。"
+            "需要用户决策或无法继续时调用 report_run_blocked。"
             f"\n\nRUN_CONTEXT_JSON={prompt_context(context)}"
         )
 
@@ -1709,7 +1875,10 @@ class TaskLifecycleMixin:
         return (
             "$codex-taskboard-lifecycle\n\n"
             "Code Review 阶段只使用提示内的 RUN_CONTEXT_JSON，不要搜索工具目录、数据库或任务详情。"
-            "直接检查 delivery.diff、implementation 和 review_checks，不修改代码；"
+            "先使用 RUN_CONTEXT_JSON.diff_scope.base_revision 和 changed_files 在项目中自行执行 "
+            "git diff（必要时分别执行 git diff <base> -- <files> 与 git diff -- <files>），"
+            "再检查该实际 diff、implementation 和 review_checks，不修改代码。"
+            "不得要求开发阶段传入或复述 diff，也不得把 delivery.acceptance_evidence 当作代码正确性的证明；"
             "完成后调用 review_code。"
             f"任务 {task['id']}（运行 {run_id}）。passed_items 与 failed_criteria 必须且只能完整划分"
             f"这些 review_checks（不要混入 acceptance_criteria）：{json.dumps(confirmed_checks, ensure_ascii=False)}。"
@@ -1726,7 +1895,9 @@ class TaskLifecycleMixin:
             "$codex-taskboard-lifecycle\n\n"
             "功能验收阶段只使用提示内的 RUN_CONTEXT_JSON，不要搜索工具目录、数据库或任务详情。"
             "只按 acceptance 和 delivery 验证，不修改代码；存在自动检查时调用 run_acceptance_checks，"
-            "该工具会复用相同交付和工作区指纹下已通过的结果；最后调用 accept_task。"
+            "该工具会复用相同交付和工作区指纹下已通过的结果。manual_runtime 和 visual 证据由本阶段实际执行；"
+            "最后调用 accept_task，并用 criterion_results 为每条标准提交 passed/failed/blocked、具体 evidence "
+            "及 artifact_refs（没有附件时传空数组），不得仅复述开发阶段的 acceptance_evidence。"
             f"任务 {task['id']}（运行 {run_id}）。"
             f"\n\nRUN_CONTEXT_JSON={prompt_context(context)}"
         )

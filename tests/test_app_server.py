@@ -146,6 +146,12 @@ class TaskboardCodexHomeTest(unittest.TestCase):
             "low", task_turn_start_params("thread", "prompt", "acceptance")["effort"]
         )
         self.assertEqual(
+            "medium",
+            task_turn_start_params(
+                "thread", "prompt", "acceptance", manual_acceptance=True
+            )["effort"],
+        )
+        self.assertEqual(
             "high",
             task_turn_start_params("thread", "prompt", "acceptance", True)["effort"],
         )

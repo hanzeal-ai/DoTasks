@@ -209,8 +209,17 @@ class ContextCacheOptimizationTest(unittest.TestCase):
 
         review = self.service.claim_next_code_review_task("reviewer")
         review_context = review["run"]["context_snapshot"]
-        self.assertEqual(artifact["diff"]["sha256"], review_context["delivery"]["diff"]["sha256"])
-        self.assertEqual(["遵守项目规范"], review_context["review_checks"])
+        self.assertNotIn("diff", review_context["delivery"])
+        self.assertEqual(
+            artifact["diff"]["base_revision"],
+            review_context["diff_scope"]["base_revision"],
+        )
+        self.assertEqual(["src/APage.tsx"], review_context["diff_scope"]["changed_files"])
+        self.assertIn("git diff", review["dispatch_prompt"])
+        self.assertEqual(
+            [{"id": "遵守项目规范", "description": "遵守项目规范", "kind": "static"}],
+            review_context["review_checks"],
+        )
         for excluded in (
             "location_evidence", "direct_relations", "conversation_summaries",
             "dependency_analysis", "delivery_artifact",
@@ -237,6 +246,27 @@ class ContextCacheOptimizationTest(unittest.TestCase):
         self.assertEqual(1, second["cache_hits"])
         self.assertEqual(1, second["checks"][0]["cache_hit"])
         self.assertEqual(0, forced["cache_hits"])
+        screenshot = self.project / "acceptance-proof.png"
+        screenshot.write_bytes(b"acceptance-proof")
+        self.service.accept_task(
+            task["id"],
+            acceptance["run"]["id"],
+            "pass",
+            reasons=["聚焦检查和页面证据均通过"],
+            passed_criteria=["功能可用"],
+            failed_criteria=[],
+            criterion_results=[{
+                "criterion": "功能可用",
+                "status": "passed",
+                "evidence": "聚焦检查通过，截图已留存",
+                "artifact_refs": [str(screenshot)],
+            }],
+        )
+        result = self.service.list_acceptance_results(task["id"])[-1]
+        artifact_id = result["criterion_results"][0]["artifact_refs"][0]
+        self.assertTrue(artifact_id.startswith("artifact://acceptance/"))
+        managed_path = self.service.data_home / "artifacts" / artifact_id.removeprefix("artifact://")
+        self.assertTrue(managed_path.is_file())
 
     def test_high_risk_contract_keeps_acceptance_in_a_separate_session(self) -> None:
         task = self.create_task(separate_acceptance_session=True)

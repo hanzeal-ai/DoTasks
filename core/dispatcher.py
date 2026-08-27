@@ -134,6 +134,60 @@ class TaskDispatcher:
             for item in plans
         )
 
+    @staticmethod
+    def _model_assisted_acceptance(task: dict[str, Any] | None) -> bool:
+        return any(
+            isinstance(item, dict)
+            and bool(item.get("required", True))
+            and str(
+                item.get("check_type")
+                or ("automated" if item.get("command") else "static_review")
+            )
+            != "automated"
+            for item in (task or {}).get("acceptance_plan") or []
+        )
+
+    def _claim_next_stage(self, project: str | None = None) -> dict[str, Any] | None:
+        kwargs: dict[str, Any] = {"lease_seconds": 1800}
+        if project:
+            kwargs["project"] = project
+        claim = (
+            self.service.claim_next_acceptance_task(self.worker_id, **kwargs)
+            if hasattr(self.service, "claim_next_acceptance_task")
+            else None
+        )
+        if not claim:
+            claim = (
+                self.service.claim_next_code_review_task(self.worker_id, **kwargs)
+                if hasattr(self.service, "claim_next_code_review_task")
+                else None
+            )
+        if not claim:
+            claim = self.service.claim_next_review_task(self.worker_id, **kwargs)
+        if not claim:
+            claim = self.service.claim_next_task(self.worker_id, **kwargs)
+        return claim
+
+    def _claimable_projects(self) -> list[str]:
+        active = {
+            str(metadata.get("project") or "")
+            for metadata in self._active_runs.values()
+            if str(metadata.get("project") or "")
+        }
+        if not active:
+            return []
+        if not hasattr(self.service, "list_tasks"):
+            return []
+        return sorted({
+            str(task.get("project") or "")
+            for task in self.service.list_tasks()
+            if str(task.get("project") or "")
+            and str(task.get("project") or "") not in active
+            and str(task.get("status") or "")
+            in {"ready", "rework", "review", "code_review", "acceptance"}
+            and int(task.get("auto_dispatch", 1)) == 1
+        })
+
     @classmethod
     def _tool_profile_for_run(
         cls, run_type: str, task: dict[str, Any] | None = None, resume_thread_id: str = "",
@@ -306,13 +360,17 @@ class TaskDispatcher:
         dispatched = 0
         capacity = max(0, min(max(1, int(limit)), 3) - len(self._active_clients))
         for _ in range(capacity):
-            claim = self.service.claim_next_acceptance_task(self.worker_id, lease_seconds=1800) if hasattr(self.service, "claim_next_acceptance_task") else None
-            if not claim:
-                claim = self.service.claim_next_code_review_task(self.worker_id, lease_seconds=1800) if hasattr(self.service, "claim_next_code_review_task") else None
-            if not claim:
-                claim = self.service.claim_next_review_task(self.worker_id, lease_seconds=1800)
-            if not claim:
-                claim = self.service.claim_next_task(self.worker_id, lease_seconds=1800)
+            # A lifecycle tool can close the DB run before the app-server turn
+            # releases its thread writer. While that client is still alive,
+            # only claim work from other projects.
+            if self._active_runs:
+                claim = None
+                for candidate_project in self._claimable_projects():
+                    claim = self._claim_next_stage(candidate_project)
+                    if claim:
+                        break
+            else:
+                claim = self._claim_next_stage()
             if not claim:
                 break
             task = claim["task"]
@@ -388,7 +446,14 @@ class TaskDispatcher:
                 low_risk = execution_profile.get("risk") == "low"
                 turn_result = client.request(
                     "turn/start",
-                    task_turn_start_params(thread_id, prompt, run["run_type"], high_risk, low_risk),
+                    task_turn_start_params(
+                        thread_id,
+                        prompt,
+                        run["run_type"],
+                        high_risk,
+                        low_risk,
+                        self._model_assisted_acceptance(task),
+                    ),
                 )
                 self.service.bind_conversation(task["id"], role, thread_id, run["id"], title)
                 if hasattr(self.service, "bind_batch_turn"):
@@ -404,6 +469,7 @@ class TaskDispatcher:
                 self._active_runs[thread_id] = {
                     "run_id": run["id"],
                     "task_id": task["id"],
+                    "project": str(project.resolve()),
                     "lease_token": claim["lease_token"],
                     "turn_id": str((turn_result.get("turn") or {}).get("id") or ""),
                     "run_token_used": int(run.get("token_used") or 0),

@@ -66,7 +66,9 @@ TASK_WORKER_BASE_INSTRUCTIONS = (
 
 TASK_WORKER_DEVELOPER_INSTRUCTIONS = (
     "Follow repository AGENTS.md instructions. Do not commit, push, publish, or perform destructive "
-    "operations unless the task explicitly authorizes them. Complete the stage through its lifecycle tool."
+    "operations unless the task explicitly authorizes them. Complete the stage through its lifecycle tool. "
+    "Read each relevant file or document once unless new evidence requires a refresh. For long-running "
+    "commands, wait 10-30 seconds between polls; do not poll every second or repeatedly request unchanged output."
 )
 
 APP_SERVER_INITIALIZE_ATTEMPTS = 2
@@ -281,11 +283,16 @@ def task_turn_start_params(
     run_type: str = "execution",
     high_risk: bool = False,
     low_risk: bool = False,
+    manual_acceptance: bool = False,
 ) -> dict[str, Any]:
     effort = (
         "high"
         if high_risk
-        else ("low" if run_type == "acceptance" or low_risk else "medium")
+        else (
+            "medium"
+            if run_type == "acceptance" and manual_acceptance
+            else ("low" if run_type == "acceptance" or low_risk else "medium")
+        )
     )
     return {
         "threadId": thread_id,
