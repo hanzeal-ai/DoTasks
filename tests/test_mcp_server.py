@@ -22,6 +22,9 @@ class TaskboardMcpServerTest(unittest.TestCase):
         self.assertIn("detect_task_change", names)
         self.assertIn("prepare_task_change_confirmation", names)
         self.assertIn("resolve_task_change_confirmation", names)
+        self.assertIn("get_requirement", names)
+        self.assertIn("submit_requirement_decomposition", names)
+        self.assertIn("report_requirement_decomposition_failed", names)
         self.assertNotIn("create_requirement", names)
         self.assertNotIn("update_requirement", names)
         self.assertNotIn("create_task", names)
@@ -76,14 +79,48 @@ class TaskboardMcpServerTest(unittest.TestCase):
         tool = next(item for item in TOOLS if item["name"] == "finalize_task_intake")
         properties = tool["inputSchema"]["properties"]
         required = tool["inputSchema"]["required"]
+        task_branch = tool["inputSchema"]["anyOf"][1]["required"]
 
-        self.assertIn("targets", required)
-        self.assertIn("ordered_steps", required)
-        self.assertIn("review_checks", required)
-        self.assertIn("acceptance_plan", required)
-        self.assertNotIn("acceptance_criteria", properties)
+        self.assertEqual(["requirement", "task"], properties["intake_kind"]["enum"])
+        self.assertIn("targets", task_branch)
+        self.assertIn("ordered_steps", task_branch)
+        self.assertIn("review_checks", task_branch)
+        self.assertIn("acceptance_plan", task_branch)
+        self.assertIn("acceptance_criteria", properties)
         self.assertNotIn("implementation_contract", properties)
         self.assertNotIn("review_contract", properties)
+
+    def test_requirement_and_task_intake_results_have_explicit_kinds(self):
+        requirement = {
+            "status": "created", "intake_kind": "requirement",
+            "requirement_id": "REQ-0001", "requirement_status": "ready",
+        }
+        task = {
+            "status": "created", "intake_kind": "task",
+            "task_id": "TASK-0001", "task_status": "ready",
+        }
+        with patch.dict(os.environ, {"CODEX_TASKBOARD_TOOL_PROFILE": ""}), patch.dict(TOOL_HANDLERS, {"finalize_task_intake": lambda arguments: requirement if arguments["intake_kind"] == "requirement" else task}, clear=False):
+            requirement_result = handle({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "finalize_task_intake", "arguments": {"intake_kind": "requirement"}},
+            })["result"]["structuredContent"]
+            task_result = handle({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "finalize_task_intake", "arguments": {"intake_kind": "task"}},
+            })["result"]["structuredContent"]
+        self.assertEqual(("requirement", "REQ-0001"), (requirement_result["intake_kind"], requirement_result["requirement_id"]))
+        self.assertEqual(("task", "TASK-0001"), (task_result["intake_kind"], task_result["task_id"]))
+
+    def test_decomposition_contract_requires_ready_task_location_fields(self):
+        tool = next(item for item in TOOLS if item["name"] == "submit_requirement_decomposition")
+        task_items = tool["inputSchema"]["properties"]["tasks"]["items"]
+        required = set(task_items["required"])
+        self.assertTrue({
+            "analysis_id", "location_evidence", "targets", "ordered_steps",
+            "review_checks", "acceptance_plan",
+        }.issubset(required))
+        self.assertEqual(1, task_items["properties"]["targets"]["minItems"])
+        self.assertEqual(1, task_items["properties"]["ordered_steps"]["minItems"])
 
     def test_profile_mutation_results_are_compact(self):
         result = {

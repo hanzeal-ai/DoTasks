@@ -35,8 +35,19 @@ CREATE TABLE IF NOT EXISTS requirements (
   source_type TEXT NOT NULL DEFAULT 'conversation',
   source_reference TEXT,
   project TEXT,
-  status TEXT NOT NULL DEFAULT 'inbox',
+  status TEXT NOT NULL DEFAULT 'ready',
   priority TEXT NOT NULL DEFAULT 'P2',
+  goal TEXT NOT NULL DEFAULT '',
+  modules TEXT NOT NULL DEFAULT '[]',
+  scope TEXT NOT NULL DEFAULT '[]',
+  out_of_scope TEXT NOT NULL DEFAULT '[]',
+  acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+  source_thread_id TEXT,
+  auto_dispatch INTEGER NOT NULL DEFAULT 1,
+  decomposition_plan TEXT NOT NULL DEFAULT '[]',
+  decomposition_attempts INTEGER NOT NULL DEFAULT 0,
+  last_decomposition_error TEXT NOT NULL DEFAULT '',
+  decomposed_at TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -44,6 +55,7 @@ CREATE TABLE IF NOT EXISTS requirements (
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   requirement_id TEXT REFERENCES requirements(id),
+  requirement_task_key TEXT,
   title TEXT NOT NULL,
   type TEXT NOT NULL DEFAULT 'feature',
   project TEXT,
@@ -122,6 +134,21 @@ CREATE TABLE IF NOT EXISTS task_runs (
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   completed_at TEXT,
   UNIQUE(task_id, run_type, attempt)
+);
+
+CREATE TABLE IF NOT EXISTS requirement_decomposition_runs (
+  id TEXT PRIMARY KEY,
+  requirement_id TEXT NOT NULL REFERENCES requirements(id) ON DELETE CASCADE,
+  attempt INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  claimed_by TEXT NOT NULL,
+  lease_token TEXT NOT NULL,
+  lease_expires_at TEXT NOT NULL,
+  error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  completed_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(requirement_id, attempt)
 );
 
 CREATE TABLE IF NOT EXISTS token_usage_events (
@@ -380,6 +407,8 @@ CREATE INDEX IF NOT EXISTS idx_requirements_status ON requirements(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_project_status ON tasks(project, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_requirement ON tasks(requirement_id);
+CREATE INDEX IF NOT EXISTS idx_requirement_runs_status
+  ON requirement_decomposition_runs(status, lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_task_runs_task ON task_runs(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_task_runs_task_type_status ON task_runs(task_id, run_type, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_task_runs_status ON task_runs(status, lease_expires_at);
@@ -405,7 +434,7 @@ CREATE INDEX IF NOT EXISTS idx_integration_outbox_pending ON integration_outbox(
 
 # Version 2 re-applies v2 run/conversation validation triggers. Version 1 may
 # have been overwritten by a still-running pre-v2 MCP process.
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 class Database:
@@ -436,6 +465,7 @@ class Database:
             "dependency_analysis", "implementation_contract", "review_contract", "status_started_at",
             "context_version",
             "effective_token_used",
+            "requirement_id", "requirement_task_key",
         }
         task_columns = {row["name"] for row in connection.execute("PRAGMA table_info(tasks)")}
         if not required_task_columns.issubset(task_columns):
@@ -469,6 +499,17 @@ class Database:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
+        requirement_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(requirements)")
+        }
+        if not {
+            "goal", "modules", "scope", "out_of_scope", "acceptance_criteria",
+            "source_thread_id", "auto_dispatch", "decomposition_plan",
+            "decomposition_attempts", "last_decomposition_error", "decomposed_at",
+        }.issubset(requirement_columns):
+            return True
+        if "requirement_decomposition_runs" not in existing_tables:
+            return True
         if not required_batch_tables.issubset(existing_tables):
             return True
         analysis_columns = {row["name"] for row in connection.execute("PRAGMA table_info(location_analyses)")}
@@ -533,6 +574,8 @@ class Database:
             for row in connection.execute("PRAGMA table_info(tasks)").fetchall()
         }
         additions = {
+            "requirement_id": "TEXT REFERENCES requirements(id)",
+            "requirement_task_key": "TEXT",
             "active_run_id": "TEXT",
             "primary_run_id": "TEXT",
             "delivery_summary": "TEXT NOT NULL DEFAULT ''",
@@ -568,6 +611,57 @@ class Database:
         for name, definition in additions.items():
             if name not in columns:
                 connection.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
+        requirement_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(requirements)")
+        }
+        requirement_additions = {
+            "goal": "TEXT NOT NULL DEFAULT ''",
+            "modules": "TEXT NOT NULL DEFAULT '[]'",
+            "scope": "TEXT NOT NULL DEFAULT '[]'",
+            "out_of_scope": "TEXT NOT NULL DEFAULT '[]'",
+            "acceptance_criteria": "TEXT NOT NULL DEFAULT '[]'",
+            "source_thread_id": "TEXT",
+            "auto_dispatch": "INTEGER NOT NULL DEFAULT 1",
+            "decomposition_plan": "TEXT NOT NULL DEFAULT '[]'",
+            "decomposition_attempts": "INTEGER NOT NULL DEFAULT 0",
+            "last_decomposition_error": "TEXT NOT NULL DEFAULT ''",
+            "decomposed_at": "TEXT",
+        }
+        for name, definition in requirement_additions.items():
+            if name not in requirement_columns:
+                connection.execute(
+                    f"ALTER TABLE requirements ADD COLUMN {name} {definition}"
+                )
+        connection.execute(
+            "UPDATE requirements SET status='ready' WHERE status='inbox'"
+        )
+        connection.execute("""CREATE TABLE IF NOT EXISTS requirement_decomposition_runs (
+            id TEXT PRIMARY KEY,
+            requirement_id TEXT NOT NULL REFERENCES requirements(id) ON DELETE CASCADE,
+            attempt INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'running',
+            claimed_by TEXT NOT NULL,
+            lease_token TEXT NOT NULL,
+            lease_expires_at TEXT NOT NULL,
+            error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            completed_at TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(requirement_id, attempt)
+        )""")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_requirements_dispatch "
+            "ON requirements(status, auto_dispatch, created_at)"
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_requirement_key "
+            "ON tasks(requirement_id, requirement_task_key) "
+            "WHERE requirement_id IS NOT NULL AND requirement_task_key IS NOT NULL"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_requirement_runs_status "
+            "ON requirement_decomposition_runs(status, lease_expires_at)"
+        )
         connection.execute(
             "UPDATE tasks SET status_started_at=COALESCE(status_started_at, updated_at, created_at, CURRENT_TIMESTAMP)"
         )

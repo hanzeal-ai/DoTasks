@@ -358,7 +358,13 @@ class TaskDispatcher:
             return 0
         self._flush_batch_steers()
         dispatched = 0
-        capacity = max(0, min(max(1, int(limit)), 3) - len(self._active_clients))
+        requirement_sessions = getattr(self, "_requirement_decomposition_clients", {})
+        capacity = max(
+            0,
+            min(max(1, int(limit)), 3)
+            - len(self._active_clients)
+            - len(requirement_sessions),
+        )
         for _ in range(capacity):
             # A lifecycle tool can close the DB run before the app-server turn
             # releases its thread writer. While that client is still alive,
@@ -373,6 +379,174 @@ class TaskDispatcher:
                 claim = self._claim_next_stage()
             if not claim:
                 break
+            if claim.get("kind") == "requirement_decomposition":
+                # Requirement intake is a planning entity, never an implementation
+                # task. Materialize an authored plan or start its dedicated tracked
+                # planning turn; implementation sessions only see resulting tasks.
+                requirement = claim["requirement"]
+                plan = requirement.get("decomposition_plan") or []
+                if plan:
+                    try:
+                        if hasattr(self.service, "submit_requirement_decomposition"):
+                            self.service.submit_requirement_decomposition(
+                                requirement["id"], claim["run"]["id"], plan,
+                            )
+                        else:
+                            self.service.claim_next_task(
+                                self.worker_id,
+                                action="submit_decomposition",
+                                requirement_id=requirement["id"],
+                                decomposition_run_id=claim["run"]["id"],
+                                child_tasks=plan,
+                            )
+                    except Exception as exc:
+                        self.last_error = f"需求拆解计划不可执行：{exc}"
+                        self.service.claim_next_task(
+                            self.worker_id, action="fail_decomposition",
+                            requirement_id=requirement["id"],
+                            decomposition_run_id=claim["run"]["id"],
+                            error=self.last_error,
+                        )
+                        continue
+                else:
+                    project = Path(str(requirement.get("project") or "")).expanduser()
+                    if not project.is_dir():
+                        self.service.claim_next_task(
+                            self.worker_id, action="fail_decomposition",
+                            requirement_id=requirement["id"],
+                            decomposition_run_id=claim["run"]["id"],
+                            error=f"项目目录不存在：{project}",
+                        )
+                        continue
+                    client: CodexAppServerClient | None = None
+                    try:
+                        # No lifecycle task profile applies to a requirement entity;
+                        # the prompt narrows the unprofiled MCP surface to the two
+                        # decomposition completion operations.
+                        client = self._new_client("", project)
+                        client.start()
+                        thread_result = client.request(
+                            "thread/start", task_thread_start_params(project),
+                        )
+                        thread_id = str(thread_result["thread"]["id"])
+                        try:
+                            client.request(
+                                "thread/name/set",
+                                {"threadId": thread_id, "name": "需求拆解"},
+                            )
+                        except AppServerError:
+                            pass
+                        context = {
+                            "requirement": requirement,
+                            "requirement_id": requirement["id"],
+                            "decomposition_run_id": claim["run"]["id"],
+                        }
+                        prompt = (
+                            "$codex-taskboard\n\n"
+                            "这是已领取的需求拆解运行，不是新 intake；不要编辑代码，也不要创建需求。"
+                            "将完整需求拆成可独立执行的 ready 子任务，明确 key 和 depends_on。"
+                            "每个子任务必须先完成正常定位，并给出 title、goal、scope、"
+                            "out_of_scope、acceptance_criteria、modules、analysis_id、"
+                            "location_evidence、非空 targets、ordered_steps、review_checks 和"
+                            "acceptance_plan；缺少任一执行契约都不能创建 ready 子任务。"
+                            "服务会把需求级目标、范围和验收标准"
+                            "合并到每个子任务。成功时仅调用 submit_requirement_decomposition；"
+                            "无法完成时调用 report_requirement_decomposition_failed。\n\n"
+                            "REQUIREMENT_DECOMPOSITION_CONTEXT_JSON="
+                            + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+                        )
+                        turn_result = client.request(
+                            "turn/start",
+                            task_turn_start_params(
+                                thread_id, prompt, "requirement_decomposition",
+                            ),
+                        )
+                        sessions = getattr(
+                            self, "_requirement_decomposition_clients", None,
+                        )
+                        if sessions is None:
+                            sessions = {}
+                            self._requirement_decomposition_clients = sessions
+                        sessions[thread_id] = client
+
+                        def monitor_decomposition(
+                            session_client: CodexAppServerClient = client,
+                            session_thread_id: str = thread_id,
+                            requirement_id: str = requirement["id"],
+                            run_id: str = claim["run"]["id"],
+                            turn_id: str = str((turn_result.get("turn") or {}).get("id") or ""),
+                        ) -> None:
+                            last_renewed = time.monotonic()
+                            try:
+                                while not self._stop.is_set():
+                                    state = self.service.claim_next_task(
+                                        "", action="get_requirement",
+                                        requirement_id=requirement_id,
+                                    )
+                                    if state["requirement"]["status"] != "decomposing":
+                                        break
+                                    terminal_reason = ""
+                                    for message in session_client.drain_notifications():
+                                        if message.get("method") in {"turn/completed", "turn/complete"}:
+                                            params = message.get("params") or {}
+                                            turn = params.get("turn") or {}
+                                            event_turn_id = str(turn.get("id") or params.get("turnId") or "")
+                                            if turn_id and event_turn_id and event_turn_id != turn_id:
+                                                continue
+                                            terminal_reason = self._terminal_turn_reason(turn, "completed")
+                                    if terminal_reason or not session_client.connected:
+                                        self.service.claim_next_task(
+                                            self.worker_id, action="fail_decomposition",
+                                            requirement_id=requirement_id,
+                                            decomposition_run_id=run_id,
+                                            error=terminal_reason or "需求拆解会话连接中断",
+                                        )
+                                        break
+                                    if time.monotonic() - last_renewed >= 60:
+                                        self.service.claim_next_task(
+                                            self.worker_id, action="renew_decomposition",
+                                            requirement_id=requirement_id,
+                                            decomposition_run_id=run_id,
+                                            lease_seconds=1800,
+                                        )
+                                        last_renewed = time.monotonic()
+                                    time.sleep(1)
+                                if self._stop.is_set():
+                                    try:
+                                        self.service.claim_next_task(
+                                            self.worker_id, action="fail_decomposition",
+                                            requirement_id=requirement_id,
+                                            decomposition_run_id=run_id,
+                                            error="Codex Taskboard 调度器已停止",
+                                        )
+                                    except (KeyError, ValueError):
+                                        pass
+                            except Exception as exc:
+                                self.last_error = f"需求拆解会话监控失败：{exc}"
+                            finally:
+                                session_client.stop()
+                                getattr(
+                                    self, "_requirement_decomposition_clients", {},
+                                ).pop(session_thread_id, None)
+
+                        threading.Thread(
+                            target=monitor_decomposition,
+                            name=f"requirement-decomposition-{requirement['id']}",
+                            daemon=True,
+                        ).start()
+                    except Exception as exc:
+                        if client is not None:
+                            client.stop()
+                        self.last_error = str(exc)
+                        self.service.claim_next_task(
+                            self.worker_id, action="fail_decomposition",
+                            requirement_id=requirement["id"],
+                            decomposition_run_id=claim["run"]["id"],
+                            error=f"需求拆解会话创建失败：{exc}",
+                        )
+                        continue
+                dispatched += 1
+                continue
             task = claim["task"]
             run = claim["run"]
             project = Path(str(task.get("project") or "")).expanduser()

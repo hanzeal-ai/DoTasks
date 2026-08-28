@@ -17,6 +17,7 @@ from core.service import TaskboardService
 
 class TaskboardServiceTest(unittest.TestCase):
     def setUp(self) -> None:
+        self.previous_helper_app = os.environ.pop("CODEX_TASKBOARD_HELPER_APP", None)
         self.temp = tempfile.TemporaryDirectory()
         self.example_project = Path(self.temp.name) / "example"
         self.example_project.mkdir()
@@ -35,6 +36,8 @@ class TaskboardServiceTest(unittest.TestCase):
         self.service.set_dispatcher_enabled(True)
 
     def tearDown(self) -> None:
+        if self.previous_helper_app is not None:
+            os.environ["CODEX_TASKBOARD_HELPER_APP"] = self.previous_helper_app
         if self.previous_vault is None:
             os.environ.pop("CODEX_TASKBOARD_OBSIDIAN_VAULT", None)
         else:
@@ -230,6 +233,123 @@ class TaskboardServiceTest(unittest.TestCase):
 
         self.service.transition_task(task["id"], "ready", auto_dispatch=False)
         self.assertEqual(1, self.service.board()["counts"]["attention"])
+
+    def test_requirement_is_queryable_and_decomposition_is_idempotent(self):
+        intake = self.service.finalize_task_intake({
+            "intake_kind": "requirement",
+            "title": "导入能力升级",
+            "original_content": "先增加解析，再接入导入入口。",
+            "project": str(self.example_project),
+            "goal": "提供完整导入能力",
+            "modules": ["import"],
+            "scope": ["解析", "入口"],
+            "out_of_scope": ["历史回填"],
+            "acceptance_criteria": ["用户可完成导入"],
+        })
+        self.assertEqual("requirement", intake["intake_kind"])
+        requirement_id = intake["requirement_id"]
+        initial = self.service.claim_next_task(
+            "", action="get_requirement", requirement_id=requirement_id,
+        )
+        self.assertEqual("ready", initial["requirement"]["status"])
+        self.assertEqual([], initial["tasks"])
+
+        first = self.service.claim_next_task("planner", str(self.example_project))
+        self.assertEqual("requirement_decomposition", first["kind"])
+        self.service.claim_next_task(
+            "planner", action="fail_decomposition",
+            requirement_id=requirement_id,
+            decomposition_run_id=first["run"]["id"], error="temporary failure",
+        )
+        retry = self.service.claim_next_task("planner", str(self.example_project))
+        self.assertEqual(first["requirement"]["id"], retry["requirement"]["id"])
+
+        with self.assertRaisesRegex(ValueError, "requires analysis_id"):
+            self.service.claim_next_task(
+                "planner", action="submit_decomposition",
+                requirement_id=requirement_id,
+                decomposition_run_id=retry["run"]["id"],
+                child_tasks=[{"key": "invalid", "title": "不可执行子任务", "goal": "缺少定位契约"}],
+            )
+        incomplete = self.service.claim_next_task(
+            "", action="get_requirement", requirement_id=requirement_id,
+        )
+        self.assertEqual("decomposing", incomplete["requirement"]["status"])
+        self.assertEqual([], incomplete["tasks"])
+
+        def child_spec(key, title, goal, criterion, file, depends_on=None):
+            analysis = self.service.prepare_location_analysis({
+                "title": title, "goal": goal,
+                "project": str(self.example_project), "modules": ["import"],
+            })
+            target = {"file": file, "symbols": [key], "reason": "decomposed task target"}
+            return {
+                "key": key, "title": title, "goal": goal,
+                "acceptance_criteria": [criterion],
+                "analysis_id": analysis["analysis_id"],
+                "location_evidence": {
+                    "tool": "codegraph_explore", "query": key,
+                    "files": [file], "symbols": [key],
+                },
+                "targets": [target],
+                "ordered_steps": [{"file": file, "symbol": key, "action": goal}],
+                "review_checks": [{
+                    "id": f"review-{key}", "description": f"review {key}", "kind": "code",
+                }],
+                "acceptance_plan": [{
+                    "criterion": criterion, "file": file, "symbol": key,
+                    "method": "focused test", "expected": criterion,
+                    "check_type": "static_review",
+                }],
+                "depends_on": depends_on or [],
+            }
+
+        child_specs = [
+            child_spec("parse", "实现解析", "解析导入文件", "文件可解析", "src/Parser.py"),
+            child_spec("entry", "接入入口", "从页面启动导入", "入口可用", "src/Entry.py", ["parse"]),
+        ]
+        completed = self.service.claim_next_task(
+            "planner", action="submit_decomposition",
+            requirement_id=requirement_id,
+            decomposition_run_id=retry["run"]["id"], child_tasks=child_specs,
+        )
+        repeated = self.service.claim_next_task(
+            "planner", action="submit_decomposition",
+            requirement_id=requirement_id,
+            decomposition_run_id=retry["run"]["id"], child_tasks=child_specs,
+        )
+        self.assertEqual("decomposed", completed["requirement"]["status"])
+        self.assertEqual(2, len(completed["tasks"]))
+        self.assertEqual(
+            [item["id"] for item in completed["tasks"]],
+            [item["id"] for item in repeated["tasks"]],
+        )
+        self.assertTrue(all(item["requirement_id"] == requirement_id for item in completed["tasks"]))
+        for item in completed["tasks"]:
+            self.assertIn("提供完整导入能力", item["goal"])
+            self.assertEqual(["import"], item["modules"])
+            self.assertEqual(["解析", "入口"], item["scope"][:2])
+            self.assertIn("历史回填", item["out_of_scope"])
+            self.assertIn("用户可完成导入", item["acceptance_criteria"])
+            self.assertTrue(item["location_context"]["targets"])
+            self.assertTrue(item["implementation_contract"]["ordered_steps"])
+            self.assertTrue(all(plan["file"] for plan in item["acceptance_plan"]))
+            self.assertTrue(item["auto_dispatch"])
+        self.assertEqual(1, len(completed["relations"]))
+        self.assertEqual("depends_on", completed["relations"][0]["relation_type"])
+
+    def test_schema_upgrade_preserves_tasks_and_adds_requirement_tracking(self):
+        task = self.create_ready_task()
+        db_path = self.service.db.path
+        with sqlite3.connect(db_path) as connection:
+            connection.execute("PRAGMA user_version=12")
+        upgraded = Database(db_path)
+        with upgraded.connection() as connection:
+            self.assertIsNotNone(connection.execute("SELECT 1 FROM tasks WHERE id=?", (task["id"],)).fetchone())
+            tables = {row["name"] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            task_columns = {row["name"] for row in connection.execute("PRAGMA table_info(tasks)")}
+        self.assertIn("requirement_decomposition_runs", tables)
+        self.assertIn("requirement_task_key", task_columns)
 
     def test_task_ids_use_type_specific_prefixes_and_board_preserves_ids(self):
         task = self.create_ready_task()

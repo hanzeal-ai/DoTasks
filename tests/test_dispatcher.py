@@ -221,6 +221,71 @@ class TaskDispatcherTest(unittest.TestCase):
             dispatcher.dispatch_once()
             self.assertTrue(client.connected)
 
+    def test_requirement_is_decomposed_before_any_implementation_session(self):
+        with tempfile.TemporaryDirectory() as project:
+            service = FakeService(project)
+            plan = [{"key": "one", "title": "子任务", "goal": "完成子任务"}]
+            service.submitted_decomposition = None
+
+            def claim_next_task(worker_id, lease_seconds):
+                if service.claimed:
+                    return None
+                service.claimed = True
+                return {
+                    "kind": "requirement_decomposition",
+                    "requirement": {"id": "REQ-0001", "project": project, "decomposition_plan": plan},
+                    "run": {"id": "RDRUN-0001", "run_type": "requirement_decomposition", "status": "running"},
+                    "lease_token": "requirement-lease",
+                }
+
+            service.claim_next_task = claim_next_task
+            service.submit_requirement_decomposition = lambda requirement_id, run_id, tasks: setattr(
+                service, "submitted_decomposition", (requirement_id, run_id, tasks)
+            )
+            client = FakeClient()
+            dispatcher = TaskDispatcher(service, client=client)
+
+            self.assertEqual(1, dispatcher.dispatch_once(limit=1))
+            self.assertEqual(("REQ-0001", "RDRUN-0001", plan), service.submitted_decomposition)
+            self.assertEqual([], client.calls)
+            self.assertIsNone(service.bound)
+
+    def test_requirement_without_plan_starts_tracked_decomposition_session(self):
+        with tempfile.TemporaryDirectory() as project:
+            service = FakeService(project)
+
+            def claim_next_task(worker_id, lease_seconds=1800, **kwargs):
+                if kwargs.get("action") == "get_requirement":
+                    return {"requirement": {"id": "REQ-0002", "status": "decomposed"}}
+                if kwargs.get("action"):
+                    return {"status": "ok"}
+                if service.claimed:
+                    return None
+                service.claimed = True
+                return {
+                    "kind": "requirement_decomposition",
+                    "requirement": {
+                        "id": "REQ-0002", "title": "完整需求", "project": project,
+                        "goal": "完成完整需求", "scope": ["能力一", "能力二"],
+                        "acceptance_criteria": ["完整需求可验收"],
+                        "decomposition_plan": [],
+                    },
+                    "run": {"id": "RDRUN-0002", "run_type": "requirement_decomposition", "status": "running"},
+                    "lease_token": "requirement-lease",
+                }
+
+            service.claim_next_task = claim_next_task
+            client = FakeClient()
+            dispatcher = TaskDispatcher(service, client=client)
+
+            self.assertEqual(1, dispatcher.dispatch_once(limit=1))
+            methods = [method for method, _ in client.calls]
+            self.assertEqual(["thread/start", "thread/name/set", "turn/start"], methods)
+            prompt = next(params for method, params in client.calls if method == "turn/start")["input"][0]["text"]
+            self.assertIn("submit_requirement_decomposition", prompt)
+            self.assertIn("RDRUN-0002", prompt)
+            self.assertIsNone(service.bound)
+
     def test_thread_name_failure_does_not_fail_execution(self):
         with tempfile.TemporaryDirectory() as project:
             service = FakeService(project)

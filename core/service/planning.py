@@ -775,7 +775,67 @@ class TaskPlanningMixin:
         return self._classify_task_dependencies(payload, candidates)
 
     def finalize_task_intake(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Create a ready task from one non-duplicated, model-authored intake bundle."""
+        """Persist a requirement or create a ready independently executable task."""
+        intake_kind = str(payload.get("intake_kind") or "task").strip().lower()
+        if intake_kind not in {"requirement", "task"}:
+            raise ValueError("intake_kind must be requirement or task")
+        if intake_kind == "requirement":
+            title = str(payload.get("title") or "").strip()
+            goal = str(payload.get("goal") or "").strip()
+            if not title:
+                raise ValueError("title is required")
+            if not goal:
+                raise ValueError("goal is required")
+            project = self._require_project_directory(payload.get("project"))
+            lists = {
+                field: self._string_list(payload, field)
+                for field in (
+                    "modules", "scope", "out_of_scope", "acceptance_criteria"
+                )
+            }
+            priority = str(payload.get("priority") or "P2").strip()
+            if priority not in {"P0", "P1", "P2", "P3"}:
+                raise ValueError("priority must be P0, P1, P2 or P3")
+            plan = payload.get("decomposition_tasks") or []
+            if not isinstance(plan, list) or any(
+                not isinstance(item, dict) for item in plan
+            ):
+                raise ValueError("decomposition_tasks must be an array of objects")
+            original_content = str(
+                payload.get("original_content") or payload.get("description") or goal
+            ).strip()
+            with self.db.transaction() as connection:
+                requirement_id = self.db.next_id(connection, "REQ")
+                connection.execute(
+                    """INSERT INTO requirements(
+                           id, title, original_content, description, source_type,
+                           source_reference, project, status, priority, goal,
+                           modules, scope, out_of_scope, acceptance_criteria,
+                           source_thread_id, auto_dispatch, decomposition_plan
+                       ) VALUES(?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        requirement_id, title, original_content,
+                        str(payload.get("description") or goal),
+                        str(payload.get("source_type") or "conversation"),
+                        payload.get("source_reference"), project, priority, goal,
+                        json.dumps(lists["modules"], ensure_ascii=False),
+                        json.dumps(lists["scope"], ensure_ascii=False),
+                        json.dumps(lists["out_of_scope"], ensure_ascii=False),
+                        json.dumps(lists["acceptance_criteria"], ensure_ascii=False),
+                        payload.get("source_thread_id"),
+                        int(bool(payload.get("auto_dispatch", True))),
+                        json.dumps(plan, ensure_ascii=False),
+                    ),
+                )
+                self._event(
+                    connection, "requirement", requirement_id, "created",
+                    {"intake_kind": "requirement", "title": title},
+                )
+            return {
+                "status": "created", "intake_kind": "requirement",
+                "requirement_id": requirement_id,
+                "requirement_status": "ready",
+            }
         analysis_id = str(payload.get("analysis_id") or "").strip()
         if not analysis_id:
             raise ValueError("analysis_id is required")
@@ -902,7 +962,7 @@ class TaskPlanningMixin:
         task_payload["status"] = "ready"
         task = self.create_task(task_payload)
         return {
-            "status": "created", "analysis_id": analysis_id,
+            "status": "created", "intake_kind": "task", "analysis_id": analysis_id,
             "task_id": task["id"], "task_status": task["status"],
         }
 

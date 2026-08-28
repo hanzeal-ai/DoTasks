@@ -83,10 +83,11 @@ TOOLS = [
     },
     {
         "name": "finalize_task_intake",
-        "description": "Create a ready v2 task from one non-duplicated intake bundle. Pass every requirement screenshot or other visual attachment through visual_references so Taskboard copies it out of temporary chat storage. Code Review checks must be code/static only; runtime and visual checks belong in acceptance_plan. Returns requires_confirmation instead of creating when a strong active dependency candidate exists.",
+        "description": "Persist intake_kind=requirement as a requirement planning entity, or create a ready v2 direct task for intake_kind=task (the backward-compatible default).",
         "inputSchema": {
             "type": "object",
             "properties": {
+                "intake_kind": {"type": "string", "enum": ["requirement", "task"], "default": "task"},
                 "analysis_id": {"type": "string"},
                 "title": {"type": "string"},
                 "project": {
@@ -95,6 +96,8 @@ TOOLS = [
                 },
                 "modules": {"type": "array", "items": {"type": "string"}},
                 "goal": {"type": "string"},
+                "original_content": {"type": "string", "description": "Original complete requirement text; used only for requirement intake."},
+                "description": {"type": "string"},
                 "scope": {"type": "array", "items": {"type": "string"}},
                 "out_of_scope": {"type": "array", "items": {"type": "string"}},
                 "priority": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
@@ -123,12 +126,55 @@ TOOLS = [
                 }, "required": ["criterion", "file", "symbol", "method", "expected", "check_type"]}},
                 "dependency_analysis": {"type": "object", "description": "Omit for automatic classification. Supply an explicit independent, depends_on, or continues_from decision only after resolving a returned strong candidate."},
                 "relations": {"type": "array", "items": {"type": "object"}},
+                "acceptance_criteria": {"type": "array", "items": {"type": "string"}, "description": "Requirement-level outcomes; direct task criteria continue to be derived from acceptance_plan."},
+                "decomposition_tasks": {"type": "array", "items": {"type": "object"}, "description": "Optional stable decomposition plan, materialized only when the requirement is dispatched."},
             },
-            "required": [
-                "analysis_id", "title", "project", "goal", "scope", "out_of_scope",
-                "location_evidence", "targets", "ordered_steps", "review_checks", "acceptance_plan"
+            "required": ["title", "project", "goal"],
+            "anyOf": [
+                {"properties": {"intake_kind": {"const": "requirement"}}, "required": ["intake_kind"]},
+                {"required": [
+                    "analysis_id", "scope", "out_of_scope", "location_evidence",
+                    "targets", "ordered_steps", "review_checks", "acceptance_plan"
+                ]}
             ],
         },
+    },
+    {
+        "name": "get_requirement",
+        "description": "Query a requirement, its decomposition state, every child task and their persisted dependency relations.",
+        "inputSchema": {"type": "object", "properties": {"requirement_id": {"type": "string"}}, "required": ["requirement_id"]},
+    },
+    {
+        "name": "submit_requirement_decomposition",
+        "description": "Idempotently complete an active requirement decomposition run by creating ready child tasks and dependency relations.",
+        "inputSchema": {"type": "object", "properties": {
+            "requirement_id": {"type": "string"}, "run_id": {"type": "string"},
+            "tasks": {"type": "array", "minItems": 1, "items": {
+                "type": "object", "properties": {
+                    "key": {"type": "string", "minLength": 1},
+                    "title": {"type": "string", "minLength": 1},
+                    "goal": {"type": "string", "minLength": 1},
+                    "analysis_id": {"type": "string", "minLength": 1},
+                    "location_evidence": {"type": "object"},
+                    "targets": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+                    "ordered_steps": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+                    "review_checks": {"type": "array", "minItems": 1},
+                    "acceptance_plan": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+                    "depends_on": {"type": "array", "items": {"type": "string"}},
+                }, "required": [
+                    "key", "title", "goal", "analysis_id", "location_evidence",
+                    "targets", "ordered_steps", "review_checks", "acceptance_plan",
+                ],
+            }},
+        }, "required": ["requirement_id", "run_id", "tasks"]},
+    },
+    {
+        "name": "report_requirement_decomposition_failed",
+        "description": "Release a failed decomposition claim so the same requirement can be safely retried.",
+        "inputSchema": {"type": "object", "properties": {
+            "requirement_id": {"type": "string"}, "run_id": {"type": "string"},
+            "error": {"type": "string"},
+        }, "required": ["requirement_id", "run_id", "error"]},
     },
     {
         "name": "analyze_task_dependencies",
@@ -419,6 +465,19 @@ TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "report_location_status": _report_location,
     "complete_location_analysis": _complete_location,
     "finalize_task_intake": SERVICE.finalize_task_intake,
+    "get_requirement": lambda arguments: SERVICE.claim_next_task(
+        "", action="get_requirement", requirement_id=arguments["requirement_id"],
+    ),
+    "submit_requirement_decomposition": lambda arguments: SERVICE.claim_next_task(
+        "requirement-decomposer", action="submit_decomposition",
+        requirement_id=arguments["requirement_id"],
+        decomposition_run_id=arguments["run_id"], child_tasks=arguments["tasks"],
+    ),
+    "report_requirement_decomposition_failed": lambda arguments: SERVICE.claim_next_task(
+        "requirement-decomposer", action="fail_decomposition",
+        requirement_id=arguments["requirement_id"],
+        decomposition_run_id=arguments["run_id"], error=arguments["error"],
+    ),
     "dispatch_next_task": lambda arguments: SERVICE.claim_next_task(arguments["worker_id"], arguments.get("project"), arguments.get("lease_seconds", 1800)),
     "bind_task_conversation": lambda arguments: SERVICE.bind_conversation(arguments["task_id"], arguments["role"], arguments["thread_id"], arguments.get("run_id"), arguments.get("title", "")),
     "submit_task_delivery": lambda arguments: SERVICE.submit_delivery(arguments["run_id"], arguments["delivery_summary"], arguments["verification_result"], arguments["changed_locations"], arguments["acceptance_evidence"], batch_revision=arguments.get("batch_revision")),
