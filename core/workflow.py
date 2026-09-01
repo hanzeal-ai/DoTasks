@@ -7,9 +7,19 @@ from typing import Any, Iterable
 TASK_TRANSITIONS = {
     "draft": {"ready", "paused", "cancelled"},
     "ready": {"claimed", "waiting_confirmation", "paused", "cancelled", "blocked"},
-    "claimed": {"investigating", "ready", "failed", "paused", "blocked"},
+    "claimed": {
+        "investigating",
+        "implementing",
+        "ready",
+        "waiting_confirmation",
+        "failed",
+        "paused",
+        "blocked",
+    },
     "investigating": {
         "implementing",
+        "code_review",
+        "done",
         "waiting_confirmation",
         "failed",
         "paused",
@@ -20,6 +30,8 @@ TASK_TRANSITIONS = {
     "implementing": {
         "ready",
         "waiting_confirmation",
+        "code_review",
+        "done",
         "failed",
         "paused",
         "blocked",
@@ -28,27 +40,20 @@ TASK_TRANSITIONS = {
     "blocked": {
         "ready",
         "rework",
-        "review",
         "code_review",
-        "acceptance",
         "paused",
         "cancelled",
     },
     "paused": {"cancelled"},
     "failed": {"ready", "paused", "blocked", "cancelled"},
-    "review": {"waiting_confirmation", "paused", "blocked", "cancelled", "acceptance"},
-    "code_review": {"waiting_confirmation", "paused", "blocked", "cancelled", "rework", "acceptance"},
-    "acceptance": {"waiting_confirmation", "paused", "blocked", "cancelled", "done", "acceptance_blocked"},
-    "acceptance_blocked": {"paused", "cancelled", "acceptance"},
-    "rework": {"claimed", "waiting_confirmation", "paused", "blocked", "cancelled"},
+    "code_review": {"waiting_confirmation", "paused", "blocked", "cancelled", "rework", "done"},
+    "rework": {"claimed", "waiting_confirmation", "code_review", "done", "paused", "blocked", "cancelled"},
     "done": set(),
     "cancelled": set(),
 }
 
 TASK_STATUSES = frozenset(TASK_TRANSITIONS)
-RUN_TYPES = frozenset(
-    {"execution", "rework", "bugfix", "review", "code_review", "acceptance"}
-)
+RUN_TYPES = frozenset({"execution", "rework", "bugfix", "code_review"})
 RUN_STATUSES = frozenset(
     {
         "awaiting_thread",
@@ -73,14 +78,13 @@ BOARD_COLUMNS = (
     {
         "key": "code-review",
         "title": "Code Review",
-        "statuses": ("code_review", "review"),
+        "statuses": ("code_review",),
     },
     {
-        "key": "acceptance",
-        "title": "验收中",
-        "statuses": ("acceptance", "acceptance_blocked"),
+        "key": "attention",
+        "title": "待处理",
+        "statuses": (),
     },
-    {"key": "done", "title": "完成", "statuses": ("done",)},
 )
 STATUS_LABELS = {
     "draft": "草稿",
@@ -89,10 +93,7 @@ STATUS_LABELS = {
     "investigating": "分析中",
     "implementing": "实现中",
     "rework": "返工",
-    "review": "待验收",
     "code_review": "Code Review",
-    "acceptance": "验收中",
-    "acceptance_blocked": "验收阻塞",
     "waiting_confirmation": "待确认",
     "failed": "执行失败",
     "blocked": "阻塞",
@@ -105,12 +106,10 @@ TOKEN_STAGES = (
     {"key": "rework", "label": "返工"},
     {"key": "bugfix", "label": "Bug 修复"},
     {"key": "code_review", "label": "Code Review"},
-    {"key": "acceptance", "label": "功能验收"},
-    {"key": "review", "label": "旧版验收"},
 )
 ATTENTION_STATUSES = frozenset({"waiting_confirmation", "failed", "blocked", "paused"})
 AUTO_DISPATCH_ATTENTION_STATUSES = frozenset(
-    {"ready", "rework", "review", "code_review", "acceptance"}
+    {"ready", "rework", "code_review"}
 )
 
 

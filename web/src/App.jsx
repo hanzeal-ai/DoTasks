@@ -2,7 +2,7 @@ import { useEffect } from "react";
 
 export default function App() {
   useEffect(() => {
-    void import("./legacy-app.js");
+    void import("./taskboard-app.js");
   }, []);
 
   return (
@@ -12,61 +12,54 @@ export default function App() {
           <div className="sidebar-brand">
             <img
               className="brand-mark"
-              src="/codex-taskboard-mark.svg"
-              alt=""
+              src="/dotasks-mark.svg"
+              alt="DoTasks"
             />
-            <span>Taskboard</span>
+            <span>DoTasks</span>
           </div>
           <nav className="sidebar-nav" aria-label="工作区导航">
-            <button
-              id="board-nav"
-              className="sidebar-item selected"
-              type="button"
-            >
-              <svg viewBox="0 0 20 20" aria-hidden="true">
-                <path d="M3.5 4.5h5v11h-5zm8 0h5v6h-5zm0 9h5v2h-5z" />
-              </svg>
-              <span>任务面板</span>
-              <span id="board-count" className="sidebar-count">
-                0
-              </span>
-            </button>
-            <button id="token-panel" className="sidebar-item" type="button">
-              <svg viewBox="0 0 20 20" aria-hidden="true">
-                <path d="M3.5 14.5h3v2h-3zm5-5h3v7h-3zm5-6h3v13h-3z" />
-              </svg>
-              <span>Token 面板</span>
-            </button>
-            <section className="projects-section">
-              <div className="sidebar-section-head">
-                <span id="project-list-title">项目</span>
-                <div className="sidebar-section-actions">
-                  <button
-                    id="project-archive-toggle"
-                    className="sidebar-text-button"
-                    type="button"
-                  >
-                    查看归档
-                  </button>
-                  <button
-                    id="add-project"
-                    className="sidebar-icon-button"
-                    type="button"
-                    title="加载文件夹"
-                    aria-label="加载文件夹"
-                  >
-                    ＋
-                  </button>
-                </div>
-              </div>
-              <div id="project-list" className="project-list">
-                <div className="sidebar-loading">正在同步 Codex 项目…</div>
-              </div>
-            </section>
+            <div className="sidebar-primary-actions">
+              <button
+                id="board-nav"
+                className="sidebar-item selected"
+                type="button"
+              >
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <rect x="3.5" y="3.5" width="5" height="5" rx="1" />
+                  <rect x="11.5" y="3.5" width="5" height="5" rx="1" />
+                  <rect x="3.5" y="11.5" width="5" height="5" rx="1" />
+                  <rect x="11.5" y="11.5" width="5" height="5" rx="1" />
+                </svg>
+                <span>任务看板</span>
+                <span id="board-count" className="sidebar-count">
+                  0
+                </span>
+              </button>
+              <button
+                id="requirements-nav"
+                className="sidebar-item"
+                type="button"
+              >
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <path d="M5 3.5h10a1.5 1.5 0 0 1 1.5 1.5v10a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 15V5A1.5 1.5 0 0 1 5 3.5Z" />
+                  <path d="M6.5 7h7M6.5 10h7M6.5 13h4" />
+                </svg>
+                <span>需求看板</span>
+                <span id="requirements-count" className="sidebar-count">
+                  0
+                </span>
+              </button>
+              <button id="token-panel" className="sidebar-item" type="button">
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <path d="M4 16V11M10 16V7M16 16V3" />
+                </svg>
+                <span>Token 看板</span>
+              </button>
+            </div>
           </nav>
           <div className="sidebar-footer">
-            <span id="codex-sync-dot" className="sync-dot pending"></span>
-            <span id="codex-sync-label">正在连接 Codex</span>
+            <span className="sync-dot connected"></span>
+            <span>Codex 原生任务调度</span>
           </div>
         </aside>
 
@@ -74,7 +67,7 @@ export default function App() {
           <header>
             <div className="header-heading">
               <p id="view-eyebrow" className="eyebrow">
-                TASKBOARD
+                DOTASKS
               </p>
               <h1 id="view-title">任务面板</h1>
             </div>
@@ -101,9 +94,6 @@ export default function App() {
               <button id="dispatcher-toggle" className="ghost" type="button">
                 调度状态
               </button>
-              <button id="new-chat" className="primary" type="button" hidden>
-                ＋ 新建会话
-              </button>
               <button
                 id="task-change-confirmations"
                 className="primary change-confirmation-button"
@@ -112,8 +102,8 @@ export default function App() {
               >
                 需求变更（<span id="task-change-count">0</span>）
               </button>
-              <button id="attention-tasks" className="primary" type="button">
-                待处理任务（<span id="attention-count">0</span>）
+              <button id="completed-tasks" className="primary" type="button">
+                完成任务（<span id="completed-count">0</span>）
               </button>
               <button
                 id="settings-button"
@@ -144,13 +134,13 @@ export default function App() {
         </div>
       </dialog>
 
-      <dialog id="attention-tasks-dialog" className="attention-dialog">
+      <dialog id="completed-tasks-dialog" className="attention-dialog">
         <div className="detail-shell attention-shell">
           <div className="dialog-head">
             <div>
-              <p className="eyebrow">ATTENTION</p>
+              <p className="eyebrow">COMPLETED</p>
               <h2>
-                待处理任务（<span id="attention-dialog-count">0</span>）
+                完成任务（<span id="completed-dialog-count">0</span>）
               </h2>
             </div>
             <button type="button" className="icon-button" data-close>
@@ -158,7 +148,7 @@ export default function App() {
             </button>
           </div>
           <div
-            id="attention-tasks-content"
+            id="completed-tasks-content"
             className="attention-tasks-content"
           ></div>
         </div>

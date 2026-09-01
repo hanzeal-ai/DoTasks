@@ -38,17 +38,5 @@ class DependencyContractTest(unittest.TestCase):
         )
         self.assertEqual(TOMLI_VERSION, importlib.metadata.version("tomli"))
 
-    def test_app_server_has_a_python_39_compatibility_import(self) -> None:
-        source = (ROOT / "taskboard" / "app_server.py").read_text()
-        self.assertIn("except ModuleNotFoundError", source)
-        self.assertIn("import tomli as tomllib", source)
-
-    def test_test_runner_isolated_helper_authorization(self) -> None:
-        runner = (ROOT / "scripts" / "test").read_text()
-        self.assertIn("--python 3.9.25", runner)
-        self.assertIn("requirements.lock", runner)
-        self.assertIn("unset CODEX_TASKBOARD_HELPER_APP", runner)
-
-
 if __name__ == "__main__":
     unittest.main()

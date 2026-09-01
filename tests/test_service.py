@@ -6,7 +6,9 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -17,7 +19,6 @@ from core.service import TaskboardService
 
 class TaskboardServiceTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.previous_helper_app = os.environ.pop("CODEX_TASKBOARD_HELPER_APP", None)
         self.temp = tempfile.TemporaryDirectory()
         self.example_project = Path(self.temp.name) / "example"
         self.example_project.mkdir()
@@ -27,8 +28,8 @@ class TaskboardServiceTest(unittest.TestCase):
         self.other_project.mkdir()
         self.second_project = Path(self.temp.name) / "second-project"
         self.second_project.mkdir()
-        self.previous_vault = os.environ.get("CODEX_TASKBOARD_OBSIDIAN_VAULT")
-        os.environ["CODEX_TASKBOARD_OBSIDIAN_VAULT"] = str(Path(self.temp.name) / "vault")
+        self.previous_vault = os.environ.get("DOTASKS_OBSIDIAN_VAULT")
+        os.environ["DOTASKS_OBSIDIAN_VAULT"] = str(Path(self.temp.name) / "vault")
         Path("/tmp/example").mkdir(parents=True, exist_ok=True)
         for path in ("/tmp/other-project", "/tmp/second-project", "/tmp/unreported"):
             Path(path).mkdir(parents=True, exist_ok=True)
@@ -36,12 +37,10 @@ class TaskboardServiceTest(unittest.TestCase):
         self.service.set_dispatcher_enabled(True)
 
     def tearDown(self) -> None:
-        if self.previous_helper_app is not None:
-            os.environ["CODEX_TASKBOARD_HELPER_APP"] = self.previous_helper_app
         if self.previous_vault is None:
-            os.environ.pop("CODEX_TASKBOARD_OBSIDIAN_VAULT", None)
+            os.environ.pop("DOTASKS_OBSIDIAN_VAULT", None)
         else:
-            os.environ["CODEX_TASKBOARD_OBSIDIAN_VAULT"] = self.previous_vault
+            os.environ["DOTASKS_OBSIDIAN_VAULT"] = self.previous_vault
         self.temp.cleanup()
 
     def test_dispatcher_is_disabled_by_default(self):
@@ -49,28 +48,221 @@ class TaskboardServiceTest(unittest.TestCase):
             service = TaskboardService(home)
             self.assertFalse(service.dispatcher_enabled())
 
+    def test_native_dispatch_is_persisted_and_binds_only_a_real_thread(self):
+        task = self.create_ready_task()
+        dispatch = self.service.claim_next_native_dispatch("codex-native-controller", stage="development")
+
+        self.assertEqual((task["id"], "claimed"), (dispatch["entity_id"], dispatch["status"]))
+        self.assertEqual("claimed", self.service.get_task(task["id"])["status"])
+        self.assertEqual("awaiting_thread", self.service.get_run(dispatch["run_id"])["status"])
+        self.assertEqual(f"[DoTaks] {task['id']} 开发", dispatch["dispatch_title"])
+        self.assertIn("$dotasks-lifecycle", dispatch["dispatch_prompt"])
+        self.assertEqual(
+            dispatch["run_id"],
+            self.service.claim_next_native_dispatch("codex-native-controller", stage="development")["run_id"],
+        )
+        with self.assertRaisesRegex(ValueError, "client_thread_id is required"):
+            self.service.mark_native_dispatch_pending(dispatch["run_id"], "")
+
+        pending = self.service.mark_native_dispatch_pending(
+            dispatch["run_id"], "client-pending-1", "local", "project-1",
+        )
+        self.assertEqual(("pending_thread", "client-pending-1"), (pending["status"], pending["client_thread_id"]))
+        self.assertEqual("claimed", self.service.get_task(task["id"])["status"])
+        bound = self.service.bind_native_dispatch(
+            dispatch["run_id"], "native-thread-1", "local", "project-1",
+        )
+        self.assertEqual(("bound", "native-thread-1"), (bound["status"], bound["thread_id"]))
+        bound_task = self.service.get_task(task["id"])
+        self.assertEqual(("implementing", "native-thread-1"), (bound_task["status"], bound_task["codex_thread_id"]))
+        self.assertEqual("running", self.service.get_run(dispatch["run_id"])["status"])
+
+    def test_native_dispatch_titles_use_entity_id_and_stage_label(self):
+        title = self.service._native_dispatch_title
+        cases = (
+            ("execution", "TASK-0001", "[DoTaks] TASK-0001 开发"),
+            ("rework", "TASK-0001", "[DoTaks] TASK-0001 返工"),
+            ("bugfix", "BUG-0001", "[DoTaks] BUG-0001 Bug 修复"),
+            ("code_review", "TASK-0001", "[DoTaks] TASK-0001 Code Review"),
+            ("requirement_decomposition", "REQ-0001", "[DoTaks] REQ-0001 需求拆解"),
+        )
+        for role, entity_id, expected in cases:
+            entity_key = "requirement" if role == "requirement_decomposition" else "task"
+            with self.subTest(role=role):
+                self.assertEqual(
+                    expected,
+                    title({"run": {"run_type": role}, entity_key: {"id": entity_id}}),
+                )
+
+    def test_native_controller_claim_is_serialized_across_service_processes(self):
+        self.create_ready_task()
+        self.create_located_task({
+            "title": "实现第二项目入口",
+            "project": str(self.other_project),
+            "modules": ["b-page"],
+            "goal": "增加第二项目入口",
+            "scope": ["入口"],
+            "out_of_scope": [],
+            "acceptance_criteria": ["入口可用"],
+        }, [{"file": "src/BPage.tsx", "symbols": ["BPage"], "reason": "second target"}])
+        second_service = TaskboardService(self.temp.name)
+        barrier = threading.Barrier(2)
+
+        def claim(service: TaskboardService) -> dict:
+            barrier.wait()
+            return service.claim_next_native_dispatch("codex-native-controller", stage="development")
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(claim, (self.service, second_service)))
+
+        self.assertEqual(1, len({result["run_id"] for result in results}))
+        with self.service.db.connection() as connection:
+            active_dispatches = connection.execute(
+                """SELECT COUNT(*) value FROM native_dispatches
+                   WHERE worker_id='codex-native-controller:development'
+                     AND status IN ('claimed','pending_thread','bound')"""
+            ).fetchone()["value"]
+            active_runs = connection.execute(
+                """SELECT COUNT(*) value FROM task_runs
+                   WHERE claimed_by='codex-native-controller:development'
+                     AND status IN ('awaiting_thread','running')"""
+            ).fetchone()["value"]
+        self.assertEqual((1, 1), (active_dispatches, active_runs))
+
+    def test_native_controller_claims_independent_stage_lanes_concurrently(self):
+        development_task = self.create_ready_task()
+        review_task = self.create_located_task({
+            "title": "审查第二项目入口",
+            "project": str(self.other_project),
+            "modules": ["review-page"],
+            "goal": "验证第二项目入口",
+            "scope": ["入口审查"],
+            "out_of_scope": [],
+            "acceptance_criteria": ["入口审查通过"],
+        })
+        review_task = self.submit_delivery(review_task, "review-delivery-thread")
+
+        review_dispatch = self.service.claim_next_native_dispatch(
+            "codex-native-controller", stage="code_review"
+        )
+        development_dispatch = self.service.claim_next_native_dispatch(
+            "codex-native-controller", stage="development"
+        )
+
+        self.assertEqual(review_task["id"], review_dispatch["entity_id"])
+        self.assertEqual("code_review", review_dispatch["role"])
+        self.assertEqual(
+            "codex-native-controller:code_review", review_dispatch["worker_id"]
+        )
+        self.assertEqual(development_task["id"], development_dispatch["entity_id"])
+        self.assertEqual("execution", development_dispatch["role"])
+        self.assertEqual(
+            "codex-native-controller:development",
+            development_dispatch["worker_id"],
+        )
+        self.assertEqual(
+            review_dispatch["run_id"],
+            self.service.claim_next_native_dispatch(
+                "codex-native-controller", stage="code_review"
+            )["run_id"],
+        )
+        self.assertEqual(
+            development_dispatch["run_id"],
+            self.service.claim_next_native_dispatch(
+                "codex-native-controller", stage="development"
+            )["run_id"],
+        )
+        with self.assertRaisesRegex(ValueError, "stage must be"):
+            self.service.claim_next_native_dispatch(
+                "codex-native-controller", stage="acceptance"
+            )
+        with self.assertRaisesRegex(ValueError, "stage must be"):
+            self.service.claim_next_native_dispatch(
+                "codex-native-controller", stage="review"
+            )
+
+        with self.service.db.connection() as connection:
+            active = connection.execute(
+                """SELECT COUNT(*) value FROM native_dispatches
+                   WHERE worker_id LIKE 'codex-native-controller:%'
+                     AND status IN ('claimed','pending_thread','bound')"""
+            ).fetchone()["value"]
+        self.assertEqual(2, active)
+
+    def test_database_rejects_two_active_dispatches_for_one_worker(self):
+        self.create_ready_task()
+        dispatch = self.service.claim_next_native_dispatch("codex-native-controller", stage="development")
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError,
+            "active native dispatch already exists for worker",
+        ), self.service.db.transaction() as connection:
+            connection.execute(
+                """INSERT INTO native_dispatches(
+                       run_id, entity_type, entity_id, role, worker_id,
+                       project_path, dispatch_title, dispatch_prompt
+                   ) VALUES(?, 'task', 'TASK-OTHER', 'execution', ?, '', 'duplicate', 'duplicate')""",
+                ("RUN-DUPLICATE", dispatch["worker_id"]),
+            )
+
+    def test_native_retry_prefers_original_thread_and_records_safe_fallback(self):
+        task = self.create_ready_task()
+        first = self.service.claim_next_native_dispatch("codex-native-controller", stage="development")
+        self.service.bind_native_dispatch(first["run_id"], "native-thread-1")
+        self.service.fail_native_dispatch(first["run_id"], "worker ended without callback")
+        self.service.transition_task(task["id"], "ready")
+
+        retry = self.service.claim_next_native_dispatch("codex-native-controller", stage="development")
+        self.assertNotEqual(first["run_id"], retry["run_id"])
+        self.assertEqual("native-thread-1", retry["resume_thread_id"])
+        replacement = self.service.bind_native_dispatch(
+            retry["run_id"], "native-thread-2",
+            resume_fallback_reason="native-thread-1 is unavailable",
+        )
+        self.assertEqual("native-thread-1 is unavailable", replacement["resume_fallback_reason"])
+        self.assertEqual("native-thread-2", self.service.get_task(task["id"])["codex_thread_id"])
+
     def test_task_token_budget_setting_controls_new_tasks(self):
         existing = self.create_ready_task()
         self.assertEqual(60000, existing["token_budget"])
         self.assertEqual(
-            {"task_token_budget": 60000, "max_batch_appended_tasks": 3},
+            {
+                "task_token_budget": 60000,
+                "max_batch_appended_tasks": 3,
+                "parallel_development_enabled": False,
+                "max_parallel_development": 2,
+            },
             self.service.task_settings(),
         )
 
         self.assertEqual(
-            {"task_token_budget": 120000, "max_batch_appended_tasks": 3},
+            {
+                "task_token_budget": 120000,
+                "max_batch_appended_tasks": 3,
+                "parallel_development_enabled": False,
+                "max_parallel_development": 2,
+            },
             self.service.update_task_settings({"task_token_budget": 120000}),
         )
         created = self.create_ready_task()
         self.assertEqual(120000, created["token_budget"])
         self.assertEqual(60000, self.service.get_task(existing["id"])["token_budget"])
         self.assertEqual(
-            {"task_token_budget": 120000, "max_batch_appended_tasks": 3},
+            {
+                "task_token_budget": 120000,
+                "max_batch_appended_tasks": 3,
+                "parallel_development_enabled": False,
+                "max_parallel_development": 2,
+            },
             TaskboardService(self.temp.name).task_settings(),
         )
 
         self.assertEqual(
-            {"task_token_budget": 120000, "max_batch_appended_tasks": 5},
+            {
+                "task_token_budget": 120000,
+                "max_batch_appended_tasks": 5,
+                "parallel_development_enabled": False,
+                "max_parallel_development": 2,
+            },
             self.service.update_task_settings(
                 {"task_token_budget": 120000, "max_batch_appended_tasks": 5}
             ),
@@ -90,6 +282,18 @@ class TaskboardServiceTest(unittest.TestCase):
                 self.service.update_task_settings(
                     {"task_token_budget": 60000, "max_batch_appended_tasks": value}
                 )
+
+        for value in (0, 9, True, "2"):
+            with self.subTest(parallel_value=value), self.assertRaisesRegex(
+                ValueError, "integer between 1 and 8"
+            ):
+                self.service.update_task_settings(
+                    {"task_token_budget": 60000, "max_parallel_development": value}
+                )
+        with self.assertRaisesRegex(ValueError, "must be boolean"):
+            self.service.update_task_settings(
+                {"task_token_budget": 60000, "parallel_development_enabled": 1}
+            )
 
     def test_location_schema_uses_generic_names(self):
         with self.service.db.connection() as connection:
@@ -122,10 +326,19 @@ class TaskboardServiceTest(unittest.TestCase):
         })
 
     def create_located_task(self, payload, targets=None):
-        # Existing service tests exercise the pre-v2 review API explicitly.
-        payload = {**payload, "workflow_version": payload.get("workflow_version", 1)}
         project = payload["project"]
         located_targets = targets or [{"file": "src/APage.tsx", "symbols": ["APage"], "reason": "primary target"}]
+        located_targets = [
+            {
+                **target,
+                "mode": target.get("mode", "modify"),
+                "tasks": target.get("tasks") or [{
+                    "symbol": (target.get("symbols") or [""])[0],
+                    "action": "apply the focused test change",
+                }],
+            }
+            for target in located_targets
+        ]
         plan_target = located_targets[0]
         plan_symbol = (plan_target.get("symbols") or [""])[0]
         self.service.report_location_status(
@@ -136,17 +349,14 @@ class TaskboardServiceTest(unittest.TestCase):
         dependency_analysis = {"decision": "independent"}
         implementation_contract = {
             "targets": located_targets,
-            "ordered_steps": [
-                {
-                    "file": target["file"],
-                    "symbol": symbol,
-                    "action": "apply the focused test change",
-                }
-                for target in located_targets
-                for symbol in target.get("symbols", [])[:1]
-            ],
         }
-        review_contract = {"checks": ["Verify the focused change and acceptance criteria"]}
+        review_contract = {"checks": [{
+            "id": "focused-review",
+            "description": "Verify the focused change and acceptance criteria",
+            "kind": "code",
+        }], "quality_gates": {
+            "code_review": {"required": True, "reason": "test code change"},
+        }}
         completed = self.service.complete_location_analysis(
             analysis["analysis_id"],
             {"query": "context", "symbols": ["APage"]},
@@ -184,7 +394,6 @@ class TaskboardServiceTest(unittest.TestCase):
             "acceptance_criteria": criteria,
             "priority": "P1",
             "source_thread_id": "native-source-thread",
-            "workflow_version": 2,
         }
         self.service.report_location_status(
             task["project"], True, "connected", "Agent query succeeded",
@@ -199,8 +408,11 @@ class TaskboardServiceTest(unittest.TestCase):
                 "method": "focused test", "expected": criteria[0],
             }],
             {"decision": "independent"},
-            {"targets": [target], "ordered_steps": [{"file": target["file"], "symbol": "APage", "action": "replace addition with subtraction"}]},
-            {"checks": ["Verify subtraction behavior and regression coverage"]},
+            {"targets": [{**target, "mode": "modify", "tasks": [{"symbol": "APage", "action": "replace addition with subtraction"}]}]},
+            {
+                "checks": [{"id": "subtraction-review", "description": "Verify subtraction behavior and regression coverage", "kind": "code"}],
+                "quality_gates": {"code_review": {"required": True, "reason": "code change"}},
+            },
         )
         proposed.update({
             "location_analysis_id": completed["id"],
@@ -214,12 +426,42 @@ class TaskboardServiceTest(unittest.TestCase):
             "evidence": {"reasons": ["来自同一 Codex 会话", "模块重合：a-page"]},
         })
 
+    def complete_current_location(self, analysis_id, evidence, targets, acceptance_plan):
+        normalized_targets = [
+            {
+                **target,
+                "mode": target.get("mode", "modify"),
+                "tasks": target.get("tasks") or [{
+                    "symbol": (target.get("symbols") or [""])[0],
+                    "action": "apply the focused test change",
+                }],
+            }
+            for target in targets
+        ]
+        return self.service.complete_location_analysis(
+            analysis_id,
+            evidence,
+            normalized_targets,
+            acceptance_plan,
+            {"decision": "independent"},
+            {"targets": normalized_targets},
+            {
+                "checks": [{
+                    "id": "focused-review",
+                    "description": "Verify the focused change",
+                    "kind": "code",
+                }],
+                "quality_gates": {
+                    "code_review": {"required": True, "reason": "code change"},
+                },
+            },
+        )
+
     def test_ready_task_requires_goal_project_and_acceptance(self):
         with self.assertRaisesRegex(ValueError, "missing"):
             self.service.create_task({
                 "title": "信息不完整",
                 "status": "ready",
-                "workflow_version": 2,
             })
 
     def test_confirmed_task_enters_ready_queue_without_requirement(self):
@@ -227,7 +469,7 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertEqual("ready", task["status"])
         self.assertIsNone(task["requirement_id"])
         board = self.service.board()
-        self.assertNotIn("requirements", board)
+        self.assertEqual([], board["requirements"])
         self.assertEqual([str(self.example_project.resolve())], board["projects"])
         self.assertEqual(0, board["counts"]["attention"])
 
@@ -248,6 +490,11 @@ class TaskboardServiceTest(unittest.TestCase):
         })
         self.assertEqual("requirement", intake["intake_kind"])
         requirement_id = intake["requirement_id"]
+        board_requirement = self.service.board()["requirements"][0]
+        self.assertEqual(requirement_id, board_requirement["id"])
+        self.assertEqual(0, board_requirement["child_task_count"])
+        self.assertTrue(board_requirement["auto_dispatch"])
+        self.assertEqual([str(self.example_project.resolve())], self.service.board()["projects"])
         initial = self.service.claim_next_task(
             "", action="get_requirement", requirement_id=requirement_id,
         )
@@ -291,11 +538,13 @@ class TaskboardServiceTest(unittest.TestCase):
                     "tool": "codegraph_explore", "query": key,
                     "files": [file], "symbols": [key],
                 },
-                "targets": [target],
-                "ordered_steps": [{"file": file, "symbol": key, "action": goal}],
+                "targets": [{**target, "mode": "modify", "tasks": [{"symbol": key, "action": goal}]}],
                 "review_checks": [{
                     "id": f"review-{key}", "description": f"review {key}", "kind": "code",
                 }],
+                "quality_gates": {
+                    "code_review": {"required": True, "reason": "code change"},
+                },
                 "acceptance_plan": [{
                     "criterion": criterion, "file": file, "symbol": key,
                     "method": "focused test", "expected": criterion,
@@ -308,6 +557,36 @@ class TaskboardServiceTest(unittest.TestCase):
             child_spec("parse", "实现解析", "解析导入文件", "文件可解析", "src/Parser.py"),
             child_spec("entry", "接入入口", "从页面启动导入", "入口可用", "src/Entry.py", ["parse"]),
         ]
+        invalid_specs = [
+            child_specs[0],
+            {
+                **child_specs[1],
+                "location_evidence": {
+                    "tool": "codegraph_cli_explore",
+                    "argv": [
+                        "codegraph", "explore", "--path",
+                        str(self.example_project), "entry",
+                    ],
+                    "exit_code": 0,
+                    "query": "entry",
+                    "files": ["src/Entry.py"],
+                    "symbols": ["entry"],
+                },
+            },
+        ]
+        with self.assertRaisesRegex(
+            ValueError, r"Decomposed task entry.*location_evidence.*evidence\.command",
+        ):
+            self.service.claim_next_task(
+                "planner", action="submit_decomposition",
+                requirement_id=requirement_id,
+                decomposition_run_id=retry["run"]["id"], child_tasks=invalid_specs,
+            )
+        preflight_failure = self.service.claim_next_task(
+            "", action="get_requirement", requirement_id=requirement_id,
+        )
+        self.assertEqual([], preflight_failure["tasks"])
+
         completed = self.service.claim_next_task(
             "planner", action="submit_decomposition",
             requirement_id=requirement_id,
@@ -325,18 +604,57 @@ class TaskboardServiceTest(unittest.TestCase):
             [item["id"] for item in repeated["tasks"]],
         )
         self.assertTrue(all(item["requirement_id"] == requirement_id for item in completed["tasks"]))
+        expected_children = {
+            "parse": ("解析导入文件", "文件可解析"),
+            "entry": ("从页面启动导入", "入口可用"),
+        }
         for item in completed["tasks"]:
-            self.assertIn("提供完整导入能力", item["goal"])
+            expected_goal, expected_criterion = expected_children[item["requirement_task_key"]]
+            self.assertEqual(expected_goal, item["goal"])
             self.assertEqual(["import"], item["modules"])
-            self.assertEqual(["解析", "入口"], item["scope"][:2])
+            self.assertEqual([expected_goal], item["scope"])
             self.assertIn("历史回填", item["out_of_scope"])
-            self.assertIn("用户可完成导入", item["acceptance_criteria"])
+            self.assertEqual([expected_criterion], item["acceptance_criteria"])
+            self.assertNotIn("用户可完成导入", item["acceptance_criteria"])
+            self.assertEqual([expected_criterion], [plan["criterion"] for plan in item["acceptance_plan"]])
             self.assertTrue(item["location_context"]["targets"])
-            self.assertTrue(item["implementation_contract"]["ordered_steps"])
+            self.assertTrue(item["implementation_contract"]["targets"][0]["tasks"])
             self.assertTrue(all(plan["file"] for plan in item["acceptance_plan"]))
             self.assertTrue(item["auto_dispatch"])
         self.assertEqual(1, len(completed["relations"]))
         self.assertEqual("depends_on", completed["relations"][0]["relation_type"])
+
+    def test_requirement_decomposition_failures_stop_after_three_attempts(self):
+        intake = self.service.finalize_task_intake({
+            "intake_kind": "requirement",
+            "title": "拆解失败熔断",
+            "original_content": "拆成多个任务。",
+            "project": str(self.example_project),
+            "goal": "验证需求拆解重试熔断",
+            "modules": ["planning"],
+            "scope": ["拆解"],
+            "out_of_scope": [],
+            "acceptance_criteria": ["不会无限重试"],
+        })
+        requirement_id = intake["requirement_id"]
+
+        for attempt in range(1, 4):
+            claim = self.service.claim_next_task("planner", str(self.example_project))
+            self.assertEqual(attempt, claim["requirement"]["decomposition_attempts"])
+            result = self.service.claim_next_task(
+                "planner",
+                action="fail_decomposition",
+                requirement_id=requirement_id,
+                decomposition_run_id=claim["run"]["id"],
+                error="persistent failure",
+            )
+            expected_status = "failed" if attempt == 3 else "ready"
+            self.assertEqual(expected_status, result["requirement"]["status"])
+
+        self.assertFalse(result["requirement"]["auto_dispatch"])
+        self.assertIsNone(
+            self.service.claim_next_task("planner", str(self.example_project))
+        )
 
     def test_schema_upgrade_preserves_tasks_and_adds_requirement_tracking(self):
         task = self.create_ready_task()
@@ -350,6 +668,37 @@ class TaskboardServiceTest(unittest.TestCase):
             task_columns = {row["name"] for row in connection.execute("PRAGMA table_info(tasks)")}
         self.assertIn("requirement_decomposition_runs", tables)
         self.assertIn("requirement_task_key", task_columns)
+
+    def test_schema_upgrade_returns_retired_acceptance_task_to_code_review(self):
+        task = self.submit_delivery(self.create_ready_task(), "migration-delivery-thread")
+        with self.service.db.transaction() as connection:
+            connection.execute("DROP TRIGGER validate_task_update")
+            connection.execute(
+                "UPDATE task_runs SET status='completed' WHERE id=?",
+                (task["primary_run_id"],),
+            )
+            connection.execute(
+                """UPDATE tasks SET status='acceptance',
+                   active_run_id=NULL, assigned_to=NULL WHERE id=?""",
+                (task["id"],),
+            )
+        with sqlite3.connect(self.service.db.path) as connection:
+            connection.execute("PRAGMA user_version=16")
+            connection.commit()
+
+        upgraded = Database(self.service.db.path)
+        with upgraded.connection() as connection:
+            migrated_task = connection.execute(
+                "SELECT status, active_run_id, auto_dispatch FROM tasks WHERE id=?",
+                (task["id"],),
+            ).fetchone()
+            primary_run = connection.execute(
+                "SELECT status FROM task_runs WHERE id=?",
+                (task["primary_run_id"],),
+            ).fetchone()
+
+        self.assertEqual(("code_review", None, 1), tuple(migrated_task))
+        self.assertEqual("waiting_review", primary_run["status"])
 
     def test_task_ids_use_type_specific_prefixes_and_board_preserves_ids(self):
         task = self.create_ready_task()
@@ -371,7 +720,7 @@ class TaskboardServiceTest(unittest.TestCase):
 
     def test_task_card_renders_persisted_task_id_without_rewriting_prefix(self):
         source = (
-            Path(__file__).parents[1] / "web" / "src" / "legacy-app.js"
+            Path(__file__).parents[1] / "web" / "src" / "taskboard-app.js"
         ).read_text(encoding="utf-8")
         task_card = source[
             source.index("function taskCard(task)"):
@@ -382,137 +731,11 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertNotIn("TASK-", task_card)
         self.assertNotIn("BUG-", task_card)
 
-    def test_acceptance_failure_still_creates_bug_id_and_defect_relation(self):
-        task = self.create_located_task({
-            "title": "实现待验收入口", "project": str(self.example_project),
-            "modules": ["a-page"], "goal": "增加待验收入口",
-            "scope": ["新增按钮"], "out_of_scope": [],
-            "acceptance_criteria": ["入口验收通过"], "workflow_version": 2,
-        })
-        task = self.submit_delivery(task, "execution-acceptance-failure")
-        review = self.service.claim_next_code_review_task(
-            "review-worker", task["project"],
-        )
-        self.service.bind_conversation(
-            task["id"], "code_review", "review-acceptance-failure",
-            review["run"]["id"],
-        )
-        task = self.service.review_code(
-            task["id"], review["run"]["id"], "pass",
-            passed_items=task["review_contract"]["checks"],
-        )
-        self.assertEqual("acceptance", task["status"])
-        acceptance = self.service.claim_next_acceptance_task(
-            "acceptance-worker", task["project"],
-        )
-        self.service.bind_conversation(
-            task["id"], "acceptance", "acceptance-failure-thread",
-            acceptance["run"]["id"],
-        )
-        self.service.accept_task(
-            task["id"], acceptance["run"]["id"], "fail",
-            reasons=["入口不可用"], failed_criteria=task["acceptance_criteria"],
-        )
-
-        bugs = [item for item in self.service.board()["tasks"] if item["type"] == "bug"]
-        self.assertEqual(1, len(bugs))
-        self.assertRegex(bugs[0]["id"], r"^BUG-\d+$")
-        relation = next(
-            item for item in self.service.task_relations(bugs[0]["id"])
-            if item["relation_type"] == "defect_of"
-        )
-        self.assertEqual(task["id"], relation["target_task_id"])
-
-    def test_execution_batch_appends_three_tasks_and_completes_atomically(self):
-        owner = self.create_located_task({
-            "title": "批次任务一", "project": str(self.example_project),
-            "modules": ["a-page"], "goal": "完成批次任务一", "scope": ["任务一"],
-            "out_of_scope": [], "acceptance_criteria": ["任务一通过"],
-            "workflow_version": 2,
-        })
-        claim = self.service.claim_next_task("batch-worker", owner["project"])
-        self.service.bind_conversation(
-            owner["id"], "execution", "batch-thread", claim["run"]["id"]
-        )
-        self.service.bind_batch_turn(
-            claim["run"]["id"], "batch-thread", "batch-turn", 1
-        )
-        self.service.transition_task(owner["id"], "implementing")
-
-        appended = [
-            self.create_located_task({
-                "title": f"批次任务{index}", "project": str(self.example_project),
-                "modules": ["a-page"], "goal": f"完成批次任务{index}",
-                "scope": [f"任务{index}"], "out_of_scope": [],
-                "acceptance_criteria": [f"任务{index}通过"], "workflow_version": 2,
-            })
-            for index in range(2, 6)
-        ]
-        batch = self.service.execution_batch(owner["id"])
-        self.assertEqual(3, batch["appended_count"])
-        self.assertEqual(4, len(batch["tasks"]))
-        self.assertEqual("ready", self.service.get_task(appended[-1]["id"])["status"])
-        self.assertIsNone(self.service.execution_batch(appended[-1]["id"]))
-        self.assertEqual(3, len(self.service.pending_batch_steers()))
-
-        criteria = [
-            f"[{task_id}] {criterion}"
-            for task_id, criterion in [
-                (owner["id"], "任务一通过"),
-                (appended[0]["id"], "任务2通过"),
-                (appended[1]["id"], "任务3通过"),
-                (appended[2]["id"], "任务4通过"),
-            ]
-        ]
-        delivery = self.service.submit_delivery(
-            claim["run"]["id"], "批次实现完成", "focused tests passed",
-            [{"file": "src/APage.tsx", "symbols": ["APage"], "summary": "batch"}],
-            [{"criterion": criterion, "evidence": "passed"} for criterion in criteria],
-            batch_revision=batch["revision"],
-        )
-        self.assertFalse(delivery.get("continue_development", False))
-        self.assertEqual("review", self.service.execution_batch(owner["id"])["state"])
-
-        review = self.service.claim_next_code_review_task("review-worker", owner["project"])
-        self.service.bind_conversation(
-            owner["id"], "code_review", "batch-review", review["run"]["id"]
-        )
-        checks = review["run"]["context_snapshot"]["review_checks"]
-        self.assertIn("delivery", review["run"]["context_snapshot"])
-        self.assertNotIn("diff", review["run"]["context_snapshot"]["delivery"])
-        self.assertIn("diff_scope", review["run"]["context_snapshot"])
-        self.assertIn("git diff", review["dispatch_prompt"])
-        reviewed = self.service.review_code(
-            owner["id"], review["run"]["id"], "pass", passed_items=checks
-        )
-        self.assertEqual("acceptance", reviewed["status"])
-        self.assertTrue(all(
-            self.service.get_task(task["id"])["status"] == "acceptance"
-            for task in appended[:3]
-        ))
-
-        acceptance = self.service.claim_next_acceptance_task(
-            "acceptance-worker", owner["project"]
-        )
-        self.service.bind_conversation(
-            owner["id"], "acceptance", "batch-acceptance", acceptance["run"]["id"]
-        )
-        acceptance_criteria = acceptance["run"]["context_snapshot"]["acceptance_criteria"]
-        self.service.accept_task(
-            owner["id"], acceptance["run"]["id"], "pass",
-            reasons=["批次验收通过"], passed_criteria=acceptance_criteria,
-        )
-        self.assertEqual("done", self.service.execution_batch(owner["id"])["state"])
-        self.assertTrue(all(
-            self.service.get_task(task_id)["status"] == "done"
-            for task_id in [owner["id"], *(task["id"] for task in appended[:3])]
-        ))
-
     def test_failed_batch_review_opens_one_regroup_window_then_rework_seals_it(self):
         owner = self.create_located_task({
             "title": "返工批次任务一", "project": str(self.example_project),
             "goal": "实现任务一", "scope": ["任务一"], "out_of_scope": [],
-            "acceptance_criteria": ["任务一通过"], "workflow_version": 2,
+            "acceptance_criteria": ["任务一通过"],
         })
         claim = self.service.claim_next_task("batch-worker", owner["project"])
         self.service.bind_conversation(owner["id"], "execution", "batch-thread", claim["run"]["id"])
@@ -520,7 +743,7 @@ class TaskboardServiceTest(unittest.TestCase):
         second = self.create_located_task({
             "title": "返工批次任务二", "project": str(self.example_project),
             "goal": "实现任务二", "scope": ["任务二"], "out_of_scope": [],
-            "acceptance_criteria": ["任务二通过"], "workflow_version": 2,
+            "acceptance_criteria": ["任务二通过"],
         })
         batch = self.service.execution_batch(owner["id"])
         criteria = [f"[{owner['id']}] 任务一通过", f"[{second['id']}] 任务二通过"]
@@ -541,7 +764,7 @@ class TaskboardServiceTest(unittest.TestCase):
         third = self.create_located_task({
             "title": "返工批次任务三", "project": str(self.example_project),
             "goal": "实现任务三", "scope": ["任务三"], "out_of_scope": [],
-            "acceptance_criteria": ["任务三通过"], "workflow_version": 2,
+            "acceptance_criteria": ["任务三通过"],
         })
         self.assertEqual(owner["id"], self.service.execution_batch(third["id"])["owner_task_id"])
         rework = self.service.claim_next_task("rework-worker", owner["project"])
@@ -599,42 +822,6 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertEqual("new_task", terminal_result["decision"])
         self.assertNotIn("relation", terminal_result)
 
-    def test_dependency_analysis_ignores_terminal_and_weak_candidates(self):
-        task = self.create_located_task({
-            "title": "登录页品牌文案修改",
-            "project": str(self.example_project),
-            "modules": ["web", "登录认证"],
-            "goal": "修改登录页主标题",
-            "scope": ["登录页文案"],
-            "out_of_scope": ["其他页面"],
-            "acceptance_criteria": ["主标题更新"],
-        })
-        self.service.obsidian.search_task_dependencies = lambda *args, **kwargs: [{
-            "task_id": task["id"], "status": "historical",
-            "evidence_path": "task.md", "summary": "login task", "score": 999,
-        }]
-
-        weak = self.service.analyze_task_dependencies({
-            "title": "场地预约增加仅本次",
-            "goal": "修改重复预约的范围选项",
-            "project": task["project"],
-            "modules": ["web", "场景管理", "场地预约"],
-            "located_symbols": ["VenueBooking"],
-        })
-        self.assertEqual("independent", weak["decision"])
-        self.assertEqual("weak_match", weak["ignored_candidates"][0]["ignored_reason"])
-
-        self.service.transition_task(task["id"], "cancelled")
-        terminal = self.service.analyze_task_dependencies({
-            "title": "登录页品牌文案修改",
-            "goal": "修改登录页主标题",
-            "project": task["project"],
-            "modules": ["web", "登录认证"],
-            "located_symbols": ["Login"],
-        })
-        self.assertEqual("independent", terminal["decision"])
-        self.assertEqual("terminal_task", terminal["ignored_candidates"][0]["ignored_reason"])
-
     def test_interactive_change_revision_interrupts_run_and_preserves_task_thread(self):
         task = self.create_ready_task()
         claimed = self.service.claim_next_task("developer", task["project"])
@@ -678,7 +865,6 @@ class TaskboardServiceTest(unittest.TestCase):
         proposed = dict(change["proposed_task"])
         proposed["implementation_contract"] = {
             "targets": ["src/APage.tsx::APage"],
-            "ordered_steps": ["src/APage.tsx::APage — replace addition with subtraction"],
         }
         with self.service.db.transaction() as connection:
             connection.execute(
@@ -686,7 +872,7 @@ class TaskboardServiceTest(unittest.TestCase):
                 (json.dumps(proposed, ensure_ascii=False), change["id"]),
             )
 
-        with self.assertRaisesRegex(ValueError, "must be an object"):
+        with self.assertRaisesRegex(ValueError, "target must be an object"):
             self.service.resolve_task_change_confirmation(change["id"], "revise")
 
     def test_location_completion_rejects_string_contracts(self):
@@ -698,7 +884,7 @@ class TaskboardServiceTest(unittest.TestCase):
         }
         analysis = self.service.prepare_location_analysis(proposed, "change", task["id"])
 
-        with self.assertRaisesRegex(ValueError, "must be an object"):
+        with self.assertRaisesRegex(ValueError, "target must be an object"):
             self.service.complete_location_analysis(
                 analysis["analysis_id"], {"query": "APage", "symbols": ["APage"]}, [target],
                 [{
@@ -708,7 +894,6 @@ class TaskboardServiceTest(unittest.TestCase):
                 {"decision": "independent"},
                 {
                     "targets": ["src/APage.tsx::APage"],
-                    "ordered_steps": ["src/APage.tsx::APage — 调整 A 页面"],
                 },
                 {"checks": ["检查 A 页面改动"]},
             )
@@ -788,7 +973,7 @@ class TaskboardServiceTest(unittest.TestCase):
 
         claimed = self.service.claim_next_task("test-worker", task["project"])
 
-        self.assertTrue(claimed["dispatch_prompt"].startswith("$codex-taskboard-lifecycle\n\n"))
+        self.assertTrue(claimed["dispatch_prompt"].startswith("$dotasks-lifecycle\n\n"))
         self.assertIn(task["id"], claimed["dispatch_prompt"])
         self.assertIn(claimed["run"]["id"], claimed["dispatch_prompt"])
 
@@ -814,7 +999,7 @@ class TaskboardServiceTest(unittest.TestCase):
             {"tool": "codegraph_explore", "files": ["src/A.ts"]}, "agent",
         )
         analysis = self.service.prepare_location_analysis(payload)
-        completed = self.service.complete_location_analysis(
+        completed = self.complete_current_location(
             analysis["analysis_id"], {"query": "context"},
             [{"file": "src/A.ts", "symbols": ["A"]}],
             [{
@@ -824,80 +1009,8 @@ class TaskboardServiceTest(unittest.TestCase):
         )
         self.example_project.rmdir()
         with self.assertRaisesRegex(ValueError, "does not exist"):
-            self.service.create_task({**payload, "status": "ready", "workflow_version": 2, "location_analysis_id": completed["id"]})
+            self.service.create_task({**payload, "status": "ready", "location_analysis_id": completed["id"]})
         self.assertIsNone(self.service.get_location_analysis(completed["id"])["consumed_at"])
-
-    def test_full_delivery_with_rework(self):
-        task = self.create_ready_task()
-        task = self.submit_delivery(task, "execution-1")
-        stable_run_id = task["primary_run_id"]
-        stable_thread_id = task["codex_thread_id"]
-        review_run = self.prepare_review(task, "review-1")
-        self.assertNotEqual(stable_run_id, review_run["id"])
-        self.assertEqual(stable_run_id, review_run["delivery_run_id"])
-        task = self.service.review_task(
-            task["id"], "fail", ["无权限用户仍可见"], ["有权限用户可见"],
-            review_run["id"], ["无权限用户不可见"],
-        )
-        self.assertEqual("rework", task["status"])
-        task = self.submit_delivery(task, "rework-1")
-        self.assertNotEqual(stable_run_id, task["primary_run_id"])
-        self.assertEqual(stable_thread_id, task["codex_thread_id"])
-        rework_run_id = task["primary_run_id"]
-        review_run = self.prepare_review(task, "review-2")
-        self.assertNotEqual(rework_run_id, review_run["id"])
-        self.assertEqual(rework_run_id, review_run["delivery_run_id"])
-        task = self.service.review_task(
-            task["id"], "pass", passed_items=task["acceptance_criteria"], run_id=review_run["id"],
-        )
-        self.assertEqual("done", task["status"])
-        self.assertEqual(
-            ["execution", "review", "rework", "review"],
-            [run["run_type"] for run in self.service.list_runs(task["id"])],
-        )
-
-    def test_review_claim_requires_delivery_and_prepares_distinct_run(self):
-        task = self.create_ready_task()
-        with self.assertRaises(sqlite3.IntegrityError), self.service.db.transaction() as connection:
-            connection.execute("UPDATE tasks SET status='review' WHERE id=?", (task["id"],))
-        self.assertIsNone(self.service.claim_next_review_task("reviewer"))
-        task = self.submit_delivery(self.service.get_task(task["id"]), "execution-review-claim")
-        claimed = self.service.claim_next_review_task("reviewer")
-        self.assertEqual("review", claimed["run"]["run_type"])
-        self.assertEqual("awaiting_thread", claimed["run"]["status"])
-        self.assertTrue(claimed["dispatch_prompt"].startswith("$codex-taskboard-lifecycle\n\n"))
-        self.assertIn("CodeGraph、GitNexus、直接源码匹配", claimed["dispatch_prompt"])
-
-        analysis_id = claimed["run"]["context_snapshot"]["review_location_analysis_id"]
-        completed = self.service.complete_location_analysis(
-            analysis_id, {"query": "impact", "symbols": ["APage"]},
-            [{"file": "src/APage.tsx", "symbols": ["APage"], "reason": "changed target"}],
-            [{
-                "criterion": criterion, "file": "src/APage.tsx", "symbol": "APage",
-                "method": "focused review", "expected": criterion,
-            } for criterion in task["acceptance_criteria"]],
-        )
-        prepared = self.service.prepare_review_run(task["id"], completed["id"])
-        self.assertEqual(claimed["run"]["id"], prepared["run"]["id"])
-        self.assertEqual("src/APage.tsx", prepared["run"]["context_snapshot"]["targets"][0]["file"])
-
-    def test_review_uses_distinct_run_and_conversation_and_survives_reload(self):
-        task = self.submit_delivery(self.create_ready_task(), "execution-thread")
-        delivery_run_id = task["primary_run_id"]
-        claimed = self.service.claim_next_review_task("reviewer", task["project"])
-        self.assertNotEqual(delivery_run_id, claimed["run"]["id"])
-        self.assertEqual(delivery_run_id, claimed["run"]["delivery_run_id"])
-        self.assertEqual("", claimed["resume_thread_id"])
-        with self.assertRaisesRegex(ValueError, "independent"):
-            self.service.bind_conversation(
-                task["id"], "review", task["codex_thread_id"], claimed["run"]["id"],
-            )
-        reloaded = TaskboardService(self.temp.name)
-        self.assertEqual("review", reloaded.get_run(claimed["run"]["id"])["run_type"])
-        self.service.bind_conversation(task["id"], "review", "independent-review-thread", claimed["run"]["id"])
-        conversations = self.service.list_conversations(task["id"])
-        self.assertIn("execution-thread", [item["thread_id"] for item in conversations])
-        self.assertIn("independent-review-thread", [item["thread_id"] for item in conversations])
 
     def submit_delivery(self, task, thread_id):
         dispatched = self.service.claim_next_task("test-worker", task["project"])
@@ -912,20 +1025,6 @@ class TaskboardServiceTest(unittest.TestCase):
             [{"criterion": criterion, "evidence": "passed"} for criterion in task["acceptance_criteria"]],
         )
         return result["task"]
-
-    def prepare_review(self, task, thread_id):
-        analysis = self.service.prepare_review_location(task["id"])
-        completed = self.service.complete_location_analysis(
-            analysis["analysis_id"], {"query": "impact", "symbols": ["APage"]},
-            [{"file": "src/APage.tsx", "symbols": ["APage"], "reason": "changed target"}],
-            [{
-                "criterion": criterion, "file": "src/APage.tsx", "symbol": "APage",
-                "method": "focused review", "expected": criterion,
-            } for criterion in task["acceptance_criteria"]],
-        )
-        prepared = self.service.prepare_review_run(task["id"], completed["id"])
-        self.service.bind_conversation(task["id"], "review", thread_id, prepared["run"]["id"])
-        return self.service.get_run(prepared["run"]["id"])
 
     def test_relation_and_bounded_context(self):
         first = self.create_ready_task()
@@ -954,17 +1053,17 @@ class TaskboardServiceTest(unittest.TestCase):
 
     def test_configured_data_home_is_independent_from_plugin_code(self):
         configured_home = Path(self.temp.name) / "shared-data"
-        previous_home = os.environ.get("CODEX_TASKBOARD_HOME")
-        os.environ["CODEX_TASKBOARD_HOME"] = str(configured_home)
+        previous_home = os.environ.get("DOTASKS_HOME")
+        os.environ["DOTASKS_HOME"] = str(configured_home)
         try:
             service = TaskboardService()
             self.assertEqual(configured_home.resolve(), service.data_home)
             self.assertEqual(configured_home.resolve() / "data" / "taskboard.db", service.db.path)
         finally:
             if previous_home is None:
-                os.environ.pop("CODEX_TASKBOARD_HOME", None)
+                os.environ.pop("DOTASKS_HOME", None)
             else:
-                os.environ["CODEX_TASKBOARD_HOME"] = previous_home
+                os.environ["DOTASKS_HOME"] = previous_home
 
     def test_integration_status_reports_missing_project_for_location(self):
         status = self.service.integration_status()
@@ -1063,7 +1162,7 @@ class TaskboardServiceTest(unittest.TestCase):
             "title": "更新 Widget 路由", "project": project,
             "goal": "调整 Widget 路由行为", "modules": ["widget"],
         })
-        completed = self.service.complete_location_analysis(
+        completed = self.complete_current_location(
             analysis["analysis_id"], evidence,
             [{"file": "src/Widget.ts", "symbols": ["Widget"]}],
             [{
@@ -1083,6 +1182,14 @@ class TaskboardServiceTest(unittest.TestCase):
             "query": "Widget",
             "files": ["src/Widget.ts"],
         }
+        with self.assertRaisesRegex(ValueError, r"evidence\.command"):
+            self.service.report_location_status(
+                project, True, "connected", "wrong field", {
+                    **base,
+                    "argv": ["codegraph", "explore", "--path", project, "Widget"],
+                    "command": None,
+                }, "codex-test",
+            )
         with self.assertRaisesRegex(ValueError, "project path"):
             self.service.report_location_status(
                 project, True, "connected", "unbounded", base, "codex-test",
@@ -1117,7 +1224,7 @@ class TaskboardServiceTest(unittest.TestCase):
         }
         analysis = self.service.prepare_location_analysis(payload)
         with self.assertRaisesRegex(ValueError, "connected location evidence"):
-            self.service.complete_location_analysis(
+            self.complete_current_location(
                 analysis["analysis_id"], {"query": "context"},
                 [{"file": "src/gate.ts", "symbols": ["gate"]}],
                 [{"criterion": "门禁生效", "method": "unit test", "expected": "reject"}],
@@ -1158,6 +1265,421 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertIsNotNone(self.service.claim_next_task("worker-1", first["project"]))
         self.assertIsNone(self.service.claim_next_task("worker-2", first["project"]))
 
+    def test_parallel_development_claims_different_files_in_clean_git_worktrees(self):
+        (self.example_project / "src").mkdir()
+        (self.example_project / "src" / "A.ts").write_text("export const A = 1;\n")
+        (self.example_project / "src" / "B.ts").write_text("export const B = 1;\n")
+        subprocess.run(["git", "init"], cwd=self.example_project, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "dotasks@example.invalid"],
+            cwd=self.example_project, check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "DoTasks Test"],
+            cwd=self.example_project, check=True,
+        )
+        subprocess.run(["git", "add", "."], cwd=self.example_project, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "base"], cwd=self.example_project,
+            check=True, capture_output=True,
+        )
+        self.service.update_task_settings({
+            "task_token_budget": 60000,
+            "parallel_development_enabled": True,
+            "max_parallel_development": 2,
+            "max_batch_appended_tasks": 0,
+        })
+        base = {
+            "project": str(self.example_project), "modules": ["parallel"],
+            "scope": ["one file"], "out_of_scope": [],
+            "acceptance_criteria": ["updated"],
+        }
+        first = self.create_located_task(
+            {**base, "title": "修改 A", "goal": "调整 A"},
+            [{"file": "src/A.ts", "symbols": ["A"], "reason": "A"}],
+        )
+        second = self.create_located_task(
+            {**base, "title": "修改 B", "goal": "调整 B"},
+            [{"file": "src/B.ts", "symbols": ["B"], "reason": "B"}],
+        )
+
+        batch = self.service.claim_native_dispatch_batch(
+            "codex-native-controller", first["project"], stage="development"
+        )
+        dispatches = batch["dispatches"]
+
+        self.assertEqual(2, batch["capacity"])
+        self.assertEqual(2, len(dispatches))
+        self.assertEqual({"worktree"}, {
+            dispatch["execution_environment"] for dispatch in dispatches
+        })
+        self.assertTrue(all(dispatch["base_revision"] for dispatch in dispatches))
+        self.assertTrue(all(
+            dispatch["base_ref"].startswith("refs/heads/codex/dotasks-run-")
+            for dispatch in dispatches
+        ))
+        self.assertEqual(
+            {first["id"], second["id"]},
+            {dispatch["entity_id"] for dispatch in dispatches},
+        )
+        self.assertIsNone(self.service.claim_next_task("worker-3", first["project"]))
+
+    def test_parallel_development_keeps_same_file_serial(self):
+        (self.example_project / "src").mkdir()
+        (self.example_project / "src" / "Shared.ts").write_text("export const A = 1;\nexport const B = 2;\n")
+        subprocess.run(["git", "init"], cwd=self.example_project, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "dotasks@example.invalid"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "config", "user.name", "DoTasks Test"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "add", "."], cwd=self.example_project, check=True)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=self.example_project, check=True, capture_output=True)
+        self.service.update_task_settings({
+            "task_token_budget": 60000,
+            "parallel_development_enabled": True,
+            "max_parallel_development": 2,
+            "max_batch_appended_tasks": 0,
+        })
+        base = {
+            "project": str(self.example_project), "modules": ["parallel"],
+            "scope": ["one symbol"], "out_of_scope": [],
+            "acceptance_criteria": ["updated"],
+        }
+        first = self.create_located_task(
+            {**base, "title": "修改 A", "goal": "调整 A"},
+            [{"file": "src/Shared.ts", "symbols": ["A"], "reason": "A"}],
+        )
+        self.create_located_task(
+            {**base, "title": "修改 B", "goal": "调整 B"},
+            [{"file": "src/Shared.ts", "symbols": ["B"], "reason": "B"}],
+        )
+        self.assertIsNotNone(self.service.claim_next_task("worker-1", first["project"]))
+        self.assertIsNone(self.service.claim_next_task("worker-2", first["project"]))
+
+    def test_parallel_development_ignores_unrelated_dirty_workspace_files(self):
+        (self.example_project / "src").mkdir()
+        (self.example_project / "src" / "A.ts").write_text("export const A = 1;\n")
+        subprocess.run(["git", "init"], cwd=self.example_project, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "dotasks@example.invalid"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "config", "user.name", "DoTasks Test"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "add", "."], cwd=self.example_project, check=True)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=self.example_project, check=True, capture_output=True)
+        (self.example_project / "notes.txt").write_text("user change\n")
+        self.service.update_task_settings({
+            "task_token_budget": 60000,
+            "parallel_development_enabled": True,
+            "max_parallel_development": 2,
+            "max_batch_appended_tasks": 0,
+        })
+        first = self.create_located_task({
+            "title": "修改 A", "project": str(self.example_project),
+            "modules": ["parallel"], "goal": "调整 A", "scope": ["A"],
+            "out_of_scope": [], "acceptance_criteria": ["A updated"],
+        }, [{"file": "src/A.ts", "symbols": ["A"], "reason": "A"}])
+        second = self.create_located_task({
+            "title": "增加 B", "project": str(self.example_project),
+            "modules": ["parallel"], "goal": "增加 B", "scope": ["B"],
+            "out_of_scope": [], "acceptance_criteria": ["B added"],
+        }, [{"file": "src/B.ts", "mode": "create", "symbols": ["B"], "reason": "B"}])
+        first_claim = self.service.claim_next_task("worker-1", first["project"])
+        second_claim = self.service.claim_next_task("worker-2", second["project"])
+        self.assertEqual("worktree", first_claim["run"]["execution_environment"])
+        self.assertEqual("worktree", second_claim["run"]["execution_environment"])
+        self.assertTrue(first_claim["run"]["base_revision"])
+        self.assertTrue(
+            first_claim["run"]["base_ref"].startswith(
+                "refs/heads/codex/dotasks-run-"
+            )
+        )
+
+    def test_parallel_development_skips_only_task_with_dirty_target(self):
+        (self.example_project / "src").mkdir()
+        (self.example_project / "src" / "A.ts").write_text("export const A = 1;\n")
+        (self.example_project / "src" / "B.ts").write_text("export const B = 1;\n")
+        subprocess.run(["git", "init"], cwd=self.example_project, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "dotasks@example.invalid"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "config", "user.name", "DoTasks Test"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "add", "."], cwd=self.example_project, check=True)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=self.example_project, check=True, capture_output=True)
+        (self.example_project / "src" / "A.ts").write_text("export const A = 99;\n")
+        self.service.update_task_settings({
+            "task_token_budget": 60000,
+            "parallel_development_enabled": True,
+            "max_parallel_development": 2,
+            "max_batch_appended_tasks": 0,
+        })
+        common = {
+            "project": str(self.example_project), "modules": ["parallel"],
+            "scope": ["one file"], "out_of_scope": [],
+            "acceptance_criteria": ["updated"],
+        }
+        blocked = self.create_located_task(
+            {**common, "title": "修改 A", "goal": "调整 A"},
+            [{"file": "src/A.ts", "symbols": ["A"], "reason": "A"}],
+        )
+        eligible = self.create_located_task(
+            {**common, "title": "修改 B", "goal": "调整 B"},
+            [{"file": "src/B.ts", "symbols": ["B"], "reason": "B"}],
+        )
+
+        claim = self.service.claim_next_task("worker-1", str(self.example_project))
+
+        self.assertEqual(eligible["id"], claim["task"]["id"])
+        self.assertEqual("worktree", claim["run"]["execution_environment"])
+        self.assertEqual("ready", self.service.get_task(blocked["id"])["status"])
+        self.assertIsNone(
+            self.service.claim_next_task("worker-2", str(self.example_project))
+        )
+
+    def test_worktree_delivery_is_reviewed_then_integrated_into_project(self):
+        (self.example_project / "src").mkdir()
+        source = self.example_project / "src" / "A.ts"
+        source.write_text("export const A = 1;\n")
+        subprocess.run(["git", "init"], cwd=self.example_project, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "dotasks@example.invalid"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "config", "user.name", "DoTasks Test"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "add", "."], cwd=self.example_project, check=True)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=self.example_project, check=True, capture_output=True)
+        self.service.update_task_settings({
+            "task_token_budget": 60000,
+            "parallel_development_enabled": True,
+            "max_parallel_development": 2,
+            "max_batch_appended_tasks": 0,
+        })
+        (self.example_project / "notes.txt").write_text("keep user change\n")
+        task = self.create_located_task({
+            "title": "修改 A", "project": str(self.example_project),
+            "modules": ["parallel"], "goal": "调整 A", "scope": ["A"],
+            "out_of_scope": [], "acceptance_criteria": ["A updated"],
+        }, [{"file": "src/A.ts", "symbols": ["A"], "reason": "A"}])
+        claim = self.service.claim_next_task("worker-1", task["project"])
+        worktree = Path(self.temp.name) / "worktree-a"
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(worktree), claim["run"]["base_ref"]],
+            cwd=self.example_project, check=True, capture_output=True,
+        )
+        (worktree / "src" / "A.ts").write_text("export const A = 2;\n")
+        self.service.bind_conversation(
+            task["id"], "execution", "parallel-thread", claim["run"]["id"]
+        )
+        self.service.transition_task(task["id"], "implementing")
+        delivered = self.service.submit_delivery(
+            claim["run"]["id"], "A updated", "focused check passed",
+            [{"file": "src/A.ts", "symbols": ["A"], "summary": "updated"}],
+            [{"criterion": "A updated", "status": "pending", "evidence": "review required"}],
+            workspace_path=str(worktree),
+        )
+        self.assertEqual("code_review", delivered["task"]["status"])
+        self.assertEqual("export const A = 1;\n", source.read_text())
+        delivery_run = delivered["run"]
+        self.assertEqual("pending", delivery_run["integration_status"])
+        self.assertTrue(Path(delivery_run["artifact_path"]).is_file())
+
+        review = self.service.claim_next_code_review_task("review-worker", task["project"])
+        self.service.bind_conversation(
+            task["id"], "code_review", "parallel-review", review["run"]["id"]
+        )
+        checks = ["focused-review", "A updated"]
+        completed = self.service.review_code(
+            task["id"], review["run"]["id"], "pass",
+            passed_items=checks, failed_criteria=[],
+        )
+        self.assertEqual("done", completed["status"])
+        self.assertEqual("export const A = 2;\n", source.read_text())
+        self.assertEqual(
+            "keep user change\n", (self.example_project / "notes.txt").read_text()
+        )
+        self.assertEqual(
+            "integrated",
+            self.service.get_run(claim["run"]["id"])["integration_status"],
+        )
+        self.assertEqual(
+            "synced",
+            self.service.get_run(claim["run"]["id"])["workspace_sync_status"],
+        )
+        integrated_run = self.service.get_run(claim["run"]["id"])
+        integration_ref = integrated_run["context_snapshot"][
+            "workspace_baseline"
+        ]["integration_ref"]
+        integration_head = subprocess.run(
+            ["git", "rev-parse", integration_ref],
+            cwd=self.example_project, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(integrated_run["integration_revision"], integration_head)
+
+        next_task = self.create_located_task({
+            "title": "增加 B", "project": str(self.example_project),
+            "modules": ["parallel"], "goal": "增加 B", "scope": ["B"],
+            "out_of_scope": [], "acceptance_criteria": ["B added"],
+        }, [{"file": "src/B.ts", "mode": "create", "symbols": ["B"], "reason": "B"}])
+        next_claim = self.service.claim_next_task("worker-2", next_task["project"])
+        self.assertEqual("worktree", next_claim["run"]["execution_environment"])
+        self.assertEqual(
+            integrated_run["integration_revision"], next_claim["run"]["base_revision"]
+        )
+
+    def test_two_parallel_worktree_deliveries_integrate_serially(self):
+        (self.example_project / "src").mkdir()
+        for name in ("A", "B"):
+            (self.example_project / "src" / f"{name}.ts").write_text(
+                f"export const {name} = 1;\n"
+            )
+        subprocess.run(["git", "init"], cwd=self.example_project, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "dotasks@example.invalid"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "config", "user.name", "DoTasks Test"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "add", "."], cwd=self.example_project, check=True)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=self.example_project, check=True, capture_output=True)
+        self.service.update_task_settings({
+            "task_token_budget": 60000,
+            "parallel_development_enabled": True,
+            "max_parallel_development": 2,
+            "max_batch_appended_tasks": 0,
+        })
+        tasks = []
+        for name in ("A", "B"):
+            tasks.append(self.create_located_task({
+                "title": f"修改 {name}", "project": str(self.example_project),
+                "modules": ["parallel"], "goal": f"调整 {name}",
+                "scope": [name], "out_of_scope": [],
+                "acceptance_criteria": [f"{name} updated"],
+            }, [{"file": f"src/{name}.ts", "symbols": [name], "reason": name}]))
+        claims = [
+            self.service.claim_next_task(f"worker-{index}", str(self.example_project))
+            for index in (1, 2)
+        ]
+        for task, claim, name in zip(tasks, claims, ("A", "B")):
+            worktree = Path(self.temp.name) / f"worktree-{name.lower()}"
+            subprocess.run(
+                ["git", "worktree", "add", "--detach", str(worktree), claim["run"]["base_ref"]],
+                cwd=self.example_project, check=True, capture_output=True,
+            )
+            (worktree / "src" / f"{name}.ts").write_text(
+                f"export const {name} = 2;\n"
+            )
+            self.service.bind_conversation(
+                task["id"], "execution", f"thread-{name}", claim["run"]["id"]
+            )
+            self.service.transition_task(task["id"], "implementing")
+            self.service.submit_delivery(
+                claim["run"]["id"], f"{name} updated", "focused check passed",
+                [{"file": f"src/{name}.ts", "symbols": [name], "summary": "updated"}],
+                [{"criterion": f"{name} updated", "status": "pending", "evidence": "review required"}],
+                workspace_path=str(worktree),
+            )
+
+        for task, name in zip(tasks, ("A", "B")):
+            review = self.service.claim_next_code_review_task(
+                f"review-{name}", str(self.example_project)
+            )
+            self.assertEqual(task["id"], review["task"]["id"])
+            self.service.bind_conversation(
+                task["id"], "code_review", f"review-thread-{name}", review["run"]["id"]
+            )
+            completed = self.service.review_code(
+                task["id"], review["run"]["id"], "pass",
+                passed_items=["focused-review", f"{name} updated"],
+                failed_criteria=[],
+            )
+            self.assertEqual("done", completed["status"])
+
+        self.assertEqual(
+            "export const A = 2;\n",
+            (self.example_project / "src" / "A.ts").read_text(),
+        )
+        self.assertEqual(
+            "export const B = 2;\n",
+            (self.example_project / "src" / "B.ts").read_text(),
+        )
+
+    def test_review_integrates_branch_but_defers_overlapping_workspace_sync(self):
+        (self.example_project / "src").mkdir()
+        source = self.example_project / "src" / "A.ts"
+        source.write_text("export const A = 1;\n")
+        subprocess.run(["git", "init"], cwd=self.example_project, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "dotasks@example.invalid"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "config", "user.name", "DoTasks Test"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "add", "."], cwd=self.example_project, check=True)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=self.example_project, check=True, capture_output=True)
+        self.service.update_task_settings({
+            "task_token_budget": 60000,
+            "parallel_development_enabled": True,
+            "max_parallel_development": 2,
+            "max_batch_appended_tasks": 0,
+        })
+        task = self.create_located_task({
+            "title": "修改 A", "project": str(self.example_project),
+            "modules": ["parallel"], "goal": "调整 A", "scope": ["A"],
+            "out_of_scope": [], "acceptance_criteria": ["A updated"],
+        }, [{"file": "src/A.ts", "symbols": ["A"], "reason": "A"}])
+        claim = self.service.claim_next_task("worker-1", task["project"])
+        worktree = Path(self.temp.name) / "worktree-sync-pending"
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(worktree), claim["run"]["base_revision"]],
+            cwd=self.example_project, check=True, capture_output=True,
+        )
+        (worktree / "src" / "A.ts").write_text("export const A = 2;\n")
+        self.service.bind_conversation(
+            task["id"], "execution", "delivery-thread", claim["run"]["id"]
+        )
+        self.service.transition_task(task["id"], "implementing")
+        self.service.submit_delivery(
+            claim["run"]["id"], "A updated", "focused check passed",
+            [{"file": "src/A.ts", "symbols": ["A"], "summary": "updated"}],
+            [{"criterion": "A updated", "status": "pending", "evidence": "review required"}],
+            workspace_path=str(worktree),
+        )
+        source.write_text("export const A = 99;\n")
+        review = self.service.claim_next_code_review_task(
+            "review-worker", str(self.example_project)
+        )
+        self.service.bind_conversation(
+            task["id"], "code_review", "review-thread", review["run"]["id"]
+        )
+
+        completed = self.service.review_code(
+            task["id"], review["run"]["id"], "pass",
+            passed_items=["focused-review", "A updated"], failed_criteria=[],
+        )
+        delivery_run = self.service.get_run(claim["run"]["id"])
+
+        self.assertEqual("done", completed["status"])
+        self.assertEqual("integrated", delivery_run["integration_status"])
+        self.assertEqual("pending", delivery_run["workspace_sync_status"])
+        self.assertIn("src/A.ts", delivery_run["workspace_sync_error"])
+        self.assertEqual("export const A = 99;\n", source.read_text())
+        integrated = subprocess.run(
+            ["git", "show", f"{delivery_run['integration_revision']}:src/A.ts"],
+            cwd=self.example_project, check=True, capture_output=True, text=True,
+        ).stdout
+        self.assertEqual("export const A = 2;\n", integrated)
+
+    def test_isolated_delivery_patch_supports_new_files(self):
+        subprocess.run(["git", "init"], cwd=self.example_project, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "dotasks@example.invalid"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "config", "user.name", "DoTasks Test"], cwd=self.example_project, check=True)
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "base"],
+            cwd=self.example_project, check=True, capture_output=True,
+        )
+        base = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.example_project,
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        worktree = Path(self.temp.name) / "worktree-new-file"
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(worktree), "HEAD"],
+            cwd=self.example_project, check=True, capture_output=True,
+        )
+        (worktree / "src").mkdir()
+        (worktree / "src" / "New.ts").write_text("export const New = true;\n")
+        artifact_path, artifact_sha256 = self.service._capture_delivery_patch(
+            "RUN-NEW", str(worktree), base, ["src/New.ts"]
+        )
+        self.assertTrue(artifact_sha256)
+        checked = subprocess.run(
+            ["git", "apply", "--check", artifact_path],
+            cwd=self.example_project, capture_output=True, text=True,
+        )
+        self.assertEqual(0, checked.returncode, checked.stderr)
+
     def test_existing_task_targets_are_backfilled_by_migration(self):
         first = self.create_ready_task()
         second = self.create_ready_task()
@@ -1185,7 +1707,7 @@ class TaskboardServiceTest(unittest.TestCase):
             ).fetchone()["sql"]
         self.assertIn("'bugfix'", trigger)
         self.assertIn("'code_review'", trigger)
-        self.assertIn("'acceptance'", trigger)
+        self.assertNotIn("'acceptance'", trigger)
 
     def test_notification_schema_is_removed_from_existing_databases(self):
         with self.service.db.transaction() as connection:
@@ -1259,27 +1781,6 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertTrue(resumed["dispatcher_enabled"])
         self.assertEqual("ready", reloaded.get_task(task["id"])["status"])
 
-    def test_repeated_failed_reviews_return_to_rework_queue(self):
-        task = self.submit_delivery(self.create_ready_task(), "execution-1")
-        review = self.prepare_review(task, "review-1")
-        task = self.service.review_task(
-            task["id"], "fail", ["first failure"], ["有权限用户可见"],
-            review["id"], ["无权限用户不可见"],
-        )
-        self.assertEqual("rework", task["status"])
-        task = self.submit_delivery(task, "rework-1")
-        review = self.prepare_review(task, "review-2")
-        task = self.service.review_task(
-            task["id"], "fail", ["first failure"], ["有权限用户可见"],
-            review["id"], ["无权限用户不可见"],
-        )
-        self.assertEqual("rework", task["status"])
-        self.assertFalse(task["auto_dispatch"])
-        self.assertIsNone(self.service.claim_next_task("worker", task["project"]))
-        self.service.transition_task(task["id"], "rework", auto_dispatch=True)
-        claimed = self.service.claim_next_task("worker", task["project"])
-        self.assertEqual("rework", claimed["run"]["run_type"])
-
     def test_interrupted_execution_is_failed_and_not_auto_requeued(self):
         task = self.create_ready_task()
         claimed = self.service.claim_next_task("worker", task["project"])
@@ -1289,41 +1790,6 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertEqual("failed", result["task"]["status"])
         self.assertEqual("interrupted", result["run"]["status"])
         self.assertIsNone(self.service.claim_next_task("worker-2", task["project"]))
-
-    def test_review_interruption_stays_in_review(self):
-        task = self.submit_delivery(self.create_ready_task(), "execution-review-interrupt")
-        claimed = self.service.claim_next_review_task("reviewer")
-        self.service.bind_conversation(task["id"], "review", "review-interrupt-thread", claimed["run"]["id"])
-        result = self.service.interrupt_unsubmitted_run(claimed["run"]["id"], "review app disconnected")
-        self.assertEqual("review", result["task"]["status"])
-        self.assertEqual("interrupted", result["run"]["status"])
-        self.assertEqual("waiting_review", self.service.get_run(task["primary_run_id"])["status"])
-        with self.service.db.transaction() as connection:
-            connection.execute(
-                "UPDATE tasks SET review_retry_after=datetime('now','-1 second') WHERE id=?", (task["id"],),
-            )
-        retried = self.service.claim_next_review_task("reviewer-2", task["project"])
-        self.assertNotEqual(claimed["run"]["id"], retried["run"]["id"])
-        self.assertEqual("review-interrupt-thread", retried["resume_thread_id"])
-        self.assertNotEqual(task["codex_thread_id"], retried["resume_thread_id"])
-
-    def test_review_runs_are_serialized_within_project(self):
-        first = self.submit_delivery(self.create_ready_task(), "execution-review-one")
-        second = self.create_located_task({
-            "title": "第二个验收", "project": str(self.example_project), "goal": "修改其他文件", "scope": ["other"],
-            "out_of_scope": [], "acceptance_criteria": ["other updated"],
-        }, [{"file": "src/Other.tsx", "symbols": ["Other"]}])
-        second_claim = self.service.claim_next_task("worker-2", second["project"])
-        self.service.bind_conversation(second["id"], "execution", "execution-review-two", second_claim["run"]["id"])
-        self.service.transition_task(second["id"], "implementing")
-        second = self.service.submit_delivery(
-            second_claim["run"]["id"], "实现完成", "focused tests passed",
-            [{"file": "src/Other.tsx", "symbols": ["Other"], "summary": "updated"}],
-            [{"criterion": "other updated", "evidence": "passed"}],
-        )["task"]
-        first_review = self.service.claim_next_review_task("reviewer-1", first["project"])
-        self.assertIsNotNone(first_review)
-        self.assertIsNone(self.service.claim_next_review_task("reviewer-2", second["project"]))
 
     def test_multiple_rework_tasks_do_not_deadlock_each_other(self):
         first = self.create_located_task({
@@ -1340,7 +1806,7 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertIsNotNone(claimed)
         self.assertIsNone(self.service.claim_next_task("worker-2", first["project"]))
 
-    def test_failed_task_locks_project_and_retry_is_prioritized(self):
+    def test_explicitly_requeued_retry_is_prioritized(self):
         first = self.create_ready_task()
         second = self.create_located_task({
             "title": "其他任务", "project": str(self.example_project), "goal": "修改其他文件", "scope": ["other"],
@@ -1349,7 +1815,6 @@ class TaskboardServiceTest(unittest.TestCase):
         claimed = self.service.claim_next_task("worker", first["project"])
         self.service.bind_conversation(first["id"], "execution", "failed-thread", claimed["run"]["id"])
         self.service.interrupt_unsubmitted_run(claimed["run"]["id"], "process exited")
-        self.assertIsNone(self.service.claim_next_task("worker-2", second["project"]))
         self.service.transition_task(first["id"], "ready")
         retried = self.service.claim_next_task("worker-3", first["project"])
         self.assertEqual(first["id"], retried["task"]["id"])
@@ -1431,7 +1896,7 @@ class TaskboardServiceTest(unittest.TestCase):
             ],
             [{"criterion": "A and B updated", "evidence": "passed"}],
         )
-        self.assertEqual("review", delivered["task"]["status"])
+        self.assertEqual("code_review", delivered["task"]["status"])
         with self.service.db.connection() as connection:
             mapping = connection.execute(
                 "SELECT run_id FROM task_conversations WHERE task_id=? AND thread_id=? AND role='execution'",
@@ -1448,7 +1913,7 @@ class TaskboardServiceTest(unittest.TestCase):
             payload["project"], True, "connected", "ok", {"tool": "codegraph_explore", "query": "Atomic", "files": ["src/Atomic.ts"]}, "test-agent",
         )
         analysis = self.service.prepare_location_analysis(payload)
-        completed = self.service.complete_location_analysis(
+        completed = self.complete_current_location(
             analysis["analysis_id"], {"query": "context"}, [{"file": "src/Atomic.ts", "symbols": ["Atomic"]}],
             [{"criterion": "created", "file": "src/Atomic.ts", "symbol": "Atomic", "method": "test", "expected": "created"}],
         )
@@ -1465,7 +1930,6 @@ class TaskboardServiceTest(unittest.TestCase):
                 self.service.create_task({
                     **payload,
                     "status": "ready",
-                    "workflow_version": 1,
                     "location_analysis_id": completed["id"],
                     "dependency_analysis": completed["dependency_analysis"],
                     "implementation_contract": completed["implementation_contract"],
@@ -1533,7 +1997,7 @@ class TaskboardServiceTest(unittest.TestCase):
             }],
             [{"criterion": "格式化函数可用", "evidence": "passed"}],
         )
-        self.assertEqual("review", delivered["task"]["status"])
+        self.assertEqual("code_review", delivered["task"]["status"])
         self.assertEqual("waiting_review", delivered["run"]["status"])
 
     def test_expired_location_report_is_stale(self):
@@ -1639,13 +2103,13 @@ class TaskboardServiceTest(unittest.TestCase):
         }
         self.service.report_location_status(payload["project"], True, "connected", "ok", {"tool": "codegraph_explore", "query": "Contract", "files": ["src/Contract.ts"]}, "agent")
         analysis = self.service.prepare_location_analysis(payload)
-        completed = self.service.complete_location_analysis(
+        completed = self.complete_current_location(
             analysis["analysis_id"], {"query": "context"},
             [{"file": "src/Contract.ts", "symbols": ["Contract"]}],
             [{"criterion": "标准 A", "file": "src/Contract.ts", "symbol": "Contract", "method": "test", "expected": "pass"}],
         )
         with self.assertRaisesRegex(ValueError, "exactly match"):
-            self.service.create_task({**payload, "status": "ready", "workflow_version": 2, "location_analysis_id": completed["id"]})
+            self.service.create_task({**payload, "status": "ready", "location_analysis_id": completed["id"]})
         self.assertIsNone(self.service.get_location_analysis(completed["id"])["consumed_at"])
 
     def test_committed_change_since_claim_is_valid_delivery_delta(self):
@@ -1672,7 +2136,7 @@ class TaskboardServiceTest(unittest.TestCase):
             [{"file": "src/APage.tsx", "symbols": ["APage"]}],
             [{"criterion": "APage updated", "evidence": "passed"}],
         )
-        self.assertEqual("review", delivered["task"]["status"])
+        self.assertEqual("code_review", delivered["task"]["status"])
 
     def test_reused_execution_thread_preserves_every_run_mapping(self):
         task = self.create_ready_task()
@@ -1688,7 +2152,7 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertEqual("interrupted", conversation["status"])
         self.assertEqual(["same-thread", "same-thread"], [run["conversation_thread_id"] for run in self.service.list_runs(task["id"])])
 
-    def test_project_blocker_is_visible_on_waiting_task(self):
+    def test_unrelated_failed_task_does_not_block_project_queue(self):
         blocker = self.create_ready_task()
         waiting = self.create_located_task({
             "title": "等待项目解锁", "project": str(self.example_project), "goal": "修改其他位置", "scope": ["other"],
@@ -1698,8 +2162,9 @@ class TaskboardServiceTest(unittest.TestCase):
         self.service.bind_conversation(blocker["id"], "execution", "blocked-project-thread", claim["run"]["id"])
         self.service.interrupt_unsubmitted_run(claim["run"]["id"], "crashed")
         visible = self.service.get_task(waiting["id"])["project_blockers"]
-        self.assertEqual(blocker["id"], visible[0]["task_id"])
-        self.assertEqual("retry_pending", visible[0]["blocker_type"])
+        self.assertEqual([], visible)
+        resumed_queue = self.service.claim_next_task("worker-2", waiting["project"])
+        self.assertEqual(waiting["id"], resumed_queue["task"]["id"])
 
     def test_location_report_becomes_stale_when_workspace_changes(self):
         project = Path(self.temp.name) / "location-project"
@@ -1718,13 +2183,6 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertFalse(status["available"])
         self.assertEqual("repository_workspace_changed", status["reason"])
 
-    def test_orphaned_dispatcher_execution_is_recovered_immediately(self):
-        task = self.create_ready_task()
-        claim = self.service.claim_next_task("codex-taskboard-dispatcher", task["project"])
-        self.service.bind_conversation(task["id"], "execution", "orphan-thread", claim["run"]["id"])
-        self.assertEqual(1, self.service.recover_orphaned_dispatcher_runs("codex-taskboard-dispatcher"))
-        self.assertEqual("failed", self.service.get_task(task["id"])["status"])
-
     def test_resume_single_paused_execution_restores_ready_retry(self):
         task = self.create_ready_task()
         claim = self.service.claim_next_task("worker", task["project"])
@@ -1739,48 +2197,20 @@ class TaskboardServiceTest(unittest.TestCase):
         claim = self.service.claim_next_task("worker", task["project"])
         self.service.bind_conversation(task["id"], "execution", "execution-thread", claim["run"]["id"])
         self.service.transition_task(task["id"], "implementing")
-        with self.assertRaisesRegex(ValueError, "Invalid task transition"):
+        with self.assertRaisesRegex(ValueError, "Unknown task status"):
             self.service.transition_task(task["id"], "review")
         task = self.service.submit_delivery(
             claim["run"]["id"], "implemented", "tests passed",
             [{"file": "src/APage.tsx", "symbols": ["APage"]}],
             [{"criterion": criterion, "evidence": "passed"} for criterion in task["acceptance_criteria"]],
         )["task"]
-        review = self.prepare_review(task, "review-thread")
+        review = self.service.claim_next_code_review_task("reviewer", task["project"])
+        self.service.bind_conversation(
+            task["id"], "code_review", "review-thread", review["run"]["id"]
+        )
         with self.assertRaisesRegex(ValueError, "Unknown task status"):
             self.service.transition_task(task["id"], "completion")
-        self.assertEqual("running", self.service.get_run(review["id"])["status"])
-
-    def test_review_interruptions_back_off_and_pause_after_three_attempts(self):
-        task = self.submit_delivery(self.create_ready_task(), "execution")
-        for attempt in range(1, 4):
-            claim = self.service.claim_next_review_task("reviewer")
-            self.assertIsNotNone(claim)
-            self.service.bind_conversation(task["id"], "review", "review-retry-thread", claim["run"]["id"])
-            result = self.service.interrupt_unsubmitted_run(claim["run"]["id"], "turn ended")
-            self.assertEqual("review", result["task"]["status"])
-            self.assertIsNone(self.service.claim_next_review_task("reviewer"))
-            if attempt < 3:
-                with self.service.db.transaction() as connection:
-                    connection.execute(
-                        "UPDATE tasks SET review_retry_after=datetime('now','-1 second') WHERE id=?",
-                        (task["id"],),
-                    )
-        paused = self.service.get_task(task["id"])
-        self.assertFalse(paused["auto_dispatch"])
-        self.assertEqual(3, paused["review_interrupt_count"])
-        self.service.transition_task(task["id"], "review", auto_dispatch=True)
-        self.assertIsNotNone(self.service.claim_next_review_task("reviewer"))
-
-    def test_blocking_review_clears_run_and_returns_to_review(self):
-        task = self.submit_delivery(self.create_ready_task(), "execution")
-        claim = self.service.claim_next_review_task("reviewer")
-        self.service.bind_conversation(task["id"], "review", "blocking-review-thread", claim["run"]["id"])
-        blocked = self.service.transition_task(task["id"], "blocked", "external dependency")
-        self.assertIsNone(blocked["active_run_id"])
-        self.assertEqual("interrupted", self.service.get_run(claim["run"]["id"])["status"])
-        resumed = self.service.transition_task(task["id"], "review")
-        self.assertEqual("review", resumed["status"])
+        self.assertEqual("running", self.service.get_run(review["run"]["id"])["status"])
 
     def test_third_execution_retry_still_resumes_original_thread(self):
         task = self.create_ready_task()
@@ -1809,35 +2239,11 @@ class TaskboardServiceTest(unittest.TestCase):
         for unsafe in ("../../outside.txt", "/tmp/outside.txt", "C:\\outside.txt"):
             analysis = self.service.prepare_location_analysis(payload)
             with self.assertRaisesRegex(ValueError, "project|relative|escapes"):
-                self.service.complete_location_analysis(
+                self.complete_current_location(
                     analysis["analysis_id"], {"query": "context"},
                     [{"file": unsafe, "symbols": ["X"]}],
                     [{"criterion": "safe", "file": unsafe, "symbol": "X", "method": "test", "expected": "safe"}],
                 )
-
-    def test_review_location_is_limited_to_current_delivery(self):
-        task = self.submit_delivery(self.create_ready_task(), "execution")
-        analysis = self.service.prepare_review_location(task["id"])
-        with self.assertRaisesRegex(ValueError, "outside delivered changes and location evidence"):
-            self.service.complete_location_analysis(
-                analysis["analysis_id"], {"query": "impact"},
-                [{"file": "src/Unrelated.tsx", "symbols": ["Other"]}],
-                [{
-                    "criterion": criterion, "file": "src/Unrelated.tsx", "symbol": "Other",
-                    "method": "review", "expected": criterion,
-                } for criterion in task["acceptance_criteria"]],
-            )
-
-        related = self.service.prepare_review_location(task["id"])
-        completed = self.service.complete_location_analysis(
-            related["analysis_id"], {"query": "impact", "files": ["tests/APage.test.tsx"]},
-            [{"file": "tests/APage.test.tsx", "symbols": ["APageTest"]}],
-            [{
-                "criterion": criterion, "file": "tests/APage.test.tsx", "symbol": "APageTest",
-                "method": "review existing direct test", "expected": criterion,
-            } for criterion in task["acceptance_criteria"]],
-        )
-        self.assertEqual("tests/APage.test.tsx", completed["targets"][0]["file"])
 
     def test_claim_context_failure_releases_task_and_run(self):
         task = self.create_ready_task()
@@ -1869,136 +2275,11 @@ class TaskboardServiceTest(unittest.TestCase):
                 self.assertFalse(current["auto_dispatch"])
                 self.assertIn("context failed", current["last_dispatch_error"])
 
-    def test_review_preparation_failure_backs_off_then_pauses_auto_dispatch(self):
-        task = self.submit_delivery(self.create_ready_task(), "execution")
-        self.service.prepare_review_location = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("review prep failed"))
-        for attempt in range(1, 4):
-            with self.assertRaisesRegex(RuntimeError, "review prep failed"):
-                self.service.claim_next_review_task("reviewer", task["project"])
-            current = self.service.get_task(task["id"])
-            self.assertEqual(attempt, current["review_interrupt_count"])
-            if attempt < 3:
-                self.assertTrue(current["auto_dispatch"])
-                self.assertIsNotNone(current["review_retry_after"])
-                self.assertIsNone(self.service.claim_next_review_task("reviewer", task["project"]))
-                with self.service.db.transaction() as connection:
-                    connection.execute(
-                        "UPDATE tasks SET review_retry_after=datetime('now','-1 second') WHERE id=?",
-                        (task["id"],),
-                    )
-            else:
-                self.assertFalse(current["auto_dispatch"])
-                self.assertIsNone(current["active_run_id"])
-
-    def test_individual_pause_resumes_review_without_reimplementation(self):
-        task = self.submit_delivery(self.create_ready_task(), "execution")
-        review = self.service.claim_next_review_task("reviewer", task["project"])
-        self.service.bind_conversation(task["id"], "review", "paused-review-thread", review["run"]["id"])
-        paused = self.service.transition_task(task["id"], "paused", "manual pause")
-        self.assertEqual("review", paused["paused_from_status"])
-        resumed = self.service.resume_task(task["id"])
-        self.assertEqual("review", resumed["status"])
-        self.assertFalse(resumed["retry_required"])
-
-    def test_review_cannot_complete_before_location_gate_or_with_partial_results(self):
-        task = self.submit_delivery(self.create_ready_task(), "execution")
-        claim = self.service.claim_next_review_task("reviewer", task["project"])
-        self.service.bind_conversation(task["id"], "review", "located-review-thread", claim["run"]["id"])
-        with self.assertRaisesRegex(ValueError, "location analysis"):
-            self.service.review_task(
-                task["id"], "pass", passed_items=task["acceptance_criteria"], run_id=claim["run"]["id"],
-            )
-
-        analysis_id = claim["run"]["context_snapshot"]["review_location_analysis_id"]
-        completed = self.service.complete_location_analysis(
-            analysis_id, {"query": "impact"},
-            [{"file": "src/APage.tsx", "symbols": ["APage"]}],
-            [{
-                "criterion": criterion, "file": "src/APage.tsx", "symbol": "APage",
-                "method": "focused review", "expected": criterion,
-            } for criterion in task["acceptance_criteria"]],
-        )
-        prepared = self.service.prepare_review_run(task["id"], completed["id"])
-        with self.assertRaisesRegex(ValueError, "exactly cover"):
-            self.service.review_task(
-                task["id"], "pass", passed_items=[task["acceptance_criteria"][0]],
-                run_id=prepared["run"]["id"],
-            )
-        done = self.service.review_task(
-            task["id"], "pass", passed_items=task["acceptance_criteria"], run_id=prepared["run"]["id"],
-        )
-        self.assertEqual("done", done["status"])
-
-    def test_required_automated_acceptance_check_blocks_pass_until_command_succeeds(self):
-        task = self.submit_delivery(self.create_ready_task(), "execution-acceptance-check")
-        claim = self.service.claim_next_review_task("reviewer", task["project"])
-        analysis_id = claim["run"]["context_snapshot"]["review_location_analysis_id"]
-        completed = self.service.complete_location_analysis(
-            analysis_id, {"query": "impact", "files": ["src/APage.tsx"]},
-            [{"file": "src/APage.tsx", "symbols": ["APage"]}],
-            [{
-                "criterion": criterion, "file": "src/APage.tsx", "symbol": "APage",
-                "method": "automated check", "check_type": "automated",
-                "command": "test -f acceptance.ok", "expected": "acceptance.ok exists",
-            } for criterion in task["acceptance_criteria"]],
-        )
-        prepared = self.service.prepare_review_run(task["id"], completed["id"])
-        self.service.bind_conversation(
-            task["id"], "review", "automated-review-thread", prepared["run"]["id"],
-        )
-        with self.assertRaisesRegex(ValueError, "were not run"):
-            self.service.review_task(
-                task["id"], "pass", passed_items=task["acceptance_criteria"], run_id=prepared["run"]["id"],
-            )
-        failed = self.service.run_acceptance_checks(task["id"], prepared["run"]["id"])
-        self.assertFalse(failed["all_required_passed"])
-        self.assertEqual(["failed", "failed"], [item["status"] for item in failed["checks"]])
-        with self.assertRaisesRegex(ValueError, "did not pass"):
-            self.service.review_task(
-                task["id"], "pass", passed_items=task["acceptance_criteria"], run_id=prepared["run"]["id"],
-            )
-        (self.example_project / "acceptance.ok").write_text("ok\n")
-        passed = self.service.run_acceptance_checks(task["id"], prepared["run"]["id"])
-        self.assertTrue(passed["all_required_passed"])
-        done = self.service.review_task(
-            task["id"], "pass", passed_items=task["acceptance_criteria"], run_id=prepared["run"]["id"],
-        )
-        self.assertEqual("done", done["status"])
-        self.assertEqual(4, len(self.service.list_acceptance_checks(task["id"])))
-
-    def test_automated_acceptance_uses_project_python_when_server_path_has_no_python(self):
-        task = self.submit_delivery(self.create_ready_task(), "project-python-acceptance")
-        claim = self.service.claim_next_review_task("reviewer", task["project"])
-        analysis_id = claim["run"]["context_snapshot"]["review_location_analysis_id"]
-        completed = self.service.complete_location_analysis(
-            analysis_id, {"query": "impact", "files": ["src/APage.tsx"]},
-            [{"file": "src/APage.tsx", "symbols": ["APage"]}],
-            [{
-                "criterion": criterion, "file": "src/APage.tsx", "symbol": "APage",
-                "method": "automated check", "check_type": "automated",
-                "command": "python -c 'import sys; assert sys.version_info >= (3, 9)'",
-                "expected": "project Python runs",
-            } for criterion in task["acceptance_criteria"]],
-        )
-        prepared = self.service.prepare_review_run(task["id"], completed["id"])
-        self.service.bind_conversation(
-            task["id"], "review", "project-python-review", prepared["run"]["id"],
-        )
-        python_bin = self.example_project / ".venv" / "bin" / "python"
-        python_bin.parent.mkdir(parents=True)
-        python_bin.symlink_to(sys.executable)
-
-        with patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}):
-            checks = self.service.run_acceptance_checks(task["id"], prepared["run"]["id"])
-
-        self.assertTrue(checks["all_required_passed"])
-        self.assertEqual(["passed", "passed"], [item["status"] for item in checks["checks"]])
-
     def test_run_conversation_role_must_match_run_type(self):
         task = self.create_ready_task()
         claim = self.service.claim_next_task("worker", task["project"])
         with self.assertRaisesRegex(ValueError, "must use conversation role execution"):
-            self.service.bind_conversation(task["id"], "review", "wrong-thread", claim["run"]["id"])
+            self.service.bind_conversation(task["id"], "code_review", "wrong-thread", claim["run"]["id"])
         with self.assertRaisesRegex(ValueError, "cannot be bound"):
             self.service.bind_conversation(task["id"], "source", "wrong-thread", claim["run"]["id"])
 
@@ -2028,7 +2309,7 @@ class TaskboardServiceTest(unittest.TestCase):
             payload["project"], True, "connected", "ok", {"tool": "codegraph_explore", "query": "atomic", "files": ["src/Atomic.ts"]}, "agent",
         )
         analysis = self.service.prepare_location_analysis(payload)
-        completed = self.service.complete_location_analysis(
+        completed = self.complete_current_location(
             analysis["analysis_id"], {"query": "context"},
             [{"file": "src/A.ts", "symbols": ["A"]}],
             [{"criterion": "created", "file": "src/A.ts", "symbol": "A", "method": "test", "expected": "created"}],
@@ -2037,7 +2318,6 @@ class TaskboardServiceTest(unittest.TestCase):
         task = self.service.create_task({
             **payload,
             "status": "ready",
-            "workflow_version": 1,
             "location_analysis_id": completed["id"],
             "dependency_analysis": completed["dependency_analysis"],
             "implementation_contract": completed["implementation_contract"],
@@ -2051,27 +2331,6 @@ class TaskboardServiceTest(unittest.TestCase):
             ).fetchone()
         self.assertEqual(1, pending["attempts"])
         self.assertIn("vault unavailable", pending["last_error"])
-
-    def test_old_review_location_cannot_be_used_for_new_delivery(self):
-        task = self.submit_delivery(self.create_ready_task(), "execution")
-        analysis = self.service.prepare_review_location(task["id"])
-        completed = self.service.complete_location_analysis(
-            analysis["analysis_id"], {"query": "impact"},
-            [{"file": "src/APage.tsx", "symbols": ["APage"]}],
-            [{
-                "criterion": criterion, "file": "src/APage.tsx", "symbol": "APage",
-                "method": "review", "expected": criterion,
-            } for criterion in task["acceptance_criteria"]],
-        )
-        review = self.service.prepare_review_run(task["id"], completed["id"])
-        self.service.bind_conversation(task["id"], "review", "old-review-thread", review["run"]["id"])
-        task = self.service.review_task(
-            task["id"], "fail", ["failed"], [task["acceptance_criteria"][1]],
-            review["run"]["id"], [task["acceptance_criteria"][0]],
-        )
-        task = self.submit_delivery(task, "rework")
-        with self.assertRaisesRegex(ValueError, "older delivery"):
-            self.service.prepare_review_run(task["id"], completed["id"])
 
     def test_explicit_conflict_relation_blocks_only_while_peer_is_active(self):
         first = self.create_ready_task()

@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import unittest
-import os
 from unittest.mock import patch
 
-from taskboard.mcp_server import TOOL_HANDLERS, TOOLS, handle
+from taskboard.mcp_server import LOCATION_EVIDENCE_SCHEMA, TOOL_HANDLERS, TOOLS, handle
 
 
 class TaskboardMcpServerTest(unittest.TestCase):
+    def test_initialize_reports_dotasks_brand(self):
+        result = handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-03-26"},
+        })["result"]
+        self.assertEqual("dotasks", result["serverInfo"]["name"])
+
     def test_every_declared_tool_has_exactly_one_handler(self):
         self.assertEqual({tool["name"] for tool in TOOLS}, set(TOOL_HANDLERS))
 
@@ -25,6 +31,10 @@ class TaskboardMcpServerTest(unittest.TestCase):
         self.assertIn("get_requirement", names)
         self.assertIn("submit_requirement_decomposition", names)
         self.assertIn("report_requirement_decomposition_failed", names)
+        self.assertTrue({
+            "claim_next_dispatch", "claim_dispatch_batch", "mark_dispatch_pending", "bind_native_dispatch",
+            "renew_dispatch_lease", "get_dispatch_status", "report_dispatch_failed",
+        }.issubset(names))
         self.assertNotIn("create_requirement", names)
         self.assertNotIn("update_requirement", names)
         self.assertNotIn("create_task", names)
@@ -41,6 +51,9 @@ class TaskboardMcpServerTest(unittest.TestCase):
             "retry instead of reporting the run blocked",
             tools["submit_task_delivery"]["description"],
         )
+        self.assertIn(
+            "workspace_path", tools["submit_task_delivery"]["inputSchema"]["properties"],
+        )
         self.assertEqual(
             ["waiting_confirmation", "blocked"],
             tools["report_run_blocked"]["inputSchema"]["properties"]["status"]["enum"],
@@ -54,26 +67,78 @@ class TaskboardMcpServerTest(unittest.TestCase):
             self.assertIn("existing project directory", description)
 
     def test_location_report_contract_documents_all_fallbacks(self):
-        tool = next(item for item in TOOLS if item["name"] == "report_location_status")
-        evidence = tool["inputSchema"]["properties"]["evidence"]["description"]
-        self.assertIn("codegraph_cli_explore", evidence)
-        self.assertIn("gitnexus_cli_query", evidence)
-        self.assertIn("source_match", evidence)
-        self.assertIn("exit_code=0", evidence)
+        tools = {item["name"]: item for item in TOOLS}
+        evidence = tools["report_location_status"]["inputSchema"]["properties"]["evidence"]
+        self.assertEqual(LOCATION_EVIDENCE_SCHEMA, evidence)
+        cli = next(
+            variant for variant in evidence["oneOf"]
+            if variant["properties"]["tool"]["enum"] == ["codegraph_cli_explore"]
+        )
+        self.assertIn("command", cli["required"])
+        self.assertIn("exit_code", cli["required"])
+        self.assertNotIn("argv", cli["properties"])
+        self.assertEqual("array", cli["properties"]["command"]["type"])
+        self.assertEqual("string", cli["properties"]["command"]["items"]["type"])
 
-        completion = next(item for item in TOOLS if item["name"] == "complete_location_analysis")
-        properties = completion["inputSchema"]["properties"]
+        properties = tools["complete_location_analysis"]["inputSchema"]["properties"]
         self.assertIn("location_evidence", properties)
         self.assertNotIn("codegraph_evidence", properties)
+        self.assertEqual(LOCATION_EVIDENCE_SCHEMA, properties["location_evidence"])
+        self.assertEqual(
+            LOCATION_EVIDENCE_SCHEMA,
+            tools["finalize_task_intake"]["inputSchema"]["properties"]["location_evidence"],
+        )
+        child = tools["submit_requirement_decomposition"]["inputSchema"]["properties"][
+            "tasks"
+        ]["items"]["properties"]
+        self.assertEqual(LOCATION_EVIDENCE_SCHEMA, child["location_evidence"])
 
     def test_implementation_contract_schema_requires_object_items(self):
         tools = {tool["name"]: tool for tool in TOOLS}
         contract = tools["complete_location_analysis"]["inputSchema"]["properties"]["implementation_contract"]
         self.assertEqual("object", contract["properties"]["targets"]["items"]["type"])
-        self.assertEqual("object", contract["properties"]["ordered_steps"]["items"]["type"])
+        self.assertEqual(
+            "object",
+            contract["properties"]["targets"]["items"]["properties"]["tasks"]["items"]["type"],
+        )
         intake = tools["finalize_task_intake"]["inputSchema"]["properties"]
         self.assertEqual("object", intake["targets"]["items"]["type"])
-        self.assertEqual("object", intake["ordered_steps"]["items"]["type"])
+        self.assertNotIn("ordered_steps", intake)
+
+    def test_native_dispatch_schema_exposes_independent_stage_lanes(self):
+        tool = next(item for item in TOOLS if item["name"] == "claim_next_dispatch")
+        stage = tool["inputSchema"]["properties"]["stage"]
+
+        self.assertEqual(
+            ["development", "code_review"], stage["enum"]
+        )
+        self.assertIn("independent", tool["description"])
+
+        with patch(
+            "taskboard.mcp_server.SERVICE.claim_next_native_dispatch",
+            return_value=None,
+        ) as claim:
+            handle({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "claim_next_dispatch",
+                    "arguments": {
+                        "worker_id": "codex-native-controller",
+                        "stage": "development",
+                    },
+                },
+            })
+        claim.assert_called_once_with(
+            "codex-native-controller", None, 1800, "development"
+        )
+
+        batch_tool = next(item for item in TOOLS if item["name"] == "claim_dispatch_batch")
+        self.assertEqual(
+            ["development", "code_review"],
+            batch_tool["inputSchema"]["properties"]["stage"]["enum"],
+        )
 
     def test_finalize_intake_schema_contains_each_authored_fact_once(self):
         tool = next(item for item in TOOLS if item["name"] == "finalize_task_intake")
@@ -83,9 +148,19 @@ class TaskboardMcpServerTest(unittest.TestCase):
 
         self.assertEqual(["requirement", "task"], properties["intake_kind"]["enum"])
         self.assertIn("targets", task_branch)
-        self.assertIn("ordered_steps", task_branch)
+        self.assertNotIn("ordered_steps", task_branch)
+        self.assertIn("tasks", properties["targets"]["items"]["properties"])
+        self.assertIn("mode", properties["targets"]["items"]["properties"])
         self.assertIn("review_checks", task_branch)
+        self.assertIn("quality_gates", task_branch)
         self.assertIn("acceptance_plan", task_branch)
+        gates = properties["quality_gates"]
+        self.assertEqual(["code_review"], gates["required"])
+        self.assertNotIn("acceptance", gates["properties"])
+        self.assertNotIn("accept_task", {item["name"] for item in TOOLS})
+        self.assertEqual(
+            ["required", "reason"], gates["properties"]["code_review"]["required"]
+        )
         self.assertIn("acceptance_criteria", properties)
         self.assertNotIn("implementation_contract", properties)
         self.assertNotIn("review_contract", properties)
@@ -99,7 +174,7 @@ class TaskboardMcpServerTest(unittest.TestCase):
             "status": "created", "intake_kind": "task",
             "task_id": "TASK-0001", "task_status": "ready",
         }
-        with patch.dict(os.environ, {"CODEX_TASKBOARD_TOOL_PROFILE": ""}), patch.dict(TOOL_HANDLERS, {"finalize_task_intake": lambda arguments: requirement if arguments["intake_kind"] == "requirement" else task}, clear=False):
+        with patch.dict(TOOL_HANDLERS, {"finalize_task_intake": lambda arguments: requirement if arguments["intake_kind"] == "requirement" else task}, clear=False):
             requirement_result = handle({
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": "finalize_task_intake", "arguments": {"intake_kind": "requirement"}},
@@ -116,19 +191,20 @@ class TaskboardMcpServerTest(unittest.TestCase):
         task_items = tool["inputSchema"]["properties"]["tasks"]["items"]
         required = set(task_items["required"])
         self.assertTrue({
-            "analysis_id", "location_evidence", "targets", "ordered_steps",
+            "analysis_id", "location_evidence", "targets",
             "review_checks", "acceptance_plan",
         }.issubset(required))
         self.assertEqual(1, task_items["properties"]["targets"]["minItems"])
-        self.assertEqual(1, task_items["properties"]["ordered_steps"]["minItems"])
+        self.assertNotIn("ordered_steps", required)
+        self.assertIn("tasks", task_items["properties"]["targets"]["items"]["properties"])
 
-    def test_profile_mutation_results_are_compact(self):
+    def test_mutation_results_are_compact(self):
         result = {
             "task": {"id": "TASK-1", "status": "code_review", "active_run_id": None, "goal": "x" * 5000},
             "run": {"id": "RUN-1", "artifact_snapshot": {"diff": "x" * 5000}},
             "review_dispatch_required": True,
         }
-        with patch.dict(os.environ, {"CODEX_TASKBOARD_TOOL_PROFILE": "execution"}), patch.dict(
+        with patch.dict(
             TOOL_HANDLERS, {"submit_task_delivery": lambda _arguments: result}, clear=False,
         ):
             response = handle({

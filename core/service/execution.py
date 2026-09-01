@@ -11,21 +11,114 @@ from pathlib import Path
 from typing import Any
 
 from ..run_context import freeze_run_context, prompt_context
+from ..self_healing import (
+    SELF_HEAL_ATTEMPT_LIMIT,
+    classify_recoverable_failure,
+    normalize_self_heal_locations,
+)
 from .domain import (
     ACTIVE_RUN_STATUSES,
     DISPATCH_PREPARATION_LIMIT,
     DISPATCH_RETRY_DELAYS_SECONDS,
     JSON_FIELDS,
+    REQUIREMENT_DECOMPOSITION_ATTEMPT_LIMIT,
     REVIEW_INTERRUPT_LIMIT,
     REVIEW_RETRY_DELAYS_SECONDS,
     RUN_JSON_FIELDS,
     TASK_TRANSITIONS,
-    _decode_row,
+    decode_row,
 )
 
 
 class TaskLifecycleMixin:
     """Task state transitions and atomic claims for execution and review stages."""
+
+    def _self_heal_plan(
+        self,
+        task: dict[str, Any],
+        failure_category: str,
+        evidence: list[str],
+        failure_locations: Any = None,
+    ) -> dict[str, Any]:
+        category = str(failure_category or "").strip().lower()
+        if category not in {"project", "environment"}:
+            return {
+                "category": "implementation",
+                "scheduled": False,
+                "attempt": 0,
+                "contract": task.get("implementation_contract") or {},
+                "locations": [],
+            }
+        contract = dict(task.get("implementation_contract") or {})
+        previous = contract.get("self_heal") or {}
+        attempt = int(previous.get("attempt") or 0) + 1
+        locations = []
+        targets = [dict(item) for item in contract.get("targets") or [] if isinstance(item, dict)]
+        target_by_file = {
+            self._normalize_target_file(item.get("file")): item
+            for item in targets if str(item.get("file") or "").strip()
+        }
+        evidence_text = "；".join(str(item).strip() for item in evidence if str(item).strip())
+        for location in normalize_self_heal_locations(failure_locations):
+            file = self._normalize_target_file(location["file"])
+            project_file = Path(str(task.get("project") or "")) / file
+            mode = str(location.get("mode") or "").strip().lower()
+            if not mode:
+                mode = "modify" if project_file.exists() else "create"
+            action = (
+                (location.get("tasks") or [{}])[0].get("action")
+                or f"修复{category}问题：{evidence_text or file}"
+            )
+            normalized_location = {
+                "file": file,
+                "symbols": location["symbols"],
+                "mode": mode,
+                "tasks": location.get("tasks") or [{"action": action}],
+            }
+            locations.append(normalized_location)
+            target = target_by_file.get(file)
+            if target is None:
+                target = dict(normalized_location)
+                targets.append(target)
+                target_by_file[file] = target
+            else:
+                target.setdefault("mode", mode)
+                target.setdefault("symbols", [])
+                target["symbols"] = list(dict.fromkeys([
+                    *target["symbols"], *normalized_location["symbols"],
+                ]))
+                target.setdefault("tasks", [])
+                for target_task in normalized_location["tasks"]:
+                    if target_task not in target["tasks"]:
+                        target["tasks"].append(target_task)
+        contract["targets"] = targets
+        contract["self_heal"] = {
+            "category": category,
+            "attempt": attempt,
+            "attempt_limit": SELF_HEAL_ATTEMPT_LIMIT,
+            "scheduled": attempt <= SELF_HEAL_ATTEMPT_LIMIT,
+            "evidence": [str(item).strip() for item in evidence if str(item).strip()][-10:],
+            "locations": locations,
+        }
+        return {
+            "category": category,
+            "scheduled": attempt <= SELF_HEAL_ATTEMPT_LIMIT,
+            "attempt": attempt,
+            "contract": contract,
+            "locations": locations,
+        }
+
+    @staticmethod
+    def _persist_self_heal_targets(
+        connection: Any, task_id: str, locations: list[dict[str, Any]],
+    ) -> None:
+        for location in locations:
+            symbols = location.get("symbols") or [""]
+            for symbol in symbols:
+                connection.execute(
+                    "INSERT OR IGNORE INTO task_targets(task_id,file,symbol) VALUES(?,?,?)",
+                    (task_id, location["file"], str(symbol or "")),
+                )
 
     @staticmethod
     def _stage_token_reserve(task: dict[str, Any], run_type: str) -> int:
@@ -33,9 +126,7 @@ class TaskLifecycleMixin:
         budget = max(0, int(task.get("token_budget") or 0))
         if budget <= 0:
             return 0
-        if run_type == "acceptance":
-            return min(100_000, max(10_000, budget // 5))
-        if run_type in {"code_review", "review"}:
+        if run_type == "code_review":
             return min(50_000, max(5_000, budget // 10))
         return min(150_000, max(10_000, budget // 5))
 
@@ -145,26 +236,25 @@ class TaskLifecycleMixin:
                 raise ValueError(
                     "Token budget can only be increased when restarting a budget-exhausted task"
                 )
-        same_v2_stage_update = (
+        same_stage_update = (
             current["status"] == status
-            and status in {"code_review", "acceptance"}
+            and status == "code_review"
             and set(updates) == {"auto_dispatch"}
         )
-        restoring_v2_stage = (
+        restoring_stage = (
             current["status"] == "blocked"
             and current.get("blocked_from_status") == status
-            and status in {"code_review", "acceptance"}
+            and status == "code_review"
         )
-        # V2 review APIs persist their result and stage transition atomically;
+        # The Code Review API persists its result and stage transition atomically;
         # allowing the generic transition endpoint would bypass that invariant.
         if (
-            int(current.get("workflow_version") or 1) >= 2
-            and status in {"code_review", "acceptance", "done", "acceptance_blocked"}
-            and not restoring_v2_stage
-            and not same_v2_stage_update
+            status in {"code_review", "done"}
+            and not restoring_stage
+            and not same_stage_update
         ):
             raise ValueError(
-                "Workflow v2 stage transitions must use their dedicated review/acceptance API"
+                "Review stage transitions must use the dedicated Code Review API"
             )
         if (
             status != current["status"]
@@ -181,7 +271,7 @@ class TaskLifecycleMixin:
             previous = current.get("blocked_from_status") or "ready"
             expected = (
                 previous
-                if previous in {"review", "code_review", "acceptance"}
+                if previous == "code_review"
                 else (
                     "rework"
                     if previous == "rework" or current.get("retry_run_type") == "rework"
@@ -190,17 +280,6 @@ class TaskLifecycleMixin:
             )
             if status != expected:
                 raise ValueError(f"Blocked task must return to {expected}")
-        if status == "review" and status != current["status"]:
-            with self.db.connection() as connection:
-                delivery = connection.execute(
-                    """SELECT 1 FROM task_runs WHERE task_id=? AND id=(SELECT primary_run_id FROM tasks WHERE id=?)
-                       AND acceptance_evidence!='[]' LIMIT 1""",
-                    (task_id, task_id),
-                ).fetchone()
-            if current["status"] != "blocked" or not delivery:
-                raise ValueError(
-                    "Only a blocked submitted delivery can return to review"
-                )
         if status == "ready":
             self._assert_ready_payload(
                 current, {field: current[field] for field in JSON_FIELDS}
@@ -244,7 +323,7 @@ class TaskLifecycleMixin:
         if "auto_dispatch" in changes:
             changes["auto_dispatch"] = int(bool(changes["auto_dispatch"]))
             if (
-                current["status"] in {"review", "code_review", "acceptance"}
+                current["status"] == "code_review"
                 and changes["auto_dispatch"]
             ):
                 changes["review_interrupt_count"] = 0
@@ -299,7 +378,7 @@ class TaskLifecycleMixin:
             changes["retry_required"] = 0
             changes["retry_run_type"] = None
         if (
-            status in {"ready", "rework", "review"}
+            status in {"ready", "rework"}
             and status != current["status"]
             and current["status"] in {"blocked", "failed", "waiting_confirmation"}
         ):
@@ -387,8 +466,47 @@ class TaskLifecycleMixin:
               WHEN conflict.source_task_id=tasks.id THEN conflict.target_task_id ELSE conflict.source_task_id END
             WHERE conflict.relation_type='conflicts_with'
               AND (conflict.source_task_id=tasks.id OR conflict.target_task_id=tasks.id)
-              AND other.status IN ('claimed','investigating','implementing','waiting_confirmation','review','code_review','acceptance','failed','blocked')
+              AND other.status IN ('claimed','investigating','implementing','waiting_confirmation','code_review','failed','blocked')
         )"""
+
+    @staticmethod
+    def _task_requires_project_exclusive_lock(task: dict[str, Any]) -> bool:
+        contract = task.get("implementation_contract") or {}
+        exclusive_names = {
+            "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+            "requirements.lock", "uv.lock", "pyproject.toml", "go.mod", "go.sum",
+            "cargo.toml", "cargo.lock",
+        }
+        for target in contract.get("targets") or []:
+            if not isinstance(target, dict):
+                continue
+            file = str(target.get("file") or "").strip().lower()
+            mode = str(target.get("mode") or "modify").strip().lower()
+            parts = {part for part in file.split("/") if part}
+            if mode in {"config", "delete"} or file.rsplit("/", 1)[-1] in exclusive_names:
+                return True
+            if parts & {"migrations", "migration", "schema"}:
+                return True
+        return False
+
+    def _active_project_runs(self, connection: Any, project: str) -> list[dict[str, Any]]:
+        rows = connection.execute(
+            """SELECT DISTINCT task.* FROM tasks task
+               JOIN task_runs run ON run.task_id=task.id
+               WHERE task.project=? AND run.status IN ('awaiting_thread','running')""",
+            (project,),
+        ).fetchall()
+        return [decode_row(row) for row in rows]
+
+    @staticmethod
+    def _locking_project_tasks(connection: Any, project: str) -> list[dict[str, Any]]:
+        rows = connection.execute(
+            """SELECT * FROM tasks WHERE project=?
+               AND status IN ('claimed','investigating','implementing','waiting_confirmation',
+                              'code_review','rework','failed','blocked')""",
+            (project,),
+        ).fetchall()
+        return [decode_row(row) for row in rows]
 
     @staticmethod
     def _retry_workspace_baseline(
@@ -417,9 +535,13 @@ class TaskLifecycleMixin:
         task: dict[str, Any], context: dict[str, Any], run_type: str
     ) -> dict[str, Any]:
         """Classify the narrow, repeatable subset safe for low reasoning."""
-        targets = context.get("located_targets") or []
-        steps = context.get("implementation_steps") or []
-        checks = context.get("acceptance_commands") or []
+        targets = context.get("targets") or []
+        steps = [
+            task
+            for target in targets if isinstance(target, dict)
+            for task in target.get("tasks") or [] if isinstance(task, dict)
+        ]
+        checks = context.get("verify") or []
         one_target = (
             len(targets) == 1
             and len(targets[0].get("symbols") or []) == 1
@@ -445,7 +567,6 @@ class TaskLifecycleMixin:
         mechanical_change = any(
             before != after and after in command_text for before, after in literal_pairs
         )
-        review_contract = task.get("review_contract") or {}
         sensitive_text = json.dumps(
             {
                 "title": task.get("title"),
@@ -475,7 +596,6 @@ class TaskLifecycleMixin:
         low_risk = (
             run_type == "execution"
             and task.get("priority") not in {"P0", "P1"}
-            and not bool(review_contract.get("separate_acceptance_session"))
             and one_target
             and automated
             and mechanical_change
@@ -518,7 +638,7 @@ class TaskLifecycleMixin:
         if configured is None:
             try:
                 configured = int(
-                    os.environ.get("CODEX_TASKBOARD_TARGET_SNIPPET_LINES", "60")
+                    os.environ.get("DOTASKS_TARGET_SNIPPET_LINES", "60")
                 )
             except ValueError:
                 configured = 60
@@ -622,7 +742,7 @@ class TaskLifecycleMixin:
             return {
                 "intake_kind": "requirement",
                 "requirement": decode_requirement(row),
-                "tasks": [_decode_row(item) for item in tasks],
+                "tasks": [decode_row(item) for item in tasks],
                 "relations": relations,
                 "decomposition_runs": decomposition_runs,
             }
@@ -660,17 +780,38 @@ class TaskLifecycleMixin:
                     raise ValueError("An active requirement decomposition run is required")
                 elif action == "fail_decomposition":
                     reason = str(error or "需求拆解失败").strip()
+                    exhausted = (
+                        int(run["attempt"] or 0)
+                        >= REQUIREMENT_DECOMPOSITION_ATTEMPT_LIMIT
+                    )
                     connection.execute(
                         """UPDATE requirement_decomposition_runs SET status='failed', error=?,
                            completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
                         (reason, decomposition_run_id),
                     )
                     connection.execute(
-                        """UPDATE requirements SET status='ready', last_decomposition_error=?,
+                        """UPDATE requirements SET status=?, auto_dispatch=?,
+                           last_decomposition_error=?,
                            updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                        (reason, requirement_id),
+                        (
+                            "failed" if exhausted else "ready",
+                            0 if exhausted else int(bool(requirement_row["auto_dispatch"])),
+                            reason,
+                            requirement_id,
+                        ),
                     )
-                    self._event(connection, "requirement", requirement_id, "decomposition_failed", {"run_id": decomposition_run_id, "error": reason})
+                    self._event(
+                        connection,
+                        "requirement",
+                        requirement_id,
+                        "decomposition_failed",
+                        {
+                            "run_id": decomposition_run_id,
+                            "error": reason,
+                            "attempt": int(run["attempt"] or 0),
+                            "retry_exhausted": exhausted,
+                        },
+                    )
             if action == "fail_decomposition":
                 return self.claim_next_task(
                     "", action="get_requirement", requirement_id=requirement_id,
@@ -683,11 +824,57 @@ class TaskLifecycleMixin:
                 not isinstance(item, dict) for item in specs
             ):
                 raise ValueError("child_tasks must be a non-empty array of objects")
-            requirement_goal = str(requirement_row["goal"] or "").strip()
             requirement_modules = json.loads(requirement_row["modules"] or "[]")
-            requirement_scope = json.loads(requirement_row["scope"] or "[]")
             requirement_out_of_scope = json.loads(requirement_row["out_of_scope"] or "[]")
-            requirement_acceptance = json.loads(requirement_row["acceptance_criteria"] or "[]")
+
+            # Validate the entire decomposition before creating any child. A
+            # requirement run is submitted once, so a contract error in a later
+            # child must not leave earlier children partially persisted.
+            preflight_keys: set[str] = set()
+            for position, spec in enumerate(specs, 1):
+                key = str(spec.get("key") or position).strip()
+                if not key or key in preflight_keys:
+                    raise ValueError("Every decomposed task requires a unique non-empty key")
+                preflight_keys.add(key)
+                if not str(spec.get("title") or "").strip() or not str(spec.get("goal") or "").strip():
+                    raise ValueError("Every decomposed task requires title and goal")
+                if not str(spec.get("analysis_id") or "").strip():
+                    raise ValueError("Every decomposed task requires analysis_id")
+                evidence = spec.get("location_evidence")
+                if not isinstance(evidence, dict) or not evidence:
+                    raise ValueError("Every decomposed task requires location_evidence")
+                targets = spec.get("targets")
+                if not isinstance(targets, list) or not targets:
+                    raise ValueError("Every decomposed task requires non-empty targets")
+                if any(
+                    not isinstance(target, dict) or not target.get("tasks") for target in targets
+                ):
+                    raise ValueError("Every decomposed task target requires tasks")
+                if not isinstance(spec.get("acceptance_plan"), list) or not spec["acceptance_plan"]:
+                    raise ValueError("Every decomposed task requires non-empty acceptance_plan")
+                if not isinstance(spec.get("review_checks"), list) or not spec["review_checks"]:
+                    raise ValueError("Every decomposed task requires non-empty review_checks")
+                if spec.get("quality_gates") is None:
+                    raise ValueError("Every decomposed task requires quality_gates")
+                self._normalize_quality_gates(spec["quality_gates"])
+                project = self._require_project_directory(
+                    str(spec.get("project") or requirement_row["project"] or "")
+                )
+                try:
+                    self._validate_connected_location_evidence(project, evidence)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Decomposed task {key} has invalid location_evidence: {exc}"
+                    ) from exc
+                dependencies = spec.get("depends_on") or []
+                if not isinstance(dependencies, list):
+                    raise ValueError("depends_on must be an array of task keys")
+
+            for position, spec in enumerate(specs, 1):
+                for dependency in spec.get("depends_on") or []:
+                    if str(dependency).strip() not in preflight_keys:
+                        raise ValueError(f"Unknown decomposed task dependency: {dependency}")
+
             created: dict[str, str] = {}
             desired_auto_dispatch: dict[str, bool] = {}
             seen_keys: set[str] = set()
@@ -709,62 +896,42 @@ class TaskLifecycleMixin:
                 child_goal = str(spec.get("goal") or "").strip()
                 if not title or not child_goal:
                     raise ValueError("Every decomposed task requires title and goal")
-                child_acceptance = spec.get("acceptance_criteria") or []
-                if not isinstance(child_acceptance, list) or any(
-                    not isinstance(item, str) for item in child_acceptance
-                ):
-                    raise ValueError("Every decomposed task acceptance_criteria must be an array of strings")
                 targets = spec.get("targets")
-                ordered_steps = spec.get("ordered_steps")
                 acceptance_plan = spec.get("acceptance_plan")
                 review_checks = spec.get("review_checks")
+                quality_gates = spec.get("quality_gates")
                 if not str(spec.get("analysis_id") or "").strip():
                     raise ValueError("Every decomposed task requires analysis_id")
                 if not isinstance(spec.get("location_evidence"), dict) or not spec["location_evidence"]:
                     raise ValueError("Every decomposed task requires location_evidence")
                 if not isinstance(targets, list) or not targets:
                     raise ValueError("Every decomposed task requires non-empty targets")
-                if not isinstance(ordered_steps, list) or not ordered_steps:
-                    raise ValueError("Every decomposed task requires non-empty ordered_steps")
+                if any(
+                    not isinstance(target, dict) or not target.get("tasks") for target in targets
+                ):
+                    raise ValueError("Every decomposed task target requires tasks")
                 if not isinstance(acceptance_plan, list) or not acceptance_plan:
                     raise ValueError("Every decomposed task requires non-empty acceptance_plan")
                 if not isinstance(review_checks, list) or not review_checks:
                     raise ValueError("Every decomposed task requires non-empty review_checks")
-                inherited_goal = (
-                    requirement_goal
-                    if child_goal == requirement_goal
-                    else f"{requirement_goal}\n子任务目标：{child_goal}"
-                )
+                if quality_gates is None:
+                    raise ValueError("Every decomposed task requires quality_gates")
+                self._normalize_quality_gates(quality_gates)
                 modules = list(dict.fromkeys([*requirement_modules, *(spec.get("modules") or [])]))
-                scope = list(dict.fromkeys([*requirement_scope, *(spec.get("scope") or [child_goal])]))
+                scope = list(dict.fromkeys(spec.get("scope") or [child_goal]))
                 out_of_scope = list(dict.fromkeys([*requirement_out_of_scope, *(spec.get("out_of_scope") or [])]))
-                acceptance = list(dict.fromkeys([*requirement_acceptance, *child_acceptance]))
-                if not acceptance:
-                    acceptance = [child_goal]
                 normalized_plan = [dict(item) for item in acceptance_plan]
-                planned_criteria = {
-                    str(item.get("criterion") or "").strip() for item in normalized_plan
-                }
-                first_target = targets[0]
-                first_symbols = first_target.get("symbols") or []
-                for criterion in acceptance:
-                    if criterion not in planned_criteria:
-                        normalized_plan.append({
-                            "criterion": criterion,
-                            "file": str(first_target.get("file") or ""),
-                            "symbol": str(first_symbols[0] if first_symbols else ""),
-                            "method": "verify inherited requirement acceptance",
-                            "expected": criterion,
-                            "check_type": "static_review",
-                            "required": True,
-                        })
                 result = self.finalize_task_intake({
                     "intake_kind": "task",
                     "analysis_id": spec["analysis_id"],
                     "title": title,
                     "project": str(spec.get("project") or requirement_row["project"] or ""),
                     "modules": modules,
-                    "goal": inherited_goal,
+                    # A decomposed task owns only its declared child outcome.
+                    # Requirement-wide scope and acceptance stay on the parent;
+                    # copying them here makes every sibling responsible for the
+                    # entire requirement and creates duplicate acceptance bugs.
+                    "goal": child_goal,
                     "scope": scope,
                     "out_of_scope": out_of_scope,
                     "priority": str(spec.get("priority") or requirement_row["priority"] or "P2"),
@@ -778,8 +945,8 @@ class TaskLifecycleMixin:
                     "agent_id": str(spec.get("agent_id") or "requirement-decomposer"),
                     "location_evidence": spec["location_evidence"],
                     "targets": targets,
-                    "ordered_steps": ordered_steps,
                     "review_checks": review_checks,
+                    "quality_gates": quality_gates,
                     "acceptance_plan": normalized_plan,
                     "dependency_analysis": {"decision": "independent"},
                 })
@@ -899,31 +1066,15 @@ class TaskLifecycleMixin:
                         "完成后调用 submit_requirement_decomposition。"
                     ),
                 }
-            # One active run per project protects workspace baselines, while
-            # target locks prevent separate tasks from claiming the same symbol.
+            # Parallel development is admitted only for isolated worktrees.
+            # File locks stay conservative in the first release: two tasks that
+            # touch the same file never run concurrently, even at different symbols.
             filters = [
                 "status IN ('ready', 'rework')",
                 "auto_dispatch=1",
                 "(dispatch_retry_after IS NULL OR dispatch_retry_after<=CURRENT_TIMESTAMP)",
                 self._dependencies_satisfied_sql(),
                 self._conflicting_active_relation_sql(),
-                """NOT EXISTS (
-                    SELECT 1 FROM task_runs project_run
-                    JOIN tasks project_task ON project_task.id=project_run.task_id
-                    WHERE project_task.id != tasks.id
-                      AND project_task.project=tasks.project
-                      AND project_run.status IN ('awaiting_thread','running')
-                )""",
-                """NOT EXISTS (
-                    SELECT 1 FROM tasks project_task
-                    WHERE project_task.id != tasks.id
-                      AND project_task.project=tasks.project
-                      AND (
-                        project_task.status IN ('failed','blocked','waiting_confirmation')
-                        OR (project_task.status='paused' AND project_task.paused_from_status IN ('claimed','investigating','implementing','review','code_review','acceptance','acceptance_blocked','rework'))
-                        OR (project_task.retry_required=1 AND project_task.status NOT IN ('done','cancelled'))
-                      )
-                )""",
                 """NOT EXISTS (
                     SELECT 1 FROM task_runs active_run
                     WHERE active_run.task_id=tasks.id
@@ -935,11 +1086,10 @@ class TaskLifecycleMixin:
                     JOIN task_targets locked_target
                       ON locked_target.task_id != candidate_target.task_id
                      AND locked_target.file=candidate_target.file
-                     AND (candidate_target.symbol='' OR locked_target.symbol='' OR locked_target.symbol=candidate_target.symbol)
                     JOIN tasks locked_task ON locked_task.id=locked_target.task_id
                     WHERE candidate_target.task_id=tasks.id
                       AND locked_task.project=tasks.project
-                      AND locked_task.status IN ('claimed','investigating','implementing','waiting_confirmation','review','failed','blocked')
+                      AND locked_task.status IN ('claimed','investigating','implementing','waiting_confirmation','code_review','failed','blocked')
                       AND NOT EXISTS (
                         SELECT 1 FROM execution_batch_tasks mine
                         JOIN execution_batch_tasks theirs ON theirs.batch_id=mine.batch_id
@@ -951,16 +1101,49 @@ class TaskLifecycleMixin:
             if project:
                 filters.append("project = ?")
                 values.append(self._normalize_project(project))
-            row = connection.execute(
+            rows = connection.execute(
                 f"""SELECT * FROM tasks WHERE {" AND ".join(filters)}
                     ORDER BY retry_required DESC,
                              CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 ELSE 3 END,
-                             created_at ASC LIMIT 1""",
+                             created_at ASC LIMIT 100""",
                 values,
-            ).fetchone()
+            ).fetchall()
+            row = None
+            execution_policy: dict[str, Any] = {}
+            for candidate_row in rows:
+                candidate = decode_row(candidate_row)
+                candidate_project = str(candidate.get("project") or "")
+                policy = self._project_execution_policy(candidate_project, connection)
+                if (
+                    policy["execution_environment"] == "worktree"
+                    and self._task_has_unmanaged_workspace_conflict(candidate, policy)
+                ):
+                    continue
+                active_tasks = self._active_project_runs(connection, candidate_project)
+                locking_tasks = [
+                    item for item in self._locking_project_tasks(connection, candidate_project)
+                    if item.get("id") != candidate.get("id")
+                ]
+                if policy["capacity"] <= 1 and active_tasks:
+                    continue
+                active_development = sum(
+                    1
+                    for active in active_tasks
+                    if active.get("status") in {"claimed", "investigating", "implementing", "rework"}
+                )
+                if active_development >= int(policy["capacity"]):
+                    continue
+                if locking_tasks and (
+                    self._task_requires_project_exclusive_lock(candidate)
+                    or any(self._task_requires_project_exclusive_lock(active) for active in locking_tasks)
+                ):
+                    continue
+                row = candidate_row
+                execution_policy = policy
+                break
             if not row:
                 return None
-            task = _decode_row(row)
+            task = decode_row(row)
             run_type = (
                 "rework"
                 if task["status"] == "rework" or task.get("retry_run_type") == "rework"
@@ -997,11 +1180,20 @@ class TaskLifecycleMixin:
             lease_token = uuid.uuid4().hex
             modifier = f"+{lease_seconds} seconds"
             run_id = self.db.next_id(connection, "RUN")
+            base_revision = str(
+                (execution_policy.get("baseline") or {}).get("revision") or ""
+            )
+            base_ref = ""
+            if execution_policy["execution_environment"] == "worktree":
+                base_ref = self._create_run_base_ref(
+                    str(task.get("project") or ""), run_id, base_revision
+                )
             connection.execute(
                 """INSERT INTO task_runs(
                        id, task_id, parent_run_id, run_type, attempt, status,
-                       claimed_by, lease_token, lease_expires_at
-                   ) VALUES(?, ?, ?, ?, ?, 'awaiting_thread', ?, ?, datetime('now', ?))""",
+                       claimed_by, lease_token, lease_expires_at,
+                       execution_environment, base_revision, base_ref
+                   ) VALUES(?, ?, ?, ?, ?, 'awaiting_thread', ?, ?, datetime('now', ?), ?, ?, ?)""",
                 (
                     run_id,
                     task["id"],
@@ -1011,10 +1203,13 @@ class TaskLifecycleMixin:
                     worker_id,
                     lease_token,
                     modifier,
+                    execution_policy["execution_environment"],
+                    base_revision,
+                    base_ref,
                 ),
             )
             cursor = connection.execute(
-                """UPDATE tasks SET status='implementing', assigned_to=?, active_run_id=?, retry_required=0,
+                """UPDATE tasks SET status='claimed', assigned_to=?, active_run_id=?, retry_required=0,
                    primary_run_id=?, retry_run_type=NULL, updated_at=CURRENT_TIMESTAMP
                    WHERE id=? AND status=?""",
                 (worker_id, run_id, run_id, task["id"], task["status"]),
@@ -1030,22 +1225,29 @@ class TaskLifecycleMixin:
                 {
                     "task_id": task["id"],
                     "worker_id": worker_id,
-                    "task_status": "implementing",
+                    "task_status": "claimed",
+                    "execution_environment": execution_policy["execution_environment"],
+                    "parallel_fallback_reason": execution_policy["fallback_reason"],
                 },
             )
         try:
             context = self.build_execution_context(task["id"], task.get("project"))
-            context = self._merge_batch_execution_context(context, batch_id)
-            context["workspace_baseline"] = retry_baseline or self._workspace_state(
-                task.get("project")
+            if batch_id:
+                context = self._merge_batch_execution_context(context, batch_id)
+            context["workspace_baseline"] = retry_baseline or execution_policy["baseline"]
+            context["execution_environment"] = execution_policy["execution_environment"]
+            context["parallel_fallback_reason"] = execution_policy["fallback_reason"]
+            context["base_revision"] = str(
+                (execution_policy.get("baseline") or {}).get("revision") or ""
             )
+            context["base_ref"] = base_ref
             context["retry_chain_root_run_id"] = retry_chain_root_run_id or run_id
             context["execution_profile"] = self._execution_profile(
                 task, context, run_type
             )
             if context["execution_profile"]["risk"] == "low":
                 snippet = self._target_snippet(
-                    task.get("project"), context["located_targets"][0]
+                    task.get("project"), context["targets"][0]
                 )
                 if snippet:
                     context["target_snippet"] = snippet
@@ -1139,186 +1341,6 @@ class TaskLifecycleMixin:
             "dispatch_prompt": self._dispatch_prompt(task, run_id, run_type, context),
         }
 
-    def claim_next_review_task(
-        self, worker_id: str, project: str | None = None, lease_seconds: int = 1800
-    ) -> dict[str, Any] | None:
-        worker_id = worker_id.strip()
-        if not worker_id:
-            raise ValueError("worker_id is required")
-        if not self.dispatcher_enabled():
-            return None
-        lease_seconds = max(300, min(int(lease_seconds), 7200))
-        self.recover_expired_runs()
-        with self.db.transaction() as connection:
-            filters = [
-                "tasks.status IN ('review','code_review')",
-                "tasks.auto_dispatch=1",
-                "(tasks.review_retry_after IS NULL OR tasks.review_retry_after<=CURRENT_TIMESTAMP)",
-                self._conflicting_active_relation_sql(),
-                """EXISTS (
-                    SELECT 1 FROM task_runs delivery
-                    WHERE delivery.id=tasks.primary_run_id
-                      AND delivery.status='waiting_review'
-                )""",
-                """NOT EXISTS (
-                    SELECT 1 FROM task_runs active_review
-                    WHERE active_review.task_id=tasks.id
-                      AND active_review.run_type='review'
-                      AND active_review.status IN ('awaiting_thread','running')
-                )""",
-                """NOT EXISTS (
-                    SELECT 1 FROM task_runs project_run
-                    JOIN tasks project_task ON project_task.id=project_run.task_id
-                    WHERE project_task.id != tasks.id
-                      AND project_task.project=tasks.project
-                      AND project_run.status IN ('awaiting_thread','running')
-                )""",
-                """NOT EXISTS (
-                    SELECT 1 FROM tasks project_task
-                    WHERE project_task.id != tasks.id
-                      AND project_task.project=tasks.project
-                      AND (
-                        project_task.status IN ('failed','blocked','waiting_confirmation')
-                        OR (project_task.status='paused' AND project_task.paused_from_status IN ('claimed','investigating','implementing','review','code_review','acceptance','acceptance_blocked','rework'))
-                        OR (project_task.retry_required=1 AND project_task.status NOT IN ('done','cancelled'))
-                      )
-                )""",
-            ]
-            values: list[Any] = []
-            if project:
-                filters.append("tasks.project=?")
-                values.append(self._normalize_project(project))
-            row = connection.execute(
-                f"""SELECT tasks.* FROM tasks WHERE {" AND ".join(filters)}
-                    ORDER BY CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 ELSE 3 END,
-                             updated_at ASC LIMIT 1""",
-                values,
-            ).fetchone()
-            if not row:
-                return None
-            task = _decode_row(row)
-            # Compatibility entry point: callers explicitly using the legacy
-            # review API may consume a v2 code_review row as a legacy review.
-            if task["status"] == "code_review":
-                connection.execute(
-                    "UPDATE tasks SET status='review' WHERE id=? AND status='code_review'",
-                    (task["id"],),
-                )
-                task["status"] = "review"
-            delivery = connection.execute(
-                "SELECT id, run_type FROM task_runs WHERE id=? AND task_id=? AND status='waiting_review'",
-                (task.get("primary_run_id"), task["id"]),
-            ).fetchone()
-            if not delivery or delivery["run_type"] not in {"execution", "rework"}:
-                raise ValueError("Task has no current delivery run")
-            attempt = connection.execute(
-                "SELECT COALESCE(MAX(attempt),0)+1 AS value FROM task_runs WHERE task_id=?",
-                (task["id"],),
-            ).fetchone()["value"]
-            lease_token = uuid.uuid4().hex
-            previous_review = connection.execute(
-                """SELECT mapping.thread_id FROM task_run_conversations mapping
-                   JOIN task_runs review ON review.id=mapping.run_id
-                   WHERE review.task_id=? AND review.run_type='review'
-                     AND review.delivery_run_id=? AND review.status IN ('interrupted','expired')
-                   ORDER BY review.attempt DESC, review.created_at DESC LIMIT 1""",
-                (task["id"], delivery["id"]),
-            ).fetchone()
-            run_id = self.db.next_id(connection, "RUN")
-            connection.execute(
-                """INSERT INTO task_runs(
-                       id, task_id, parent_run_id, delivery_run_id, run_type, attempt,
-                       status, claimed_by, lease_token, lease_expires_at
-                   ) VALUES(?, ?, ?, ?, 'review', ?, 'awaiting_thread', ?, ?, datetime('now', ?))""",
-                (
-                    run_id,
-                    task["id"],
-                    delivery["id"],
-                    delivery["id"],
-                    attempt,
-                    worker_id,
-                    lease_token,
-                    f"+{lease_seconds} seconds",
-                ),
-            )
-            connection.execute(
-                "UPDATE tasks SET assigned_to=?, active_run_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='review'",
-                (worker_id, run_id, task["id"]),
-            )
-            self._event(
-                connection,
-                "run",
-                run_id,
-                "review_claimed",
-                {"task_id": task["id"], "worker_id": worker_id},
-            )
-        try:
-            prepared = self.prepare_review_location(task["id"])
-            context = {
-                "task_id": task["id"],
-                "review_location_analysis_id": prepared["analysis_id"],
-                "delivery_run_id": delivery["id"],
-                "location_plan": prepared["location"],
-                "obsidian_evidence": prepared["obsidian"],
-                "changed_locations": prepared["changed_locations"],
-                "acceptance_evidence": prepared["acceptance_evidence"],
-                "acceptance_criteria": prepared["acceptance_criteria"],
-            }
-            with self.db.transaction() as connection:
-                connection.execute(
-                    "UPDATE task_runs SET context_snapshot=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (json.dumps(context, ensure_ascii=False), run_id),
-                )
-        except Exception as exc:
-            interrupt_count = int(task.get("review_interrupt_count") or 0) + 1
-            delay = REVIEW_RETRY_DELAYS_SECONDS[
-                min(interrupt_count - 1, len(REVIEW_RETRY_DELAYS_SECONDS) - 1)
-            ]
-            exhausted = interrupt_count >= REVIEW_INTERRUPT_LIMIT
-            with self.db.transaction() as connection:
-                connection.execute(
-                    """UPDATE task_runs SET status='expired', completed_at=CURRENT_TIMESTAMP,
-                       updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                    (run_id,),
-                )
-                connection.execute(
-                    """UPDATE tasks SET active_run_id=NULL, assigned_to=NULL,
-                       review_interrupt_count=?, review_retry_after=CASE WHEN ? THEN NULL ELSE datetime('now', ?) END,
-                       auto_dispatch=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND active_run_id=?""",
-                    (
-                        interrupt_count,
-                        int(exhausted),
-                        f"+{delay} seconds",
-                        0 if exhausted else 1,
-                        task["id"],
-                        run_id,
-                    ),
-                )
-                self._event(
-                    connection,
-                    "run",
-                    run_id,
-                    "review_preparation_failed",
-                    {
-                        "reason": str(exc)[:2000],
-                        "attempt": interrupt_count,
-                        "retry_seconds": 0 if exhausted else delay,
-                        "auto_dispatch_paused": exhausted,
-                    },
-                )
-                self._queue_obsidian_sync(connection, "task", task["id"])
-            self.flush_integration_outbox()
-            raise
-        return {
-            "task": self.get_task(task["id"]),
-            "run": self.get_run(run_id),
-            "lease_token": lease_token,
-            "resume_thread_id": str(
-                previous_review["thread_id"] if previous_review else ""
-            ),
-            "dispatch_prompt": self._review_location_prompt(task, run_id, prepared),
-        }
-
     def claim_next_code_review_task(
         self, worker_id: str, project: str | None = None, lease_seconds: int = 1800
     ) -> dict[str, Any] | None:
@@ -1334,8 +1356,6 @@ class TaskLifecycleMixin:
                 "(t.review_retry_after IS NULL OR t.review_retry_after<=CURRENT_TIMESTAMP)",
                 "EXISTS (SELECT 1 FROM task_runs d WHERE d.id=t.primary_run_id AND d.status='waiting_review')",
                 "NOT EXISTS (SELECT 1 FROM task_runs r WHERE r.task_id=t.id AND r.run_type='code_review' AND r.status IN ('awaiting_thread','running'))",
-                "NOT EXISTS (SELECT 1 FROM task_runs pr JOIN tasks pt ON pt.id=pr.task_id WHERE pt.id!=t.id AND pt.project=t.project AND pr.status IN ('awaiting_thread','running'))",
-                "NOT EXISTS (SELECT 1 FROM tasks pt WHERE pt.id!=t.id AND pt.project=t.project AND (pt.status IN ('failed','blocked','waiting_confirmation') OR (pt.status='paused' AND pt.paused_from_status IN ('claimed','investigating','implementing','review','code_review','acceptance','acceptance_blocked','rework')) OR (pt.retry_required=1 AND pt.status NOT IN ('done','cancelled'))))",
             ]
             if project:
                 where.append("t.project=?")
@@ -1346,7 +1366,7 @@ class TaskLifecycleMixin:
             ).fetchone()
             if not row:
                 return None
-            task = _decode_row(row)
+            task = decode_row(row)
             if self._pause_for_stage_budget_preflight(
                 connection, task, "code_review"
             ):
@@ -1396,7 +1416,7 @@ class TaskLifecycleMixin:
             batch = dict(batch_row) if batch_row else None
             if batch:
                 self._attach_batch_run(connection, batch["id"], run_id, "review")
-        delivery_snapshot = _decode_row(delivery, RUN_JSON_FIELDS)
+        delivery_snapshot = decode_row(delivery, RUN_JSON_FIELDS)
         context = self.build_code_review_context(task["id"], task.get("project"))
         review_delivery = self._model_delivery(delivery_snapshot, include_diff=False)
         review_delivery.pop("acceptance_evidence", None)
@@ -1418,6 +1438,9 @@ class TaskLifecycleMixin:
                         for item in delivery_snapshot.get("changed_locations") or []
                         if str(item.get("file") or "").strip()
                     ],
+                    "workspace_path": str(delivery_snapshot.get("workspace_path") or ""),
+                    "artifact_path": str(delivery_snapshot.get("artifact_path") or ""),
+                    "artifact_sha256": str(delivery_snapshot.get("artifact_sha256") or ""),
                 },
             }
         )
@@ -1430,6 +1453,12 @@ class TaskLifecycleMixin:
             for item in (task.get("review_contract") or {}).get("checks", [])
         ]
         confirmed_checks = [item for item in confirmed_checks if item]
+        confirmed_checks.extend(
+            str(item).strip()
+            for item in task.get("acceptance_criteria") or []
+            if str(item).strip()
+        )
+        confirmed_checks = list(dict.fromkeys(confirmed_checks))
         if batch and int(batch.get("appended_count") or 0) > 0:
             context, confirmed_checks = self._merge_batch_code_review_context(
                 context, batch["id"]
@@ -1469,6 +1498,8 @@ class TaskLifecycleMixin:
         reasons: list[str] | None = None,
         passed_items: list[str] | None = None,
         failed_criteria: list[str] | None = None,
+        failure_category: str | None = None,
+        failure_locations: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         task = self.get_task(task_id)
         run = self.get_run(run_id)
@@ -1528,6 +1559,11 @@ class TaskLifecycleMixin:
                     str(item).strip() for item in (contract.get("rules", []) or [])
                 ]
             review_items = [item for item in review_items if item]
+            review_items.extend(
+                str(item).strip()
+                for item in task.get("acceptance_criteria") or []
+                if str(item).strip()
+            )
         criteria = set(review_items)
         if len(passed_items) != len(set(passed_items)) or len(failed_criteria) != len(
             set(failed_criteria)
@@ -1551,6 +1587,49 @@ class TaskLifecycleMixin:
             raise ValueError(
                 "A failed code review requires reasons and failed_criteria"
             )
+        if verdict == "pass":
+            self._assert_required_acceptance_checks_passed(
+                run_id, (run.get("context_snapshot") or {}).get("acceptance") or [],
+            )
+            delivery_run_id = str(run.get("delivery_run_id") or "")
+            try:
+                self._integrate_delivery_artifact(task, delivery_run_id)
+            except Exception as exc:
+                with self.db.transaction() as connection:
+                    connection.execute(
+                        """UPDATE task_runs SET integration_status='failed',
+                           integration_error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                        (str(exc)[:2000], delivery_run_id),
+                    )
+                    self._event(
+                        connection,
+                        "run",
+                        delivery_run_id,
+                        "delivery_integration_failed",
+                        {"task_id": task_id, "error": str(exc)[:2000]},
+                    )
+                raise
+        detected_category = "implementation"
+        self_heal = self._self_heal_plan(task, "implementation", [])
+        if verdict == "fail":
+            detected_category = str(failure_category or "").strip().lower()
+            if detected_category not in {"project", "environment", "implementation"}:
+                detected_category = classify_recoverable_failure(
+                    *reasons, *failed_criteria
+                )
+            if detected_category in {"project", "environment"} and not normalize_self_heal_locations(
+                failure_locations
+            ):
+                raise ValueError(
+                    "Project and environment failures require at least one exact failure_location file"
+                )
+            self_heal = self._self_heal_plan(
+                task,
+                detected_category,
+                reasons,
+                failure_locations,
+            )
+        completed_batch_task_ids: list[str] = []
         with self.db.transaction() as connection:
             round_no = connection.execute(
                 "SELECT COALESCE(MAX(round),0)+1 value FROM reviews WHERE task_id=?",
@@ -1572,25 +1651,68 @@ class TaskLifecycleMixin:
                 (run_id,),
             )
             connection.execute(
+                """UPDATE task_conversations SET status='completed',
+                   updated_at=CURRENT_TIMESTAMP WHERE run_id=?""",
+                (run_id,),
+            )
+            connection.execute(
+                """UPDATE task_run_conversations SET status='completed',
+                   updated_at=CURRENT_TIMESTAMP WHERE run_id=?""",
+                (run_id,),
+            )
+            connection.execute(
                 "UPDATE task_runs SET status='review_failed', completed_at=CURRENT_TIMESTAMP WHERE id=? AND status='waiting_review'",
                 (run.get("delivery_run_id"),),
             ) if verdict == "fail" else connection.execute(
                 "UPDATE task_runs SET status='completed', completed_at=CURRENT_TIMESTAMP WHERE id=? AND status='waiting_review'",
                 (run.get("delivery_run_id"),),
             )
-            next_status = "rework" if verdict == "fail" else "acceptance"
+            next_status = (
+                (
+                    "rework"
+                    if self_heal["category"] == "implementation"
+                    or self_heal["scheduled"]
+                    else "waiting_confirmation"
+                )
+                if verdict == "fail"
+                else "done"
+            )
             connection.execute(
-                "UPDATE tasks SET status=?, active_run_id=NULL, assigned_to=NULL, last_review_reasons=?, last_failed_criteria=?, review_rework_count=review_rework_count+? WHERE id=?",
+                """UPDATE tasks SET status=?, active_run_id=NULL, assigned_to=NULL,
+                   last_review_reasons=?, last_failed_criteria=?,
+                   review_rework_count=review_rework_count+?, implementation_contract=?,
+                   auto_dispatch=? WHERE id=?""",
                 (
                     next_status,
                     json.dumps(reasons, ensure_ascii=False),
                     json.dumps(failed_criteria, ensure_ascii=False),
                     int(verdict == "fail"),
+                    json.dumps(self_heal["contract"], ensure_ascii=False),
+                    int(next_status != "waiting_confirmation"),
                     task_id,
                 ),
             )
+            if verdict == "fail" and self_heal["category"] in {
+                "project", "environment",
+            }:
+                self._persist_self_heal_targets(
+                    connection, task_id, self_heal["locations"]
+                )
+                self._event(
+                    connection,
+                    "task",
+                    task_id,
+                    "self_heal_scheduled" if self_heal["scheduled"] else "self_heal_exhausted",
+                    {
+                        "stage": "code_review",
+                        "failure_category": self_heal["category"],
+                        "attempt": self_heal["attempt"],
+                        "attempt_limit": SELF_HEAL_ATTEMPT_LIMIT,
+                        "locations": self_heal["locations"],
+                    },
+                )
             if batch:
-                self._propagate_batch_review(
+                completed_batch_task_ids = self._propagate_batch_review(
                     connection,
                     batch,
                     task_id,
@@ -1604,535 +1726,24 @@ class TaskLifecycleMixin:
                 "task",
                 task_id,
                 "code_reviewed",
-                {"verdict": verdict, "reasons": reasons},
-            )
-        return self.get_task(task_id)
-
-    def claim_next_acceptance_task(
-        self, worker_id: str, project: str | None = None, lease_seconds: int = 1800
-    ) -> dict[str, Any] | None:
-        worker_id = str(worker_id or "").strip()
-        if not worker_id or not self.dispatcher_enabled():
-            return None
-        with self.db.transaction() as connection:
-            values: list[Any] = []
-            where = [
-                "t.status='acceptance'",
-                "t.auto_dispatch=1",
-                "(t.review_retry_after IS NULL OR t.review_retry_after<=CURRENT_TIMESTAMP)",
-                "NOT EXISTS (SELECT 1 FROM task_runs r WHERE r.task_id=t.id AND r.run_type='acceptance' AND r.status IN ('awaiting_thread','running'))",
-                "NOT EXISTS (SELECT 1 FROM task_runs pr JOIN tasks pt ON pt.id=pr.task_id WHERE pt.id!=t.id AND pt.project=t.project AND pr.status IN ('awaiting_thread','running'))",
-                "NOT EXISTS (SELECT 1 FROM tasks pt WHERE pt.id!=t.id AND pt.project=t.project AND (pt.status IN ('failed','blocked','waiting_confirmation') OR (pt.status='paused' AND pt.paused_from_status IN ('claimed','investigating','implementing','review','code_review','acceptance','acceptance_blocked','rework')) OR (pt.retry_required=1 AND pt.status NOT IN ('done','cancelled'))))",
-            ]
-            if project:
-                where.append("t.project=?")
-                values.append(self._normalize_project(project))
-            row = connection.execute(
-                f"SELECT t.* FROM tasks t WHERE {' AND '.join(where)} ORDER BY t.created_at LIMIT 1",
-                values,
-            ).fetchone()
-            if not row:
-                return None
-            task = _decode_row(row)
-            if self._pause_for_stage_budget_preflight(
-                connection, task, "acceptance"
-            ):
-                return None
-            delivery = connection.execute(
-                "SELECT * FROM task_runs WHERE task_id=? AND run_type IN ('execution','rework','bugfix') AND status='completed' ORDER BY attempt DESC LIMIT 1",
-                (task["id"],),
-            ).fetchone()
-            if not delivery:
-                raise ValueError("Acceptance has no completed delivery")
-            previous_acceptance = connection.execute(
-                """SELECT mapping.thread_id FROM task_run_conversations mapping
-                   JOIN task_runs prior ON prior.id=mapping.run_id
-                   WHERE prior.task_id=? AND prior.run_type='acceptance'
-                     AND prior.delivery_run_id=? AND prior.status IN ('interrupted','expired')
-                     AND mapping.thread_id IS NOT NULL AND trim(mapping.thread_id)!=''
-                   ORDER BY prior.attempt DESC, prior.created_at DESC LIMIT 1""",
-                (task["id"], delivery["id"]),
-            ).fetchone()
-            verifier_thread = None
-            if not previous_acceptance and not bool(
-                (task.get("review_contract") or {}).get(
-                    "separate_acceptance_session", False
-                )
-            ):
-                verifier_thread = connection.execute(
-                    """SELECT mapping.thread_id FROM task_run_conversations mapping
-                       JOIN task_runs review ON review.id=mapping.run_id
-                       WHERE review.task_id=? AND review.run_type='code_review'
-                         AND review.delivery_run_id=? AND review.status='completed'
-                         AND mapping.thread_id IS NOT NULL AND trim(mapping.thread_id)!=''
-                       ORDER BY review.attempt DESC, review.created_at DESC LIMIT 1""",
-                    (task["id"], delivery["id"]),
-                ).fetchone()
-            attempt = connection.execute(
-                "SELECT COALESCE(MAX(attempt),0)+1 value FROM task_runs WHERE task_id=?",
-                (task["id"],),
-            ).fetchone()["value"]
-            run_id = self.db.next_id(connection, "RUN")
-            token = uuid.uuid4().hex
-            connection.execute(
-                "INSERT INTO task_runs(id,task_id,parent_run_id,delivery_run_id,run_type,attempt,status,claimed_by,lease_token,lease_expires_at) VALUES(?,?,?,?, 'acceptance', ?, 'awaiting_thread', ?, ?, datetime('now', ?))",
-                (
-                    run_id,
-                    task["id"],
-                    delivery["id"],
-                    delivery["id"],
-                    attempt,
-                    worker_id,
-                    token,
-                    f"+{max(300, min(int(lease_seconds), 7200))} seconds",
-                ),
-            )
-            connection.execute(
-                "UPDATE tasks SET active_run_id=?, assigned_to=? WHERE id=? AND status='acceptance'",
-                (run_id, worker_id, task["id"]),
-            )
-            batch_row = connection.execute(
-                """SELECT batch.* FROM execution_batches batch
-                   JOIN execution_batch_runs mapping ON mapping.batch_id=batch.id
-                   WHERE mapping.run_id=?""",
-                (delivery["id"],),
-            ).fetchone()
-            batch = dict(batch_row) if batch_row else None
-            if batch:
-                self._attach_batch_run(connection, batch["id"], run_id, "acceptance")
-        delivery_snapshot = _decode_row(delivery, RUN_JSON_FIELDS)
-        context = self.build_acceptance_context(task["id"], task.get("project"))
-        context.update(
-            {
-                "delivery_run_id": delivery["id"],
-                "delivery": self._model_delivery(delivery_snapshot, include_diff=False),
-            }
-        )
-        if batch and int(batch.get("appended_count") or 0) > 0:
-            context = self._merge_batch_acceptance_context(context, batch["id"])
-            context["delivery_run_id"] = delivery["id"]
-            context["delivery"] = self._model_delivery(delivery_snapshot, include_diff=False)
-        context = freeze_run_context(
-            context,
-            task=task,
-            run_id=run_id,
-            stage="acceptance",
-            delivery_run_id=delivery["id"],
-        )
-        with self.db.transaction() as connection:
-            connection.execute(
-                "UPDATE task_runs SET context_snapshot=? WHERE id=?",
-                (json.dumps(context, ensure_ascii=False), run_id),
-            )
-        resume_thread_id = str(
-            previous_acceptance["thread_id"]
-            if previous_acceptance
-            else (verifier_thread["thread_id"] if verifier_thread else "")
-        )
-        return {
-            "task": self.get_task(task["id"]),
-            "run": self.get_run(run_id),
-            "lease_token": token,
-            "resume_thread_id": resume_thread_id,
-            "dispatch_prompt": self._acceptance_prompt(task, run_id, context),
-        }
-
-    def accept_task(
-        self,
-        task_id: str,
-        run_id: str,
-        verdict: str,
-        reasons: list[str] | None = None,
-        passed_criteria: list[str] | None = None,
-        failed_criteria: list[str] | None = None,
-        failure_locations: list[dict[str, Any]] | None = None,
-        criterion_results: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        task = self.get_task(task_id)
-        run = self.get_run(run_id)
-        batch = self._batch_for_run(run_id)
-        if (
-            task.get("active_run_id") != run_id
-            or task["status"] != "acceptance"
-            or run["run_type"] != "acceptance"
-            or run["status"] != "running"
-        ):
-            raise ValueError("A running acceptance run is required")
-        verdict = str(verdict).lower().strip()
-        reasons = [str(x).strip() for x in (reasons or []) if str(x).strip()]
-        criteria = (
-            self._batch_acceptance_items(task_id)
-            if batch and int(batch.get("appended_count") or 0) > 0
-            else [str(x) for x in task.get("acceptance_criteria", [])]
-        )
-        passed_criteria = [str(x) for x in (passed_criteria or [])]
-        failed_criteria = [str(x) for x in (failed_criteria or [])]
-        if verdict not in {"pass", "fail"}:
-            raise ValueError("verdict must be pass or fail")
-        if len(passed_criteria) != len(set(passed_criteria)) or len(
-            failed_criteria
-        ) != len(set(failed_criteria)):
-            raise ValueError("Acceptance result criteria must not contain duplicates")
-        if set(passed_criteria) & set(failed_criteria):
-            raise ValueError("passed_criteria and failed_criteria must not overlap")
-        if set(passed_criteria) | set(failed_criteria) != set(criteria):
-            raise ValueError("Acceptance result must exactly cover every criterion")
-        if verdict == "pass":
-            if failed_criteria or set(passed_criteria) != set(criteria):
-                raise ValueError(
-                    "A passing acceptance must have exactly all criteria in passed_criteria and none failed"
-                )
-        elif not failed_criteria or not reasons:
-            raise ValueError("A failed acceptance requires reasons and failed_criteria")
-        if verdict == "pass":
-            snapshot = run.get("context_snapshot") or {}
-            self._assert_required_acceptance_checks_passed(
-                run_id,
-                snapshot.get("acceptance") or snapshot.get("acceptance_plan") or [],
-            )
-        if criterion_results is None:
-            fallback_evidence = "；".join(reasons) or "Acceptance criterion verified"
-            criterion_results = [
                 {
-                    "criterion": criterion,
-                    "status": "passed" if criterion in passed_criteria else "failed",
-                    "evidence": fallback_evidence,
-                    "artifact_refs": [],
-                }
-                for criterion in criteria
-            ]
-        if not isinstance(criterion_results, list) or any(
-            not isinstance(item, dict) for item in criterion_results
-        ):
-            raise ValueError("criterion_results must be an array of objects")
-        result_criteria = [
-            str(item.get("criterion") or "").strip() for item in criterion_results
-        ]
-        if len(result_criteria) != len(set(result_criteria)) or set(result_criteria) != set(criteria):
-            raise ValueError("criterion_results must exactly cover every criterion once")
-        normalized_results: list[dict[str, Any]] = []
-        acceptance_plan_by_criterion = {
-            str(item.get("criterion") or ""): item
-            for item in task.get("acceptance_plan") or []
-            if isinstance(item, dict)
-        }
-        has_visual_references = bool(
-            (task.get("implementation_contract") or {}).get("visual_references")
-        )
-        for item in criterion_results:
-            normalized = dict(item)
-            criterion = str(normalized.get("criterion") or "").strip()
-            status = str(normalized.get("status") or "").strip().lower()
-            evidence = str(normalized.get("evidence") or "").strip()
-            artifact_refs = normalized.get("artifact_refs") or []
-            if status not in {"passed", "failed", "blocked"}:
-                raise ValueError("Acceptance criterion status must be passed, failed, or blocked")
-            if not evidence:
-                raise ValueError("Every acceptance criterion result requires evidence")
-            if not isinstance(artifact_refs, list) or any(
-                not isinstance(ref, str) or not ref.strip() for ref in artifact_refs
-            ):
-                raise ValueError("criterion_results.artifact_refs must be an array of non-empty strings")
-            if criterion in passed_criteria and status != "passed":
-                raise ValueError("passed_criteria must match passed criterion_results")
-            if criterion in failed_criteria and status not in {"failed", "blocked"}:
-                raise ValueError("failed_criteria must match failed or blocked criterion_results")
-            plan = acceptance_plan_by_criterion.get(criterion) or {}
-            if (
-                status == "passed"
-                and has_visual_references
-                and str(plan.get("check_type") or "") == "manual_runtime"
-                and not artifact_refs
-            ):
-                raise ValueError(
-                    "Passed manual_runtime criteria with visual references require artifact_refs"
-                )
-            managed_artifacts = self._store_managed_artifacts(
-                f"acceptance/{run_id}", artifact_refs
-            )
-            normalized.update(
-                {
-                    "criterion": criterion,
-                    "status": status,
-                    "evidence": evidence,
-                    "artifact_refs": managed_artifacts,
-                }
-            )
-            normalized_results.append(normalized)
-        criterion_results = normalized_results
-        bug_id = None
-        parent_task_id = None
-        completed_batch_task_ids: list[str] = []
-        with self.db.transaction() as connection:
-            round_no = connection.execute(
-                "SELECT COALESCE(MAX(round),0)+1 value FROM acceptance_results WHERE task_id=?",
-                (task_id,),
-            ).fetchone()["value"]
-            connection.execute(
-                "INSERT INTO acceptance_results(task_id,run_id,delivery_run_id,round,verdict,reasons,passed_criteria,failed_criteria,failure_locations,criterion_results) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (
-                    task_id,
-                    run_id,
-                    run.get("delivery_run_id"),
-                    round_no,
-                    verdict,
-                    json.dumps(reasons, ensure_ascii=False),
-                    json.dumps(passed_criteria, ensure_ascii=False),
-                    json.dumps(failed_criteria, ensure_ascii=False),
-                    json.dumps(failure_locations or [], ensure_ascii=False),
-                    json.dumps(criterion_results, ensure_ascii=False),
-                ),
-            )
-            connection.execute(
-                "UPDATE task_runs SET status='completed', completed_at=CURRENT_TIMESTAMP WHERE id=?",
-                (run_id,),
-            )
-            if verdict == "pass":
-                connection.execute(
-                    "UPDATE tasks SET status='done', active_run_id=NULL, assigned_to=NULL WHERE id=?",
-                    (task_id,),
-                )
-                parent = connection.execute(
-                    "SELECT target_task_id FROM task_relations WHERE source_task_id=? AND relation_type='defect_of' LIMIT 1",
-                    (task_id,),
-                ).fetchone()
-                if parent:
-                    cursor = connection.execute(
-                        "UPDATE tasks SET status='acceptance', active_run_id=NULL, assigned_to=NULL WHERE id=? AND status='acceptance_blocked'",
-                        (parent["target_task_id"],),
-                    )
-                    if cursor.rowcount:
-                        parent_task_id = parent["target_task_id"]
-                        parent_batch = connection.execute(
-                            """SELECT member.batch_id FROM execution_batch_tasks member
-                               JOIN execution_batches batch ON batch.id=member.batch_id
-                               WHERE member.task_id=? AND batch.state='acceptance_failed'""",
-                            (parent_task_id,),
-                        ).fetchone()
-                        if parent_batch:
-                            connection.execute(
-                                """UPDATE tasks SET status='acceptance', active_run_id=NULL,
-                                   assigned_to=NULL WHERE status='acceptance_blocked' AND id IN (
-                                     SELECT task_id FROM execution_batch_tasks WHERE batch_id=?
-                                   )""",
-                                (parent_batch["batch_id"],),
-                            )
-                        self._event(
-                            connection,
-                            "task",
-                            parent_task_id,
-                            "acceptance_unblocked",
-                            {"resolved_bug_task_id": task_id},
-                        )
-                        self._queue_obsidian_sync(
-                            connection, "task", parent_task_id
-                        )
-            elif task.get("type") == "bug":
-                connection.execute(
-                    "UPDATE tasks SET status='rework', active_run_id=NULL, assigned_to=NULL, last_failure_reason=?, last_failed_criteria=? WHERE id=?",
-                    (
-                        "；".join(reasons),
-                        json.dumps(failed_criteria, ensure_ascii=False),
-                        task_id,
-                    ),
-                )
-            else:
-                bug_id = self.db.next_id(connection, "BUG")
-                connection.execute(
-                    "INSERT INTO tasks(id, title, type, project, modules, status, priority, goal, scope, out_of_scope, acceptance_criteria, codex_thread_id, token_budget, location_context, acceptance_plan, dependency_analysis, implementation_contract, review_contract, parent_acceptance_task_id, workflow_version) SELECT ?, ?, 'bug', project, modules, 'ready', priority, ?, scope, out_of_scope, ?, codex_thread_id, token_budget, location_context, acceptance_plan, dependency_analysis, implementation_contract, review_contract, ?, workflow_version FROM tasks WHERE id=?",
-                    (
-                        bug_id,
-                        f"{task_id} 验收缺陷",
-                        "；".join(reasons) or "修复验收失败",
-                        json.dumps(failed_criteria, ensure_ascii=False),
-                        task_id,
-                        task_id,
-                    ),
-                )
-                connection.execute(
-                    "INSERT INTO task_relations(source_task_id,target_task_id,relation_type,description) VALUES(?,?, 'defect_of', ?)",
-                    (bug_id, task_id, "验收自动创建"),
-                )
-                connection.execute(
-                    "INSERT OR IGNORE INTO task_targets(task_id,file,symbol) SELECT ?,file,symbol FROM task_targets WHERE task_id=?",
-                    (bug_id, task_id),
-                )
-                connection.execute(
-                    "UPDATE acceptance_results SET created_bug_task_id=? WHERE task_id=? AND run_id=?",
-                    (bug_id, task_id, run_id),
-                )
-                connection.execute(
-                    "UPDATE tasks SET status='acceptance_blocked', active_run_id=NULL, assigned_to=NULL, last_failure_reason=? WHERE id=?",
-                    ("；".join(reasons) or "验收失败", task_id),
-                )
-                self._event(
-                    connection,
-                    "task",
-                    bug_id,
-                    "created_from_acceptance_failure",
-                    {"source_task_id": task_id, "acceptance_run_id": run_id},
-                )
-                self._queue_obsidian_sync(connection, "task", bug_id)
-            if batch:
-                completed_batch_task_ids = self._propagate_batch_acceptance(
-                    connection,
-                    batch,
-                    task_id,
-                    run_id,
-                    verdict,
-                    reasons,
-                    passed_criteria,
-                    failed_criteria,
-                    failure_locations or [],
-                    bug_id,
-                    criterion_results,
-                )
-            connection.execute(
-                "UPDATE task_conversations SET status='completed', updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
-                (run_id,),
-            )
-            connection.execute(
-                "UPDATE task_run_conversations SET status='completed', updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
-                (run_id,),
-            )
-            self._event(
-                connection,
-                "task",
-                task_id,
-                "acceptance_completed",
-                {
-                    "round": round_no,
                     "verdict": verdict,
                     "reasons": reasons,
-                    "passed_criteria": passed_criteria,
-                    "failed_criteria": failed_criteria,
-                    "created_bug_task_id": bug_id,
-                    "unblocked_parent_task_id": parent_task_id,
+                    "next_stage": next_status,
+                    "failure_category": detected_category if verdict == "fail" else "",
+                    "self_heal_scheduled": bool(
+                        verdict == "fail" and self_heal["scheduled"]
+                    ),
                 },
             )
             self._queue_obsidian_sync(connection, "task", task_id)
         updated = self.get_task(task_id)
-        if verdict == "pass":
+        if updated["status"] == "done":
             self._create_experience(updated)
-            for member_task_id in completed_batch_task_ids:
-                self._create_experience(self.get_task(member_task_id))
+        for completed_task_id in completed_batch_task_ids:
+            self._create_experience(self.get_task(completed_task_id))
         self.flush_integration_outbox()
         return updated
-
-    def auto_accept_automated_task(self, task_id: str, run_id: str) -> dict[str, Any]:
-        """Complete acceptance without a model when every criterion is an automated check."""
-        batch = self._batch_for_run(run_id)
-        if batch and int(batch.get("appended_count") or 0) > 0:
-            return {"eligible": False, "completed": False}
-        task = self.get_task(task_id)
-        run = self.get_run(run_id)
-        snapshot = run.get("context_snapshot") or {}
-        plans = list(
-            snapshot.get("acceptance") or snapshot.get("acceptance_plan") or []
-        )
-        criteria = [str(item) for item in task.get("acceptance_criteria", [])]
-        plan_criteria = [
-            str(item.get("criterion") or "") for item in plans if isinstance(item, dict)
-        ]
-        eligible = (
-            bool(criteria)
-            and len(plans) == len(criteria)
-            and Counter(plan_criteria) == Counter(criteria)
-        )
-        eligible = eligible and all(
-            isinstance(item, dict)
-            and bool(item.get("required", True))
-            and str(
-                item.get("check_type")
-                or ("automated" if item.get("command") else "static_review")
-            )
-            == "automated"
-            and bool(str(item.get("command") or "").strip())
-            for item in plans
-        )
-        if not eligible:
-            return {"eligible": False, "completed": False}
-        if (
-            task.get("active_run_id") != run_id
-            or task.get("status") != "acceptance"
-            or run.get("run_type") != "acceptance"
-            or run.get("status") not in {"awaiting_thread", "running"}
-        ):
-            raise ValueError(
-                "An active acceptance run is required for automatic acceptance"
-            )
-        with self.db.transaction() as connection:
-            connection.execute(
-                """UPDATE task_runs SET status='running', started_at=COALESCE(started_at, CURRENT_TIMESTAMP),
-                   updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='awaiting_thread'""",
-                (run_id,),
-            )
-        checks = self.run_acceptance_checks(task_id, run_id)
-        if not checks.get("all_required_passed"):
-            return {"eligible": True, "completed": False, "checks": checks}
-        updated = self.accept_task(
-            task_id,
-            run_id,
-            "pass",
-            ["全部自动化验收检查通过"],
-            criteria,
-            [],
-            [],
-        )
-        with self.db.transaction() as connection:
-            connection.execute(
-                """UPDATE task_conversations SET status='completed', updated_at=CURRENT_TIMESTAMP
-                   WHERE task_id=? AND role='code_review' AND status='active'""",
-                (task_id,),
-            )
-            connection.execute(
-                """UPDATE task_run_conversations SET status='completed', updated_at=CURRENT_TIMESTAMP
-                   WHERE task_id=? AND role='code_review' AND status='active'""",
-                (task_id,),
-            )
-        return {"eligible": True, "completed": True, "checks": checks, "task": updated}
-
-    def list_acceptance_results(self, task_id: str) -> list[dict[str, Any]]:
-        with self.db.connection() as connection:
-            rows = connection.execute(
-                "SELECT * FROM acceptance_results WHERE task_id=? ORDER BY round",
-                (task_id,),
-            ).fetchall()
-        result = []
-        for row in rows:
-            item = dict(row)
-            for field in (
-                "reasons",
-                "passed_criteria",
-                "failed_criteria",
-                "failure_locations",
-                "criterion_results",
-            ):
-                item[field] = json.loads(item[field] or "[]")
-            result.append(item)
-        return result
-
-    @staticmethod
-    def _review_location_prompt(
-        task: dict[str, Any], run_id: str, prepared: dict[str, Any]
-    ) -> str:
-        changed = "; ".join(
-            f"{item.get('file')}#{item.get('symbol') or ','.join(item.get('symbols', [])) or '-'}"
-            for item in prepared.get("changed_locations", [])[:10]
-        )
-        return (
-            "$codex-taskboard-lifecycle\n\n"
-            f"独立验收 Codex Taskboard 任务 {task['id']}（验收运行 {run_id}）。"
-            f"验收定位分析 ID：{prepared['analysis_id']}；实际改动位置：{changed}。"
-            "先以这些改动位置为种子按 CodeGraph、GitNexus、直接源码匹配的顺序选择首个可用定位方式，"
-            "只补充直接相关调用方与既有测试，并调用 report_location_status 上报所选证据；"
-            "再调用 complete_location_analysis 保存精确 targets 与逐条 acceptance_plan，随后调用 prepare_task_review。"
-            f"prepare_task_review 必须复用验收运行 {run_id}。读取返回的 context_snapshot 后逐条验收，"
-            "不得重新扫描整个项目、不得修改实现；必须先调用 run_acceptance_checks 执行计划中的自动化检查，"
-            "最后调用 review_task，并传入当前验收运行 ID。"
-            "passed_items 与 failed_criteria 必须逐项使用原始验收标准的精确文本并完整覆盖全部标准；"
-            "通过时 passed_items 必须包含全部标准，范围外问题必须另建任务，不得据此打回。"
-        )
 
     @staticmethod
     def _dispatch_prompt(
@@ -2156,6 +1767,14 @@ class TaskLifecycleMixin:
                 + "。只修复失败审查项及其直接相关问题；不要把已通过项当作返工要求。"
                 "请像收到人工反馈一样在当前开发会话继续修复，并重新提交交付。"
             )
+            self_heal = (task.get("implementation_contract") or {}).get("self_heal") or {}
+            if self_heal.get("scheduled"):
+                retry_note += (
+                    f"这是第 {self_heal.get('attempt')}/{self_heal.get('attempt_limit')} 次自动自愈，"
+                    f"错误分类为 {self_heal.get('category')}。"
+                    "允许修复 RUN_CONTEXT_JSON.targets 中 mode=create/config 的测试或项目配置目标；"
+                    "先修复根因并重跑失败检查，不能用跳过、降级或删除检查制造通过。"
+                )
         if task.get("retry_required"):
             retry_note += (
                 f"这是失败或中断后的显式重试；上次停止原因：{task.get('last_failure_reason') or '未记录'}。"
@@ -2170,17 +1789,16 @@ class TaskLifecycleMixin:
             else ""
         )
         return (
-            "$codex-taskboard-lifecycle\n\n"
+            "$dotasks-lifecycle\n\n"
             f"任务 {task['id']}（运行 {run_id}，类型 {run_type}）。"
             f"{retry_note}{batch_note}"
             "以 RUN_CONTEXT_JSON 为唯一任务输入，只读取已定位目标及正确性所需的直接依赖，不再获取任务详情。"
             "实现并完成开发阶段的自动化验证后调用 submit_task_delivery。acceptance_evidence 每项必须包含 "
             "criterion、status（passed/failed/blocked/pending）和 evidence；自动检查必须真实通过后才能标记 passed，"
-            "static_review/manual_runtime 只能标记 pending 或 blocked，留给功能验收阶段执行。"
+            "static_review/manual_runtime 只能标记 pending 或 blocked，留给 Code Review 阶段执行。"
             "需要用户决策或无法继续时调用 report_run_blocked。"
             f"\n\nRUN_CONTEXT_JSON={prompt_context(context)}"
         )
-
     @staticmethod
     def _code_review_prompt(
         task: dict[str, Any],
@@ -2189,31 +1807,17 @@ class TaskLifecycleMixin:
         context: dict[str, Any],
     ) -> str:
         return (
-            "$codex-taskboard-lifecycle\n\n"
+            "$dotasks-lifecycle\n\n"
             "Code Review 阶段只使用提示内的 RUN_CONTEXT_JSON，不要搜索工具目录、数据库或任务详情。"
             "先使用 RUN_CONTEXT_JSON.diff_scope.base_revision 和 changed_files 在项目中自行执行 "
             "git diff（必要时分别执行 git diff <base> -- <files> 与 git diff -- <files>），"
-            "再检查该实际 diff、implementation 和 review_checks，不修改代码。"
+            "再仅根据任务目标、约束、review_checks 和该实际 diff 检查正确性、安全、权限边界、回归与无关修改，不修改代码。"
             "不得要求开发阶段传入或复述 diff，也不得把 delivery.acceptance_evidence 当作代码正确性的证明；"
-            "完成后调用 review_code。"
+            "确定性自动检查由服务端工具执行；需要时先调用 run_acceptance_checks，然后仅对实际 diff 作 Code Review，最后调用 review_code。"
+            "失败时区分 implementation、project、environment；缺测试用例、测试脚本或项目配置属于 project，"
+            "依赖/模块缺失或工具环境异常属于 environment。可恢复错误必须在 review_code 中提交 failure_category，"
+            "并用 failure_locations 精确列出需新增或修改的测试/配置文件，以便服务自动安排受控返工；不得直接阻塞整个项目。"
             f"任务 {task['id']}（运行 {run_id}）。passed_items 与 failed_criteria 必须且只能完整划分"
-            f"这些 review_checks（不要混入 acceptance_criteria）：{json.dumps(confirmed_checks, ensure_ascii=False)}。"
-            f"\n\nRUN_CONTEXT_JSON={prompt_context(context)}"
-        )
-
-    @staticmethod
-    def _acceptance_prompt(
-        task: dict[str, Any],
-        run_id: str,
-        context: dict[str, Any],
-    ) -> str:
-        return (
-            "$codex-taskboard-lifecycle\n\n"
-            "功能验收阶段只使用提示内的 RUN_CONTEXT_JSON，不要搜索工具目录、数据库或任务详情。"
-            "只按 acceptance 和 delivery 验证，不修改代码；存在自动检查时调用 run_acceptance_checks，"
-            "该工具会复用相同交付和工作区指纹下已通过的结果。manual_runtime 和 visual 证据由本阶段实际执行；"
-            "最后调用 accept_task，并用 criterion_results 为每条标准提交 passed/failed/blocked、具体 evidence "
-            "及 artifact_refs（没有附件时传空数组），不得仅复述开发阶段的 acceptance_evidence。"
-            f"任务 {task['id']}（运行 {run_id}）。"
+            f"这些 Code Review 检查项（已包含验收标准）：{json.dumps(confirmed_checks, ensure_ascii=False)}。"
             f"\n\nRUN_CONTEXT_JSON={prompt_context(context)}"
         )

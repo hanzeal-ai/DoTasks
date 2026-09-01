@@ -18,6 +18,8 @@ from .queries import TaskQueryMixin
 from .reporting import TaskReportingMixin
 from .review import TaskReviewMixin
 from .runs import TaskRunMixin
+from .native_dispatch import NativeDispatchMixin
+from .integration import TaskIntegrationMixin
 from .settings import TaskSettingsMixin
 
 
@@ -27,8 +29,10 @@ class TaskboardService(
     TaskChangeMixin,
     TaskQueryMixin,
     TaskBatchMixin,
+    TaskIntegrationMixin,
     TaskLifecycleMixin,
     TaskRunMixin,
+    NativeDispatchMixin,
     TaskReviewMixin,
     TaskReportingMixin,
 ):
@@ -45,16 +49,10 @@ class TaskboardService(
         if home is not None:
             data_home = self.home
         else:
-            configured_home = os.environ.get("CODEX_TASKBOARD_HOME")
-            application_home = Path.home() / "Library" / "Application Support" / "Codex Taskboard"
+            configured_home = os.environ.get("DOTASKS_HOME")
+            application_home = Path.home() / "Library" / "Application Support" / "DoTasks"
             data_home = Path(configured_home).expanduser() if configured_home else application_home
         self.data_home = data_home.resolve()
-        configured_codex_home = os.environ.get("CODEX_TASKBOARD_CODEX_HOME")
-        self.codex_home = (
-            Path(configured_codex_home).expanduser().resolve()
-            if configured_codex_home
-            else self.data_home / "codex-home"
-        )
         self.db = Database(self.data_home / "data" / "taskboard.db")
         self.obsidian = ObsidianAdapter(self.data_home)
         self.location = LocationAdapter()
@@ -191,7 +189,7 @@ class TaskboardService(
     def _resume_target(previous: str, retry_run_type: str | None) -> str:
         if previous == "draft":
             return "draft"
-        if previous in {"review", "code_review", "acceptance", "acceptance_blocked"}:
+        if previous == "code_review":
             return previous
         if previous in {"waiting_confirmation", "blocked", "failed"}:
             return previous

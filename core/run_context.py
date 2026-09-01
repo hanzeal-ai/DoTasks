@@ -7,62 +7,21 @@ from typing import Any
 from taskboard.version import VERSION
 
 
-RUN_CONTEXT_SCHEMA_VERSION = 7
-LIFECYCLE_TOOL_SCHEMA_REVISION = 7
+RUN_CONTEXT_SCHEMA_VERSION = 10
+LIFECYCLE_TOOL_SCHEMA_REVISION = 10
 
 LIFECYCLE_TOOL_NAMES = frozenset({
-    "get_task_context",
-    "transition_task",
     "report_run_blocked",
     "submit_task_delivery",
-    "prepare_review_location",
-    "prepare_task_review",
-    "report_location_status",
-    "complete_location_analysis",
     "run_acceptance_checks",
-    "review_task",
     "review_code",
-    "accept_task",
-    "update_conversation_summary",
 })
-
-# The dispatcher starts one app-server process per active stage, so each worker
-# only receives tools that can complete that stage. Non-automated review and
-# reused acceptance threads keep the stable verifier profile.
-TOOL_PROFILES = {
-    "execution": frozenset({
-        "report_run_blocked",
-        "submit_task_delivery",
-    }),
-    "verifier": frozenset({
-        "review_code",
-        "run_acceptance_checks",
-        "accept_task",
-    }),
-    "code_review": frozenset({"review_code"}),
-    "acceptance": frozenset({"run_acceptance_checks", "accept_task"}),
-    "legacy_review": frozenset({
-        "get_task_context",
-        "prepare_review_location",
-        "prepare_task_review",
-        "report_location_status",
-        "complete_location_analysis",
-        "run_acceptance_checks",
-        "review_task",
-    }),
-    "lifecycle": LIFECYCLE_TOOL_NAMES,
-}
 
 STAGE_COMPLETION_TOOLS = {
     "execution": ("report_run_blocked", "submit_task_delivery"),
     "rework": ("report_run_blocked", "submit_task_delivery"),
     "bugfix": ("report_run_blocked", "submit_task_delivery"),
-    "code_review": ("review_code",),
-    "acceptance": ("run_acceptance_checks", "accept_task"),
-    "review": (
-        "report_location_status", "complete_location_analysis", "prepare_task_review",
-        "run_acceptance_checks", "review_task",
-    ),
+    "code_review": ("run_acceptance_checks", "review_code"),
 }
 
 
@@ -92,28 +51,35 @@ def freeze_run_context(
         "tool_schema_version": lifecycle_tool_schema_version(),
     }
     snapshot["tool_contract"] = {
-        "server": "codex-taskboard",
-        "read_context": {
-            "tool": "mcp__codex_taskboard__get_task_context",
-            "arguments": {"task_id": task["id"], "run_id": run_id},
-            "fallback_only": True,
-        },
+        "server": "dotasks",
         "allowed_completion_tools": list(STAGE_COMPLETION_TOOLS.get(stage, ())),
     }
     return snapshot
 
 
-def compact_acceptance_commands(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def group_verification_checks(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Group identical execution checks while preserving criterion-level evidence keys."""
     groups: list[dict[str, Any]] = []
-    indexes: dict[tuple[str, str, int], int] = {}
+    indexes: dict[tuple[str, str, int, str, int, str], int] = {}
     for item in items:
         if not isinstance(item, dict):
             continue
         check_type = str(item.get("check_type") or "")
         command = str(item.get("command") or "")
         timeout_seconds = int(item.get("timeout_seconds") or 300)
-        key = (check_type, command, timeout_seconds)
+        repair_command = str(item.get("repair_command") or "")
+        repair_timeout_seconds = int(
+            item.get("repair_timeout_seconds") or timeout_seconds
+        )
+        failure_category = str(item.get("failure_category") or "")
+        key = (
+            check_type,
+            command,
+            timeout_seconds,
+            repair_command,
+            repair_timeout_seconds,
+            failure_category,
+        )
         criteria = item.get("criteria")
         if not isinstance(criteria, list):
             criterion = {
@@ -141,6 +107,11 @@ def compact_acceptance_commands(items: list[dict[str, Any]]) -> list[dict[str, A
             }
             if timeout_seconds != 300:
                 group["timeout_seconds"] = timeout_seconds
+            if repair_command:
+                group["repair_command"] = repair_command
+                group["repair_timeout_seconds"] = repair_timeout_seconds
+            if failure_category:
+                group["failure_category"] = failure_category
             group["criteria"] = []
             group_index = len(groups)
             indexes[key] = group_index
@@ -157,8 +128,44 @@ def model_run_context(snapshot: dict[str, Any]) -> dict[str, Any]:
     public.pop("execution_profile", None)
     public.pop("cache_metadata", None)
     public.pop("tool_contract", None)
-    if isinstance(public.get("acceptance_commands"), list):
-        public["acceptance_commands"] = compact_acceptance_commands(public["acceptance_commands"])
+    public.pop("target_snippet", None)
+    stage = str(public.get("stage") or "")
+    if stage in {"execution", "rework", "bugfix"}:
+        task = dict(public.get("task") or {})
+        constraints = {
+            key: task.pop(key)
+            for key in ("scope", "out_of_scope")
+            if task.get(key) not in (None, "", [], {})
+        }
+        public["task"] = task
+        if constraints:
+            public["constraints"] = constraints
+        if not public.get("visual_references"):
+            public.pop("visual_references", None)
+    elif stage == "code_review":
+        task = dict(public.get("task") or {})
+        constraints = {
+            key: task.pop(key)
+            for key in ("scope", "out_of_scope")
+            if task.get(key) not in (None, "", [], {})
+        }
+        public = {
+            "stage": stage,
+            "task": task,
+            **({"constraints": constraints} if constraints else {}),
+            "diff_scope": dict(public.get("diff_scope") or {}),
+            "review_checks": list(public.get("review_checks") or []),
+        }
+        if snapshot.get("batch"):
+            public["batch"] = snapshot["batch"]
+        if snapshot.get("tasks"):
+            public["tasks"] = [
+                {
+                    key: item.get(key) for key in ("id", "title", "goal")
+                    if item.get(key) not in (None, "", [], {})
+                }
+                for item in snapshot["tasks"] if isinstance(item, dict)
+            ]
     return public
 
 

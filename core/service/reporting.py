@@ -7,12 +7,12 @@ from typing import Any
 
 from ..run_context import (
     RUN_CONTEXT_SCHEMA_VERSION,
-    compact_acceptance_commands,
+    group_verification_checks,
     freeze_run_context,
     lifecycle_tool_schema_version,
     model_run_context,
 )
-from .domain import RELATION_TYPES, _search_tokens
+from .domain import RELATION_TYPES, search_tokens
 from ..workflow import task_requires_attention
 
 
@@ -101,11 +101,11 @@ class TaskReportingMixin:
         task = self.get_task(task_id)
         candidates = [item for item in self.list_tasks() if item["id"] != task_id and item.get("project") == task.get("project")]
         task_modules = {item.lower() for item in task.get("modules", [])}
-        task_terms = _search_tokens(f"{task['title']} {task.get('goal', '')}")
+        task_terms = search_tokens(f"{task['title']} {task.get('goal', '')}")
         suggestions = []
         for candidate in candidates:
             modules = {item.lower() for item in candidate.get("modules", [])}
-            terms = _search_tokens(f"{candidate['title']} {candidate.get('goal', '')}")
+            terms = search_tokens(f"{candidate['title']} {candidate.get('goal', '')}")
             module_overlap = sorted(task_modules & modules)
             term_overlap = sorted(task_terms & terms)
             score = len(module_overlap) * 5 + len(term_overlap)
@@ -156,18 +156,15 @@ class TaskReportingMixin:
             if task.get(key) not in (None, "", [], {})
         }
         status = task.get("status")
-        if status in {"review", "code_review"}:
+        if status == "code_review":
             mode = "review"
             action = "审查该任务；只报告问题与结论，不修改代码"
-        elif status in {"acceptance", "acceptance_blocked"}:
-            mode = "acceptance"
-            action = "验收该任务；只按验收计划验证，不修改实现"
         else:
             mode = "implementation"
             action = "完成该任务的实现"
         instruction = (
             f"在项目 {task.get('project') or '当前项目'} 中{action}：{task['id']}《{task['title']}》。"
-            "以当前源码为准，先读取 located_targets 中的文件与直接依赖，只处理 task.scope，"
+            "以当前源码为准，先读取 targets 中的文件与直接依赖，只处理 task.scope，"
             "遵守 task.out_of_scope；完成后按 acceptance_plan 验证，并报告改动、验证结果和剩余风险。"
         )
         location_context = task.get("location_context", {})
@@ -175,7 +172,7 @@ class TaskReportingMixin:
             "instruction": instruction,
             "mode": mode,
             "task": task_context,
-            "located_targets": location_context.get("targets", []),
+            "targets": location_context.get("targets", []),
             "location_evidence": {
                 "obsidian": location_context.get("obsidian_evidence", {}),
                 "source": location_context.get("location_evidence", {}),
@@ -200,13 +197,16 @@ class TaskReportingMixin:
             for key in ("id", "title", "goal", "scope", "out_of_scope")
             if task.get(key) not in (None, "", [], {})
         }
-        acceptance_commands = compact_acceptance_commands(task.get("acceptance_plan") or [])
+        verify = group_verification_checks(task.get("acceptance_plan") or [])
         return {
             "task": task_context,
-            "located_targets": location_context.get("targets") or [],
-            "implementation_steps": implementation_contract.get("ordered_steps") or [],
+            "targets": (
+                implementation_contract.get("targets")
+                or location_context.get("targets")
+                or []
+            ),
             "visual_references": implementation_contract.get("visual_references") or [],
-            "acceptance_commands": acceptance_commands,
+            "verify": verify,
         }
 
     def build_code_review_context(
@@ -218,6 +218,19 @@ class TaskReportingMixin:
             raise ValueError("project_path must match the task project")
         implementation = task.get("implementation_contract") or {}
         review = task.get("review_contract") or {}
+        acceptance = [
+            {
+                key: item.get(key)
+                for key in (
+                    "criterion", "file", "symbol", "method", "command", "expected",
+                    "check_type", "required", "timeout_seconds", "artifact_refs",
+                    "failure_category", "repair_command", "repair_timeout_seconds",
+                )
+                if item.get(key) not in (None, "", [], {})
+            }
+            for item in task.get("acceptance_plan") or []
+            if isinstance(item, dict)
+        ]
         return {
             "task": {
                 key: task.get(key)
@@ -228,40 +241,11 @@ class TaskReportingMixin:
             },
             "implementation": {
                 "targets": implementation.get("targets") or [],
-                "steps": implementation.get("ordered_steps") or [],
             },
             "visual_references": implementation.get("visual_references") or [],
             "review_checks": review.get("checks") or [],
-        }
-
-    def build_acceptance_context(
-        self, task_id: str, project_path: str | None = None,
-    ) -> dict[str, Any]:
-        """Build a criterion-level bundle for model-assisted functional acceptance."""
-        task = self.get_task(task_id)
-        if project_path and self._normalize_project(project_path) != task.get("project"):
-            raise ValueError("project_path must match the task project")
-        acceptance = []
-        for item in task.get("acceptance_plan") or []:
-            acceptance.append({
-                key: item.get(key)
-                for key in (
-                    "criterion", "file", "symbol", "method", "command", "expected",
-                    "check_type", "required", "timeout_seconds", "artifact_refs",
-                )
-                if item.get(key) not in (None, "", [], {})
-            })
-        return {
-            "task": {
-                key: task.get(key)
-                for key in ("id", "title", "goal", "scope", "out_of_scope")
-                if task.get(key) not in (None, "", [], {})
-            },
             "acceptance_criteria": task.get("acceptance_criteria") or [],
             "acceptance": acceptance,
-            "visual_references": (
-                (task.get("implementation_contract") or {}).get("visual_references") or []
-            ),
         }
 
     def get_run_context(
@@ -319,18 +303,23 @@ class TaskReportingMixin:
 
     def board(self) -> dict[str, Any]:
         tasks = self.list_tasks()
-        projects = sorted({str(task.get("project") or "").strip() for task in tasks if str(task.get("project") or "").strip()})
+        requirements = self.list_requirements()
+        projects = sorted({
+            project
+            for item in [*requirements, *tasks]
+            if (project := str(item.get("project") or "").strip())
+        })
         return {
             "tasks": tasks,
+            "requirements": requirements,
             "pending_task_changes": self.list_pending_task_changes(),
             "projects": projects,
             "token_analytics": self.token_analytics(),
             "dispatcher": {"enabled": self.dispatcher_enabled()},
             "counts": {
                 "tasks": len(tasks),
-                "review": sum(task["status"] == "review" for task in tasks),
+                "requirements": len(requirements),
                 "code_review": sum(task["status"] == "code_review" for task in tasks),
-                "acceptance": sum(task["status"] in {"acceptance", "acceptance_blocked"} for task in tasks),
                 "blocked": sum(task["status"] == "blocked" for task in tasks),
                 "attention": sum(task_requires_attention(task) for task in tasks),
             },

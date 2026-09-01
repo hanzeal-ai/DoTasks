@@ -11,7 +11,7 @@ from .domain import (
     REVIEW_RETRY_DELAYS_SECONDS,
     REVIEW_STAGE_BY_RUN_TYPE,
     RUN_JSON_FIELDS,
-    _decode_row,
+    decode_row,
 )
 
 
@@ -28,7 +28,7 @@ def effective_token_total(
         return raw
     if cached_weight is None:
         try:
-            cached_weight = float(os.environ.get("CODEX_TASKBOARD_CACHED_TOKEN_WEIGHT", "0.1"))
+            cached_weight = float(os.environ.get("DOTASKS_CACHED_TOKEN_WEIGHT", "0.1"))
         except ValueError:
             cached_weight = 0.1
     weight = max(0.0, min(float(cached_weight), 1.0))
@@ -181,23 +181,6 @@ class TaskRunMixin:
         self.flush_integration_outbox()
         return {"run": self.get_run(run_id), "task": self.get_task(task["id"]), "changed": True}
 
-    def recover_orphaned_dispatcher_runs(self, worker_id: str) -> int:
-        """Fail or release runs left active after the local dispatcher process restarted."""
-        with self.db.connection() as connection:
-            rows = connection.execute(
-                """SELECT id FROM task_runs
-                   WHERE claimed_by=? AND status IN ('awaiting_thread','running')
-                   ORDER BY created_at""",
-                (worker_id,),
-            ).fetchall()
-        recovered = 0
-        for row in rows:
-            result = self.interrupt_unsubmitted_run(
-                row["id"], "Codex Taskboard 调度器已重启，原执行连接中断",
-            )
-            recovered += int(bool(result.get("changed")))
-        return recovered
-
     def renew_run_lease(self, run_id: str, lease_token: str, lease_seconds: int = 1800) -> dict[str, Any]:
         lease_seconds = max(300, min(int(lease_seconds), 7200))
         with self.db.transaction() as connection:
@@ -221,7 +204,7 @@ class TaskRunMixin:
             ).fetchone()
         if not row:
             raise KeyError(f"Run not found: {run_id}")
-        return _decode_row(row, RUN_JSON_FIELDS)
+        return decode_row(row, RUN_JSON_FIELDS)
 
     def list_runs(self, task_id: str) -> list[dict[str, Any]]:
         with self.db.connection() as connection:
@@ -233,7 +216,7 @@ class TaskRunMixin:
                    ORDER BY r.created_at, r.id""",
                 (task_id,),
             ).fetchall()
-        return [_decode_row(row, RUN_JSON_FIELDS) for row in rows]
+        return [decode_row(row, RUN_JSON_FIELDS) for row in rows]
 
     def record_run_token_usage(
         self, run_id: str, token_used: int, usage: dict[str, int] | None = None,
@@ -312,12 +295,12 @@ class TaskRunMixin:
         thread_id = str(thread_id or "").strip()
         if not thread_id:
             raise ValueError("thread_id is required")
-        if role in {"execution", "rework", "bugfix", "review", "code_review", "acceptance"} and not run_id:
+        if role in {"execution", "rework", "bugfix", "code_review"} and not run_id:
             raise ValueError(f"run_id is required for role {role}")
         if role == "source" and run_id:
             raise ValueError(f"role {role} cannot be bound to a task run")
         task = self.get_task(task_id)
-        if role in {"review", "code_review", "acceptance"} and task.get("codex_thread_id") and thread_id == task.get("codex_thread_id"):
+        if role == "code_review" and task.get("codex_thread_id") and thread_id == task.get("codex_thread_id"):
             raise ValueError("Review must use a conversation independent from the execution thread")
         if run_id:
             run = self.get_run(run_id)
@@ -328,8 +311,11 @@ class TaskRunMixin:
                 raise ValueError(f"Run type {run['run_type']} must use conversation role {expected_role}")
             if run["status"] not in ACTIVE_RUN_STATUSES:
                 raise ValueError("Only an active run can be bound to a conversation")
-            expected_task_status = {"review": "review", "code_review": "code_review", "acceptance": "acceptance"}.get(role, "implementing")
-            if task["status"] != expected_task_status:
+            expected_task_status = "code_review" if role == "code_review" else "implementing"
+            allowed_task_statuses = {expected_task_status}
+            if role in {"execution", "rework", "bugfix"}:
+                allowed_task_statuses.add("claimed")
+            if task["status"] not in allowed_task_statuses:
                 raise ValueError(f"Task must be {expected_task_status} before binding role {role}")
         with self.db.transaction() as connection:
             existing = connection.execute(
@@ -366,11 +352,16 @@ class TaskRunMixin:
                        updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='awaiting_thread'""",
                     (run_id,),
                 )
-            if role in {"execution", "rework", "bugfix"} and task["status"] == "implementing":
-                connection.execute(
-                    "UPDATE tasks SET codex_thread_id=COALESCE(codex_thread_id, ?), updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (thread_id, task_id),
+            if role in {"execution", "rework", "bugfix"}:
+                cursor = connection.execute(
+                    """UPDATE tasks SET status='implementing',
+                       codex_thread_id=COALESCE(codex_thread_id, ?),
+                       updated_at=CURRENT_TIMESTAMP
+                       WHERE id=? AND active_run_id=? AND status IN ('claimed','implementing')""",
+                    (thread_id, task_id, run_id),
                 )
+                if cursor.rowcount != 1:
+                    raise ValueError("Task changed before the native execution thread was bound")
             self._event(connection, "task", task_id, "conversation_bound", {"role": role, "thread_id": thread_id, "run_id": run_id})
         return self.task_details(task_id)
 

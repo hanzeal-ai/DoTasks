@@ -1,0 +1,6 @@
+interface:
+  display_name: "DoTasks Controller"
+  short_description: "Dispatch DoTasks work into visible native Codex tasks"
+  default_prompt: "$dotasks-controller 对已启用的 DoTasks 队列执行一次事件驱动调度；恢复待绑定派发并为新领取工作创建原生 Codex App 任务，然后停止。"
+policy:
+  allow_implicit_invocation: false

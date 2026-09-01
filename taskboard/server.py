@@ -4,7 +4,6 @@ import argparse
 import ipaddress
 import json
 import mimetypes
-import os
 import re
 import time
 from http import HTTPStatus
@@ -13,11 +12,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from core.dispatcher import TaskDispatcher
 from core.service import TaskboardService
 from .version import VERSION
 from core.workflow import workflow_metadata
-from .workspace import CodexWorkspaceService
 
 MAX_JSON_BODY_BYTES = 1024 * 1024
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -177,6 +174,8 @@ class TaskboardHandler(BaseHTTPRequestHandler):
             self._cors_headers()
             self.send_header("Content-Length", "0")
             self.end_headers()
+        except (BrokenPipeError, ConnectionResetError):
+            return
         except Exception as exc:
             self._handle_error(exc)
 
@@ -196,15 +195,16 @@ class TaskboardHandler(BaseHTTPRequestHandler):
             if parsed.path.startswith("/api/"):
                 self._validate_api_request()
             if parsed.path == "/api/health":
-                dispatcher = getattr(self.server, "dispatcher", None)
                 self._json(
                     HTTPStatus.OK,
                     {
                         "ok": True,
                         "version": VERSION,
-                        "dispatcher": dispatcher.status()
-                        if dispatcher
-                        else {"enabled": False},
+                        "dispatcher": {
+                            "enabled": self.service.dispatcher_enabled(),
+                            "execution_mode": "native_codex_controller",
+                            "running": None,
+                        },
                     },
                 )
             elif parsed.path == "/api/workflow":
@@ -215,43 +215,16 @@ class TaskboardHandler(BaseHTTPRequestHandler):
                 self._serve_event_stream()
             elif parsed.path == "/api/board":
                 board = self.service.board()
-                dispatcher = getattr(self.server, "dispatcher", None)
-                board["dispatcher"] = (
-                    dispatcher.status()
-                    if dispatcher
-                    else {
-                        "enabled": self.service.dispatcher_enabled(),
-                        "running": False,
-                    }
-                )
+                board["dispatcher"] = {
+                    "enabled": self.service.dispatcher_enabled(),
+                    "execution_mode": "native_codex_controller",
+                    "running": None,
+                }
                 self._json(HTTPStatus.OK, board)
             elif parsed.path == "/api/integrations":
                 query = parse_qs(parsed.query)
                 project = query.get("project", [None])[0]
                 self._json(HTTPStatus.OK, self.service.integration_status(project))
-            elif parsed.path == "/api/codex/projects":
-                query = parse_qs(parsed.query)
-                archived = query.get("archived", ["false"])[0].lower() == "true"
-                self._json(
-                    HTTPStatus.OK,
-                    {
-                        "projects": self.server.workspace.list_projects(
-                            archived=archived
-                        )
-                    },
-                )
-            elif parsed.path == "/api/codex/threads":
-                query = parse_qs(parsed.query)
-                project = query.get("project", [None])[0]
-                self._json(
-                    HTTPStatus.OK,
-                    {"threads": self.server.workspace.list_threads(project)},
-                )
-            elif match := re.fullmatch(r"/api/codex/threads/([^/]+)", parsed.path):
-                self._json(
-                    HTTPStatus.OK,
-                    {"thread": self.server.workspace.read_thread(match.group(1))},
-                )
             elif match := re.fullmatch(r"/api/tasks/([^/]+)", parsed.path):
                 self._json(HTTPStatus.OK, self.service.get_task(match.group(1)))
             elif match := re.fullmatch(r"/api/tasks/([^/]+)/context", parsed.path):
@@ -282,48 +255,6 @@ class TaskboardHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.OK, self.service.update_task_settings(payload))
             elif parsed.path == "/api/task-intakes/finalize":
                 self._json(HTTPStatus.OK, self.service.finalize_task_intake(payload))
-            elif parsed.path == "/api/codex/projects/pick":
-                project = self.server.workspace.pick_project()
-                self._json(
-                    HTTPStatus.OK, {"project": project, "cancelled": project is None}
-                )
-            elif parsed.path == "/api/codex/projects":
-                self._json(
-                    HTTPStatus.CREATED,
-                    {"project": self.server.workspace.add_project(payload.get("path"))},
-                )
-            elif parsed.path == "/api/codex/projects/archive":
-                self._json(
-                    HTTPStatus.OK,
-                    self.server.workspace.archive_project(payload.get("path")),
-                )
-            elif parsed.path == "/api/codex/projects/restore":
-                self._json(
-                    HTTPStatus.OK,
-                    self.server.workspace.restore_project(payload.get("path")),
-                )
-            elif parsed.path == "/api/codex/threads":
-                self._json(
-                    HTTPStatus.CREATED,
-                    {
-                        "thread": self.server.workspace.create_thread(
-                            payload.get("project"),
-                            payload.get("title", "新会话"),
-                        )
-                    },
-                )
-            elif match := re.fullmatch(
-                r"/api/codex/threads/([^/]+)/turns", parsed.path
-            ):
-                self._json(
-                    HTTPStatus.CREATED,
-                    {
-                        "turn": self.server.workspace.start_turn(
-                            match.group(1),
-                            payload.get("message", ""),
-                        )
-                    },
-                )
             elif parsed.path == "/api/location-analyses":
                 self._json(
                     HTTPStatus.CREATED,
@@ -355,23 +286,12 @@ class TaskboardHandler(BaseHTTPRequestHandler):
                         payload.get("agent_id", ""),
                     ),
                 )
-            elif match := re.fullmatch(
-                r"/api/location-analyses/([^/]+)/complete", parsed.path
-            ):
-                self._json(
-                    HTTPStatus.OK,
-                    self.service.complete_location_analysis(
-                        match.group(1),
-                        payload["location_evidence"],
-                        payload["targets"],
-                        payload["acceptance_plan"],
-                    ),
-                )
-            elif parsed.path == "/api/dispatcher/claim":
-                result = self.service.claim_next_task(
+            elif parsed.path == "/api/native-dispatches/claim":
+                result = self.service.claim_next_native_dispatch(
                     payload["worker_id"],
                     payload.get("project"),
                     payload.get("lease_seconds", 1800),
+                    payload["stage"],
                 )
                 self._json(HTTPStatus.OK, result)
             elif parsed.path == "/api/conversations/bind":
@@ -398,10 +318,6 @@ class TaskboardHandler(BaseHTTPRequestHandler):
                     if payload.get("resume_tasks")
                     else self.service.set_dispatcher_enabled(True)
                 )
-                dispatcher = getattr(self.server, "dispatcher", None)
-                if dispatcher and not dispatcher.status().get("running"):
-                    dispatcher.start()
-                    result["dispatcher"] = dispatcher.status()
                 self._json(HTTPStatus.OK, result)
             elif match := re.fullmatch(r"/api/tasks/([^/]+)/resume", parsed.path):
                 self._json(HTTPStatus.OK, self.service.resume_task(match.group(1)))
@@ -425,36 +341,6 @@ class TaskboardHandler(BaseHTTPRequestHandler):
                         match.group(1), payload["run_id"]
                     ),
                 )
-            elif match := re.fullmatch(r"/api/tasks/([^/]+)/review", parsed.path):
-                self._json(
-                    HTTPStatus.OK,
-                    self.service.review_task(
-                        match.group(1),
-                        payload["verdict"],
-                        payload.get("reasons"),
-                        payload.get("passed_items"),
-                        payload.get("run_id"),
-                        payload.get("failed_criteria"),
-                    ),
-                )
-            elif match := re.fullmatch(
-                r"/api/tasks/([^/]+)/prepare-review", parsed.path
-            ):
-                self._json(
-                    HTTPStatus.CREATED,
-                    self.service.prepare_review_run(
-                        match.group(1),
-                        payload["review_location_analysis_id"],
-                        payload.get("reviewer_id", "codex-reviewer"),
-                    ),
-                )
-            elif match := re.fullmatch(
-                r"/api/tasks/([^/]+)/prepare-review-location", parsed.path
-            ):
-                self._json(
-                    HTTPStatus.CREATED,
-                    self.service.prepare_review_location(match.group(1)),
-                )
             elif match := re.fullmatch(r"/api/runs/([^/]+)/delivery", parsed.path):
                 self._json(
                     HTTPStatus.OK,
@@ -465,6 +351,7 @@ class TaskboardHandler(BaseHTTPRequestHandler):
                         payload["changed_locations"],
                         payload["acceptance_evidence"],
                         payload.get("token_used", 0),
+                        workspace_path=payload.get("workspace_path"),
                     ),
                 )
             elif match := re.fullmatch(
@@ -491,6 +378,8 @@ class TaskboardHandler(BaseHTTPRequestHandler):
                 )
             else:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "API route not found"})
+        except (BrokenPipeError, ConnectionResetError):
+            return
         except Exception as exc:
             self._handle_error(exc)
 
@@ -506,24 +395,13 @@ class TaskboardHandler(BaseHTTPRequestHandler):
 
 
 class TaskboardHTTPServer(ThreadingHTTPServer):
-    dispatcher: TaskDispatcher | None = None
-    workspace: CodexWorkspaceService
-
-    def server_close(self) -> None:
-        dispatcher = getattr(self, "dispatcher", None)
-        if dispatcher:
-            dispatcher.stop()
-        workspace = getattr(self, "workspace", None)
-        if workspace:
-            workspace.stop()
-        super().server_close()
+    pass
 
 
 def build_server(
     host: str = "127.0.0.1",
     port: int = 8765,
     home: str | None = None,
-    enable_dispatcher: bool = False,
 ) -> TaskboardHTTPServer:
     if host == "localhost":
         is_loopback = True
@@ -532,10 +410,10 @@ def build_server(
             is_loopback = ipaddress.ip_address(host).is_loopback
         except ValueError as exc:
             raise ValueError(
-                "Codex Taskboard only supports localhost or a loopback IP address"
+                "DoTasks only supports localhost or a loopback IP address"
             ) from exc
     if not is_loopback:
-        raise ValueError("Codex Taskboard only supports loopback HTTP binding")
+        raise ValueError("DoTasks only supports loopback HTTP binding")
     service = TaskboardService(home)
     handler = type(
         "ConfiguredTaskboardHandler",
@@ -543,22 +421,17 @@ def build_server(
         {"service": service, "static_root": service.package_home / "static"},
     )
     server = TaskboardHTTPServer((host, port), handler)
-    server.workspace = CodexWorkspaceService(service)
-    if enable_dispatcher:
-        server.dispatcher = TaskDispatcher(service)
-        server.dispatcher.start()
     return server
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run Codex Taskboard")
+    parser = argparse.ArgumentParser(description="Run DoTasks")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--home")
     args = parser.parse_args()
-    enabled = os.environ.get("CODEX_TASKBOARD_DISABLE_DISPATCHER") != "1"
-    server = build_server(args.host, args.port, args.home, enable_dispatcher=enabled)
-    print(f"Codex Taskboard: http://{args.host}:{server.server_port}")
+    server = build_server(args.host, args.port, args.home)
+    print(f"DoTasks: http://{args.host}:{server.server_port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

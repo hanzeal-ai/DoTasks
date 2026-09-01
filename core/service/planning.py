@@ -10,19 +10,123 @@ from typing import Any
 
 from taskboard.project_guard import ProjectWorkspaceGuard
 from .domain import (
-    ACTIVE_RUN_STATUSES,
     GENERIC_MATCH_TERMS,
     JSON_FIELDS,
     LOCATION_REPORT_MAX_AGE_SECONDS,
     RELATION_TYPES,
-    _decode_row,
-    _search_tokens,
+    decode_row,
+    search_tokens,
     specific_modules,
 )
 
 
 class TaskPlanningMixin:
     """Task creation, dependency analysis, target locks, and bounded location gates."""
+
+    @staticmethod
+    def _normalize_dependency_analysis(value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise ValueError("dependency_analysis must be an object")
+        unknown = set(value) - {
+            "decision", "depends_tasks", "conflicts_tasks", "history_tasks",
+            "history_edges", "continues_from_task_id",
+        }
+        if unknown:
+            raise ValueError(
+                f"Unknown dependency_analysis fields: {', '.join(sorted(unknown))}"
+            )
+
+        def task_ids(field: str) -> list[str]:
+            raw = value.get(field) or []
+            if not isinstance(raw, list):
+                raise ValueError(f"dependency_analysis.{field} must be an array")
+            result = list(dict.fromkeys(str(item).strip() for item in raw if str(item).strip()))
+            if any(not item.startswith(("TASK-", "BUG-")) for item in result):
+                raise ValueError(f"dependency_analysis.{field} contains an invalid task id")
+            return result
+
+        depends = task_ids("depends_tasks")
+        conflicts = task_ids("conflicts_tasks")
+        history = task_ids("history_tasks")
+        decision = str(value.get("decision") or "").strip()
+        continues_from = str(value.get("continues_from_task_id") or "").strip()
+        if decision not in {"independent", "depends_on", "continues_from"}:
+            raise ValueError(
+                "dependency_analysis.decision must be independent, depends_on or continues_from"
+            )
+        if decision == "independent" and (depends or continues_from):
+            raise ValueError("independent dependency analysis cannot include scheduling dependencies")
+        if decision == "depends_on" and not depends:
+            raise ValueError("depends_on dependency analysis requires depends_tasks")
+        if decision == "continues_from" and not continues_from:
+            raise ValueError("continues_from dependency analysis requires continues_from_task_id")
+        if continues_from and not continues_from.startswith(("TASK-", "BUG-")):
+            raise ValueError("dependency_analysis.continues_from_task_id is invalid")
+        if set(depends) & set(conflicts):
+            raise ValueError("A task cannot both depend on and conflict with the same task")
+
+        raw_edges = value.get("history_edges") or []
+        if not isinstance(raw_edges, list) or any(not isinstance(item, dict) for item in raw_edges):
+            raise ValueError("dependency_analysis.history_edges must be an array of objects")
+        history_edges: list[dict[str, str]] = []
+        for item in raw_edges:
+            unknown = set(item) - {"from", "to", "type"}
+            if unknown:
+                raise ValueError(
+                    f"Unknown history edge fields: {', '.join(sorted(unknown))}"
+                )
+            source = str(item.get("from") or "").strip()
+            target = str(item.get("to") or "").strip()
+            relation_type = str(item.get("type") or "").strip()
+            if not source or not target or relation_type not in RELATION_TYPES:
+                raise ValueError("Every history edge requires from, to and a valid relation type")
+            edge = {"from": source, "to": target, "type": relation_type}
+            if edge not in history_edges:
+                history_edges.append(edge)
+
+        normalized = {
+            "decision": decision,
+            "depends_tasks": depends,
+            "conflicts_tasks": conflicts,
+            "history_tasks": history,
+            "history_edges": history_edges,
+        }
+        if continues_from:
+            normalized["continues_from_task_id"] = continues_from
+        return normalized
+
+    @staticmethod
+    def _normalize_quality_gates(gates: Any) -> dict[str, dict[str, Any]]:
+        if not isinstance(gates, dict):
+            raise ValueError("quality_gates must be an object")
+        unknown = set(gates) - {"code_review"}
+        if unknown:
+            raise ValueError(f"Unknown quality gate fields: {', '.join(sorted(unknown))}")
+        normalized: dict[str, dict[str, Any]] = {}
+        for gate in ("code_review",):
+            value = gates.get(gate)
+            if not isinstance(value, dict):
+                raise ValueError(f"quality_gates.{gate} must be an object")
+            unknown = set(value) - {"required", "reason"}
+            if unknown:
+                raise ValueError(
+                    f"Unknown quality_gates.{gate} fields: {', '.join(sorted(unknown))}"
+                )
+            required = value.get("required")
+            reason = str(value.get("reason") or "").strip()
+            if not isinstance(required, bool):
+                raise ValueError(f"quality_gates.{gate}.required must be boolean")
+            if not reason:
+                raise ValueError(f"quality_gates.{gate}.reason is required")
+            normalized[gate] = {"required": required, "reason": reason}
+        return normalized
+
+    @staticmethod
+    def _quality_gate_required(task: dict[str, Any], gate: str) -> bool:
+        gates = (task.get("review_contract") or {}).get("quality_gates")
+        if not isinstance(gates, dict) or not isinstance(gates.get(gate), dict):
+            raise ValueError(f"Task review contract is missing quality_gates.{gate}")
+        return bool(gates[gate]["required"])
 
     def _store_managed_artifacts(
         self, namespace: str, references: list[str],
@@ -90,24 +194,28 @@ class TaskPlanningMixin:
     def _normalize_review_contract(contract: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(contract, dict):
             raise ValueError("review_contract must be an object")
+        unknown = set(contract) - {"checks", "quality_gates"}
+        if unknown:
+            raise ValueError(f"Unknown review_contract fields: {', '.join(sorted(unknown))}")
         raw_checks = contract.get("checks")
         if not isinstance(raw_checks, list) or not raw_checks:
-            raise ValueError("v2 review_contract.checks must be a non-empty array")
+            raise ValueError("review_contract.checks must be a non-empty array")
         checks: list[dict[str, str]] = []
         seen: set[str] = set()
         for raw in raw_checks:
-            if isinstance(raw, str):
-                check_id = raw.strip()
-                description = check_id
-                kind = "static"
-            elif isinstance(raw, dict):
+            if isinstance(raw, dict):
+                unknown = set(raw) - {"id", "description", "kind"}
+                if unknown:
+                    raise ValueError(
+                        f"Unknown code review check fields: {', '.join(sorted(unknown))}"
+                    )
                 check_id = str(
-                    raw.get("id") or raw.get("criterion") or raw.get("description") or ""
+                    raw.get("id") or ""
                 ).strip()
-                description = str(raw.get("description") or check_id).strip()
-                kind = str(raw.get("kind") or "static").strip()
+                description = str(raw.get("description") or "").strip()
+                kind = str(raw.get("kind") or "").strip()
             else:
-                raise ValueError("Every code review check must be a string or object")
+                raise ValueError("Every code review check must be an object")
             if not check_id or not description:
                 raise ValueError("Every code review check requires id and description")
             if kind not in {"code", "static"}:
@@ -116,78 +224,110 @@ class TaskPlanningMixin:
                 raise ValueError("Code review check ids must be unique")
             seen.add(check_id)
             checks.append({"id": check_id, "description": description, "kind": kind})
-        separate = contract.get("separate_acceptance_session", False)
-        if not isinstance(separate, bool):
-            raise ValueError("review_contract.separate_acceptance_session must be boolean")
-        return {**contract, "checks": checks, "separate_acceptance_session": separate}
+        return {
+            "checks": checks,
+            "quality_gates": TaskPlanningMixin._normalize_quality_gates(
+                contract.get("quality_gates")
+            ),
+        }
 
     def _validate_implementation_contract(
-        self, contract: dict[str, Any], located_targets: list[dict[str, Any]] | None = None,
+        self, contract: dict[str, Any], analysis_targets: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Validate and normalize the current object-form implementation contract."""
+        """Normalize one precise file-oriented execution plan."""
         if not isinstance(contract, dict):
             raise ValueError("implementation_contract must be an object")
+        unknown = set(contract) - {"targets", "visual_references"}
+        if unknown:
+            raise ValueError(
+                f"Unknown implementation_contract fields: {', '.join(sorted(unknown))}"
+            )
         raw_targets = contract.get("targets")
-        raw_steps = contract.get("ordered_steps")
         if not isinstance(raw_targets, list) or not raw_targets:
             raise ValueError("implementation_contract.targets is required")
-        if not isinstance(raw_steps, list) or not raw_steps:
-            raise ValueError("implementation_contract.ordered_steps must be non-empty")
-
         targets: list[dict[str, Any]] = []
+        target_by_file: dict[str, dict[str, Any]] = {}
         for item in raw_targets:
             if not isinstance(item, dict):
                 raise ValueError("Every implementation target must be an object")
-            target = dict(item)
-            file_value = self._normalize_target_file(target.get("file"))
-            symbols = target.get("symbols")
+            unknown = set(item) - {"file", "mode", "symbols", "reason", "tasks"}
+            if unknown:
+                raise ValueError(
+                    f"Unknown implementation target fields: {', '.join(sorted(unknown))}"
+                )
+            file_value = self._normalize_target_file(item.get("file"))
+            mode = str(item.get("mode") or "modify").strip().lower()
+            if mode not in {"modify", "create", "delete", "config"}:
+                raise ValueError("Implementation target mode must be modify, create, delete or config")
+            symbols = item.get("symbols") or []
             if not isinstance(symbols, list) or any(not isinstance(symbol, str) for symbol in symbols):
                 raise ValueError("Every implementation target requires a symbols array")
             normalized_symbols = list(dict.fromkeys(symbol.strip() for symbol in symbols if symbol.strip()))
-            if not normalized_symbols:
-                raise ValueError("Every v2 code target requires a non-empty symbols array")
-            target["file"] = file_value
-            target["symbols"] = normalized_symbols
+            symbol_optional = Path(file_value).suffix.lower() in {
+                ".json", ".yaml", ".yml", ".toml", ".ini", ".sql", ".md",
+                ".txt", ".css", ".scss", ".html",
+            }
+            if mode in {"modify", "delete"} and not normalized_symbols and not symbol_optional:
+                raise ValueError("Modify and delete targets require at least one exact symbol")
+            raw_tasks = item.get("tasks") or []
+            if not isinstance(raw_tasks, list) or any(not isinstance(task, dict) for task in raw_tasks):
+                raise ValueError("implementation_contract.targets.tasks must be an array of objects")
+            normalized_tasks: list[dict[str, Any]] = []
+            for raw_task in raw_tasks:
+                unknown = set(raw_task) - {"symbol", "action", "expected"}
+                if unknown:
+                    raise ValueError(
+                        f"Unknown implementation task fields: {', '.join(sorted(unknown))}"
+                    )
+                action = str(raw_task.get("action") or "").strip()
+                symbol = str(raw_task.get("symbol") or "").strip()
+                if not action:
+                    raise ValueError("Every implementation target task requires an action")
+                if symbol and symbol not in normalized_symbols:
+                    raise ValueError("Implementation target task symbol is outside locked symbols")
+                normalized = {"action": action}
+                if symbol:
+                    normalized["symbol"] = symbol
+                expected = str(raw_task.get("expected") or "").strip()
+                if expected:
+                    normalized["expected"] = expected
+                normalized_tasks.append(normalized)
+            target = {
+                "file": file_value,
+                "mode": mode,
+                "symbols": normalized_symbols,
+                "tasks": normalized_tasks,
+            }
+            reason = str(item.get("reason") or "").strip()
+            if reason:
+                target["reason"] = reason
+            if file_value in target_by_file:
+                raise ValueError("Implementation targets must contain each file exactly once")
+            target_by_file[file_value] = target
             targets.append(target)
 
         target_keys = {
-            (item["file"], tuple(sorted(item["symbols"]))) for item in targets
+            (item["file"], item["mode"], tuple(sorted(item["symbols"]))) for item in targets
         }
-        if located_targets is not None:
+        if analysis_targets is not None:
             located_keys = {
                 (
                     self._normalize_target_file(item.get("file")),
+                    str(item.get("mode") or "modify").strip().lower(),
                     tuple(sorted(
                         str(symbol).strip() for symbol in (item.get("symbols") or [])
                         if str(symbol).strip()
                     )),
                 )
-                for item in located_targets if isinstance(item, dict)
+                for item in analysis_targets if isinstance(item, dict)
             }
             if not located_keys or target_keys != located_keys:
                 raise ValueError("implementation_contract.targets must exactly match location analysis targets")
 
-        steps: list[dict[str, Any]] = []
-        for item in raw_steps:
-            if not isinstance(item, dict):
-                raise ValueError("Every implementation step must be an object")
-            step = dict(item)
-            file_value = self._normalize_target_file(step.get("file"))
-            symbol_value = str(step.get("symbol") or "").strip()
-            action = str(step.get("action") or "").strip()
-            if not file_value or not symbol_value or not action:
-                raise ValueError("Every implementation step requires file, symbol and action")
-            if not any(file_value == target_file and symbol_value in symbols for target_file, symbols in target_keys):
-                raise ValueError("Implementation step target is outside locked targets")
-            step["file"] = file_value
-            step["symbol"] = symbol_value
-            step["action"] = action
-            steps.append(step)
+        if any(not target["tasks"] for target in targets):
+            raise ValueError("Every implementation target requires at least one task")
 
-        canonical = dict(contract)
-        canonical["targets"] = targets
-        canonical["ordered_steps"] = steps
-        visual_references = canonical.get("visual_references") or []
+        visual_references = contract.get("visual_references") or []
         if not isinstance(visual_references, list) or any(
             not isinstance(item, dict)
             or not str(item.get("artifact_id") or "").strip()
@@ -197,8 +337,7 @@ class TaskPlanningMixin:
             raise ValueError(
                 "implementation_contract.visual_references must contain managed artifact_id and path"
             )
-        canonical["visual_references"] = visual_references
-        return canonical
+        return {"targets": targets, "visual_references": visual_references}
 
     def _validate_connected_location_evidence(
         self, project: str, evidence: dict[str, Any],
@@ -216,7 +355,7 @@ class TaskPlanningMixin:
                 or command[1] != "explore"
             ):
                 raise ValueError(
-                    "connected CodeGraph CLI evidence must include the executed codegraph explore argv"
+                    "connected CodeGraph CLI evidence.command must be the executed argv array beginning with codegraph, explore"
                 )
             if type(evidence.get("exit_code")) is not int or evidence.get("exit_code") != 0:
                 raise ValueError("connected CodeGraph CLI evidence must include exit_code=0")
@@ -287,6 +426,14 @@ class TaskPlanningMixin:
             raise ValueError("connected location evidence must include non-empty files")
 
     def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+        unknown = set(payload) - {
+            "title", "type", "project", "modules", "status", "priority", "goal",
+            "scope", "out_of_scope", "acceptance_criteria", "source_thread_id",
+            "token_budget", "location_analysis_id", "dependency_analysis",
+            "implementation_contract", "review_contract", "relations", "auto_dispatch",
+        }
+        if unknown:
+            raise ValueError(f"Unknown task fields: {', '.join(sorted(unknown))}")
         title = str(payload.get("title") or "").strip()
         if not title:
             raise ValueError("title is required")
@@ -301,7 +448,6 @@ class TaskPlanningMixin:
         )
         if token_budget <= 0:
             raise ValueError("token_budget must be positive")
-        workflow_version = int(payload.get("workflow_version", 2))
         if payload.get("status", "draft") == "ready" and not payload.get("location_analysis_id"):
             self._assert_ready_payload(payload, list_values)
         project = self._require_project_directory(payload.get("project")) if str(payload.get("project") or "").strip() else ""
@@ -319,65 +465,61 @@ class TaskPlanningMixin:
             dependency_analysis = payload.get("dependency_analysis")
             implementation_contract = payload.get("implementation_contract")
             review_contract = payload.get("review_contract")
-            if workflow_version >= 2 and (not isinstance(dependency_analysis, dict) or not str(dependency_analysis.get("decision") or "").strip()):
-                raise ValueError("dependency_analysis.decision is required")
-            decision = str(dependency_analysis.get("decision") or "").strip()
-            if workflow_version >= 2 and decision not in {"independent", "depends_on", "continues_from"}:
-                raise ValueError("dependency_analysis.decision must be independent, depends_on or continues_from")
+            dependency_analysis = self._normalize_dependency_analysis(
+                dependency_analysis
+            )
             declared_relations = payload.get("relations", []) or []
             if not isinstance(declared_relations, list):
                 raise ValueError("relations must be an array")
-            scheduling_relations = [item for item in declared_relations if isinstance(item, dict) and str(item.get("relation_type") or item.get("type") or "") in {"depends_on", "continues_from"}]
-            related_task_id = str(dependency_analysis.get("related_task_id") or dependency_analysis.get("target_task_id") or "").strip()
-            if workflow_version >= 2 and decision == "independent" and scheduling_relations:
-                raise ValueError("independent dependency analysis cannot include scheduling relations")
-            if workflow_version >= 2 and decision in {"depends_on", "continues_from"}:
-                if not related_task_id:
-                    raise ValueError("A dependent task requires dependency_analysis.related_task_id")
-                if len(scheduling_relations) != 1 or str(scheduling_relations[0].get("relation_type") or scheduling_relations[0].get("type") or "") != decision:
-                    raise ValueError("dependency analysis and task relation must match exactly")
-                relation_source = str(scheduling_relations[0].get("source_task_id") or "").strip()
-                if relation_source and relation_source != "<new>" and relation_source != str(payload.get("task_id") or ""):
-                    # New task relations may omit source (the service fills it);
-                    # an explicit source cannot point at another task.
-                    raise ValueError("dependency relation source must be the new task")
-                relation_target = str(scheduling_relations[0].get("target_task_id") or scheduling_relations[0].get("task_id") or "").strip()
-                if relation_target != related_task_id:
-                    raise ValueError("dependency relation target does not match dependency analysis")
-            if workflow_version >= 2:
-                implementation_contract = self._validate_implementation_contract(
-                    implementation_contract, location_analysis.get("targets") or [],
+            declared_relations = [dict(item) for item in declared_relations if isinstance(item, dict)]
+            required_relations = [
+                (task_id, "depends_on")
+                for task_id in dependency_analysis["depends_tasks"]
+            ]
+            if dependency_analysis.get("continues_from_task_id"):
+                required_relations.append((
+                    dependency_analysis["continues_from_task_id"], "continues_from",
+                ))
+            required_relations.extend(
+                (task_id, "conflicts_with")
+                for task_id in dependency_analysis["conflicts_tasks"]
+            )
+            for target_task_id, relation_type in required_relations:
+                if not any(
+                    str(item.get("target_task_id") or "").strip()
+                    == target_task_id
+                    and str(item.get("relation_type") or "").strip()
+                    == relation_type
+                    for item in declared_relations
+                ):
+                    declared_relations.append({
+                        "target_task_id": target_task_id,
+                        "relation_type": relation_type,
+                    })
+            declared_scheduling = {
+                (
+                    str(item.get("target_task_id") or "").strip(),
+                    str(item.get("relation_type") or "").strip(),
                 )
-                if not isinstance(implementation_contract, dict) or not implementation_contract.get("targets"):
-                    raise ValueError("implementation_contract.targets is required")
-                review_contract = self._normalize_review_contract(review_contract)
-                targets = implementation_contract.get("targets")
-                if not isinstance(targets, list) or not targets:
-                    raise ValueError("v2 implementation_contract.targets must be non-empty")
-                target_keys = set()
-                for target in targets:
-                    if not isinstance(target, dict) or not str(target.get("file") or "").strip():
-                        raise ValueError("Every implementation target requires a file")
-                    symbols = target.get("symbols")
-                    if not isinstance(symbols, list) or not symbols or any(not isinstance(symbol, str) or not symbol.strip() for symbol in symbols):
-                        raise ValueError("Every v2 code target requires a non-empty symbols array")
-                    target_keys.add((self._normalize_target_file(target["file"]), tuple(sorted(symbol.strip() for symbol in symbols))))
-                located_keys = {
-                    (self._normalize_target_file(item.get("file")), tuple(sorted(str(symbol).strip() for symbol in (item.get("symbols") or []) if str(symbol).strip())))
-                    for item in (location_analysis.get("targets") or []) if isinstance(item, dict)
-                }
-                contract_keys = {(self._normalize_target_file(item.get("file")), tuple(sorted(str(symbol).strip() for symbol in (item.get("symbols") or []) if str(symbol).strip()))) for item in targets}
-                if contract_keys != located_keys:
-                    raise ValueError("implementation_contract.targets must exactly match location analysis targets")
-                steps = implementation_contract.get("ordered_steps")
-                if not isinstance(steps, list) or not steps:
-                    raise ValueError("v2 implementation_contract.ordered_steps must be non-empty")
-                for step in steps:
-                    if not isinstance(step, dict) or not str(step.get("file") or "").strip() or not str(step.get("symbol") or "").strip() or not str(step.get("action") or "").strip():
-                        raise ValueError("Every implementation step requires file, symbol and action")
-                    step_key = (self._normalize_target_file(step["file"]), str(step["symbol"]).strip())
-                    if not any(step_key[0] == file and step_key[1] in symbols for file, symbols in target_keys):
-                        raise ValueError("Implementation step target is outside locked targets")
+                for item in declared_relations
+                if str(item.get("relation_type") or "").strip()
+                in {"depends_on", "continues_from"}
+            }
+            expected_scheduling = set(required_relations) - {
+                (task_id, "conflicts_with")
+                for task_id in dependency_analysis["conflicts_tasks"]
+            }
+            if declared_scheduling != expected_scheduling:
+                raise ValueError("dependency analysis and scheduling relations must match exactly")
+            implementation_contract = self._validate_implementation_contract(
+                implementation_contract, location_analysis.get("targets") or [],
+            )
+            if not isinstance(implementation_contract, dict) or not implementation_contract.get("targets"):
+                raise ValueError("implementation_contract.targets is required")
+            review_contract = self._normalize_review_contract(review_contract)
+            targets = implementation_contract.get("targets")
+            if not isinstance(targets, list) or not targets:
+                raise ValueError("implementation_contract.targets must be non-empty")
             task_id = self.db.next_id(connection, task_id_prefix)
             connection.execute(
                 """INSERT INTO tasks(
@@ -385,8 +527,8 @@ class TaskPlanningMixin:
                     priority, goal, scope, out_of_scope, acceptance_criteria,
                     source_thread_id, token_budget, location_context, acceptance_plan,
                     dependency_analysis, implementation_contract, review_contract,
-                    parent_acceptance_task_id, workflow_version
-                ) VALUES(?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    auto_dispatch
+                ) VALUES(?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     task_id, title, task_type, project,
                     json.dumps(list_values["modules"], ensure_ascii=False), payload.get("status", "draft"),
@@ -400,7 +542,7 @@ class TaskPlanningMixin:
                     json.dumps(dependency_analysis, ensure_ascii=False),
                     json.dumps(implementation_contract, ensure_ascii=False),
                     json.dumps(review_contract, ensure_ascii=False),
-                    payload.get("parent_acceptance_task_id"), workflow_version,
+                    int(bool(payload.get("auto_dispatch", True))),
                 ),
             )
             if payload.get("source_thread_id"):
@@ -409,29 +551,66 @@ class TaskPlanningMixin:
                     (task_id, payload["source_thread_id"], f"{task_id} 需求确认"),
                 )
             self._store_task_targets(connection, task_id, location_analysis.get("targets", []))
-            for relation in payload.get("relations", []) or []:
+            for relation in declared_relations:
                 if not isinstance(relation, dict):
                     raise ValueError("relations must contain objects")
-                source = str(relation.get("source_task_id") or task_id)
-                if source == "<new>":
-                    source = task_id
+                unknown = set(relation) - {"target_task_id", "relation_type", "description"}
+                if unknown:
+                    raise ValueError(
+                        f"Unknown task relation fields: {', '.join(sorted(unknown))}"
+                    )
+                source = task_id
                 target = str(relation.get("target_task_id") or "")
-                relation_type = str(relation.get("relation_type") or relation.get("type") or "")
-                if source == task_id and not target:
-                    target = str(relation.get("task_id") or "")
-                if source != task_id and target == task_id:
-                    pass
+                relation_type = str(relation.get("relation_type") or "")
                 if not target or relation_type not in RELATION_TYPES:
                     raise ValueError("Each relation requires target_task_id and valid relation_type")
                 if source == target:
                     raise ValueError("A task cannot relate to itself")
-                exists = connection.execute("SELECT 1 FROM tasks WHERE id=?", (target if source == task_id else source,)).fetchone()
+                exists = connection.execute("SELECT 1 FROM tasks WHERE id=?", (target,)).fetchone()
                 if not exists:
-                    raise ValueError(f"Related task not found: {target if source == task_id else source}")
+                    raise ValueError(f"Related task not found: {target}")
                 self._insert_relation_in_connection(connection, source, target, relation_type, str(relation.get("description") or ""))
-            conflicts = self._target_conflicts(connection, task_id)
+                self._queue_obsidian_sync(
+                    connection, "task", target,
+                )
             batch_id = self._try_join_open_batch(connection, task_id)
-            self._event(connection, "task", task_id, "created", payload)
+            batch_members = {
+                row["task_id"] for row in connection.execute(
+                    "SELECT task_id FROM execution_batch_tasks WHERE batch_id=?",
+                    (batch_id,),
+                ).fetchall()
+            } if batch_id else set()
+            conflicts = self._target_conflicts(connection, task_id)
+            scheduling_targets = set(dependency_analysis["depends_tasks"])
+            if dependency_analysis.get("continues_from_task_id"):
+                scheduling_targets.add(dependency_analysis["continues_from_task_id"])
+            for conflict in conflicts:
+                conflict_task_id = str(conflict.get("task_id") or "").strip()
+                if (
+                    not conflict_task_id
+                    or conflict_task_id in scheduling_targets
+                    or conflict_task_id in batch_members
+                ):
+                    continue
+                self._insert_relation_in_connection(
+                    connection, task_id, conflict_task_id, "conflicts_with",
+                    "DoTasks detected overlapping locked file/symbol targets",
+                )
+                self._queue_obsidian_sync(connection, "task", conflict_task_id)
+                if conflict_task_id not in dependency_analysis["conflicts_tasks"]:
+                    dependency_analysis["conflicts_tasks"].append(conflict_task_id)
+            connection.execute(
+                "UPDATE tasks SET dependency_analysis=? WHERE id=?",
+                (json.dumps(dependency_analysis, ensure_ascii=False), task_id),
+            )
+            event_payload = {
+                **payload,
+                "dependency_analysis": dependency_analysis,
+                "implementation_contract": implementation_contract,
+                "review_contract": review_contract,
+                "relations": declared_relations,
+            }
+            self._event(connection, "task", task_id, "created", event_payload)
             if conflicts:
                 self._event(connection, "task", task_id, "target_conflict_detected", {"conflicts": conflicts})
             if batch_id:
@@ -526,37 +705,50 @@ class TaskPlanningMixin:
     @staticmethod
     def _project_blockers(connection: Any, task_id: str) -> list[dict[str, Any]]:
         rows = connection.execute(
-            """SELECT other.id AS task_id, other.title, other.status,
+            """WITH blockers AS (
+                 SELECT other.id AS task_id, 'active_project_run' AS blocker_type
+                   FROM tasks current JOIN tasks other
+                     ON other.project=current.project AND other.id != current.id
+                  WHERE current.id=? AND EXISTS(
+                    SELECT 1 FROM task_runs active
+                     WHERE active.task_id=other.id
+                       AND active.status IN ('awaiting_thread','running')
+                  )
+                 UNION
+                 SELECT dependency.id AS task_id, 'dependency_not_done' AS blocker_type
+                   FROM task_relations relation
+                   JOIN tasks dependency ON dependency.id=CASE
+                     WHEN relation.relation_type IN ('depends_on','continues_from')
+                       THEN relation.target_task_id
+                     ELSE relation.source_task_id END
+                  WHERE (((relation.relation_type IN ('depends_on','continues_from'))
+                            AND relation.source_task_id=?)
+                      OR (relation.relation_type='blocks' AND relation.target_task_id=?))
+                    AND dependency.status!='done'
+                 UNION
+                 SELECT other.id AS task_id, 'relation_conflict' AS blocker_type
+                   FROM task_relations relation
+                   JOIN tasks other ON other.id=CASE
+                     WHEN relation.source_task_id=? THEN relation.target_task_id
+                     ELSE relation.source_task_id END
+                  WHERE relation.relation_type='conflicts_with'
+                    AND (relation.source_task_id=? OR relation.target_task_id=?)
+                    AND other.status IN (
+                      'claimed','investigating','implementing','waiting_confirmation',
+                      'code_review','failed','blocked'
+                    )
+               )
+               SELECT other.id AS task_id, other.title, other.status,
                       other.paused_from_status, other.retry_required,
-                      other.last_failure_reason,
+                      other.last_failure_reason, blockers.blocker_type,
                       EXISTS(SELECT 1 FROM task_runs active
                              WHERE active.task_id=other.id
                                AND active.status IN ('awaiting_thread','running')) AS active_run
-               FROM tasks current JOIN tasks other
-                 ON other.project=current.project AND other.id != current.id
-               WHERE current.id=? AND other.status NOT IN ('done','cancelled') AND (
-                 other.status IN ('failed','blocked','waiting_confirmation')
-                 OR (other.status='paused' AND other.paused_from_status IN ('claimed','investigating','implementing','review','code_review','acceptance','acceptance_blocked','rework'))
-                 OR other.retry_required=1
-                 OR EXISTS(SELECT 1 FROM task_runs active
-                           WHERE active.task_id=other.id
-                             AND active.status IN ('awaiting_thread','running'))
-               )
-               ORDER BY other.updated_at, other.id""",
-            (task_id,),
+                 FROM blockers JOIN tasks other ON other.id=blockers.task_id
+                ORDER BY other.updated_at, other.id""",
+            (task_id, task_id, task_id, task_id, task_id, task_id),
         ).fetchall()
-        result = []
-        for row in rows:
-            item = dict(row)
-            if item["active_run"]:
-                blocker_type = "active_project_run"
-            elif item["status"] == "failed" or item["retry_required"]:
-                blocker_type = "retry_pending"
-            else:
-                blocker_type = item["status"]
-            item["blocker_type"] = blocker_type
-            result.append(item)
-        return result
+        return [dict(row) for row in rows]
 
     def report_location_status(
         self,
@@ -657,8 +849,8 @@ class TaskPlanningMixin:
         self, payload: dict[str, Any], stage: str = "creation", task_id: str | None = None,
         delivery_run_id: str | None = None,
     ) -> dict[str, Any]:
-        if stage not in {"creation", "change", "review"}:
-            raise ValueError("stage must be creation, change or review")
+        if stage not in {"creation", "change"}:
+            raise ValueError("stage must be creation or change")
         project = self._require_project_directory(payload.get("project"))
         if task_id:
             task = self.get_task(task_id)
@@ -667,18 +859,16 @@ class TaskPlanningMixin:
         modules = payload.get("modules") or []
         if not isinstance(modules, list) or any(not isinstance(item, str) for item in modules):
             raise ValueError("modules must be an array of strings")
-        if stage == "review" and not delivery_run_id:
-            raise ValueError("Review location analysis must be bound to a delivery run")
         delivery_attempt = self.get_run(delivery_run_id)["attempt"] if delivery_run_id else None
         query = " ".join(str(value) for value in [payload.get("title", ""), payload.get("goal", ""), *modules] if value).strip()
         if not query:
             raise ValueError("title, goal or modules are required for location analysis")
-        dependency_candidates = self.obsidian.search_task_dependencies(
-            str(payload.get("title") or ""), str(payload.get("goal") or ""), modules,
-        )
         obsidian = {
             "status": self.obsidian.status(),
-            "dependency_candidates": dependency_candidates,
+            # Dependency retrieval is deferred until finalization, when exact
+            # files, symbols and actions are available. This keeps intake to one
+            # project-scoped graph query instead of an early broad search.
+            "dependency_candidates": [],
         }
         plan_task = {"title": payload.get("title", ""), "goal": payload.get("goal", ""), "modules": payload.get("modules", [])}
         location_plan = {"status": self.location_status(project), "query_plan": self.location.query_plan(plan_task)}
@@ -696,13 +886,13 @@ class TaskPlanningMixin:
             )
         instruction = (
             "After one bounded location route, call finalize_task_intake once with unique targets, "
-            "ordered steps, review checks and acceptance items."
+            "target tasks, review checks and acceptance items."
             if stage == "creation" else
             "Use the first usable bounded location route in order: CodeGraph, GitNexus, then direct "
             "source matching. Report that evidence, then complete the location analysis."
         )
         return {"analysis_id": analysis_id, "stage": stage, "project": project,
-                "obsidian": {"status": obsidian["status"], "candidate_count": len(dependency_candidates)},
+                "obsidian": {"status": obsidian["status"], "candidate_count": 0},
                 "location": location_plan,
                 "instruction": instruction}
 
@@ -715,17 +905,20 @@ class TaskPlanningMixin:
         if not title or not goal or not project: raise ValueError("title, goal and project are required")
         valid = []
         ignored = []
+        history = []
         requested_modules = specific_modules(modules)
         requested_terms = (
-            _search_tokens(" ".join((title, goal, *symbols))) - GENERIC_MATCH_TERMS
+            search_tokens(" ".join((title, goal, *symbols))) - GENERIC_MATCH_TERMS
         )
         with self.db.connection() as connection:
             for item in candidates:
                 if not item.get("task_id"): continue
                 row = connection.execute("SELECT * FROM tasks WHERE id=?", (item["task_id"],)).fetchone()
                 if not row:
+                    if self._normalize_project(item.get("project")) == project:
+                        history.append(item)
                     continue
-                task = _decode_row(row)
+                task = decode_row(row)
                 item.update({
                     "title": task["title"],
                     "status": task["status"],
@@ -737,12 +930,12 @@ class TaskPlanningMixin:
                     ignored.append(item)
                     continue
                 if task["status"] in {"done", "cancelled"}:
-                    item["ignored_reason"] = "terminal_task"
-                    ignored.append(item)
+                    item["history_reason"] = "terminal_task"
+                    history.append(item)
                     continue
                 module_overlap = requested_modules & specific_modules(task.get("modules", []))
                 task_terms = (
-                    _search_tokens(
+                    search_tokens(
                         " ".join((task.get("title", ""), task.get("goal", "")))
                     )
                     - GENERIC_MATCH_TERMS
@@ -755,10 +948,48 @@ class TaskPlanningMixin:
                 item["module_overlap"] = sorted(module_overlap)
                 item["term_overlap"] = sorted(term_overlap)[:8]
                 valid.append(item)
+        history_ids = {
+            str(item.get("task_id") or "").strip()
+            for item in history if str(item.get("task_id") or "").strip()
+        }
+        history_edges: list[dict[str, str]] = []
+        for item in history:
+            for edge in item.get("history_edges") or []:
+                if not isinstance(edge, dict):
+                    continue
+                source = str(edge.get("from") or "").strip()
+                target = str(edge.get("to") or "").strip()
+                relation_type = str(edge.get("type") or "").strip()
+                normalized = {"from": source, "to": target, "type": relation_type}
+                if (
+                    source in history_ids and target in history_ids
+                    and relation_type in RELATION_TYPES and normalized not in history_edges
+                ):
+                    history_edges.append(normalized)
+        adjacency: dict[str, set[str]] = {task_id: set() for task_id in history_ids}
+        indegree = {task_id: 0 for task_id in history_ids}
+        for edge in history_edges:
+            if edge["to"] not in adjacency[edge["from"]]:
+                adjacency[edge["from"]].add(edge["to"])
+                indegree[edge["to"]] += 1
+        pending = sorted(task_id for task_id, degree in indegree.items() if degree == 0)
+        history_path: list[str] = []
+        while pending:
+            current = pending.pop(0)
+            history_path.append(current)
+            for target in sorted(adjacency[current]):
+                indegree[target] -= 1
+                if indegree[target] == 0:
+                    pending.append(target)
+                    pending.sort()
+        history_path.extend(sorted(history_ids - set(history_path)))
         return {
             "decision": "independent" if not valid else "requires_confirmation",
             "candidates": valid,
             "ignored_candidates": ignored,
+            "history_candidates": history,
+            "history_tasks": history_path,
+            "history_edges": history_edges,
             "obsidian": {"status": self.obsidian.status(), "evidence": candidates},
             "instruction": (
                 "无强匹配活动任务时直接使用 independent；"
@@ -766,17 +997,9 @@ class TaskPlanningMixin:
             ),
         }
 
-    def analyze_task_dependencies(self, payload: dict[str, Any]) -> dict[str, Any]:
-        title = str(payload.get("title") or "").strip()
-        goal = str(payload.get("goal") or "").strip()
-        modules = payload.get("modules") or []
-        symbols = payload.get("located_symbols") or []
-        candidates = self.obsidian.search_task_dependencies(title, goal, modules, symbols)
-        return self._classify_task_dependencies(payload, candidates)
-
     def finalize_task_intake(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Persist a requirement or create a ready independently executable task."""
-        intake_kind = str(payload.get("intake_kind") or "task").strip().lower()
+        intake_kind = str(payload.get("intake_kind") or "").strip().lower()
         if intake_kind not in {"requirement", "task"}:
             raise ValueError("intake_kind must be requirement or task")
         if intake_kind == "requirement":
@@ -856,14 +1079,15 @@ class TaskPlanningMixin:
 
         evidence = payload.get("location_evidence")
         targets = payload.get("targets")
-        ordered_steps = payload.get("ordered_steps")
         acceptance_plan = payload.get("acceptance_plan")
         if not isinstance(evidence, dict) or not evidence:
             raise ValueError("location_evidence is required")
         if not isinstance(targets, list) or not targets:
             raise ValueError("targets must be a non-empty array")
-        if not isinstance(ordered_steps, list) or not ordered_steps:
-            raise ValueError("ordered_steps must be a non-empty array")
+        if any(
+            not isinstance(target, dict) or not target.get("tasks") for target in targets
+        ):
+            raise ValueError("Every target requires non-empty tasks")
         if not isinstance(acceptance_plan, list) or not acceptance_plan:
             raise ValueError("acceptance_plan must be a non-empty array")
         review_checks = payload.get("review_checks")
@@ -883,57 +1107,69 @@ class TaskPlanningMixin:
             if str(symbol).strip()
         ))
         dependency_analysis = payload.get("dependency_analysis")
-        if dependency_analysis is None:
-            cached_candidates = (
-                analysis.get("obsidian_evidence", {}).get("dependency_candidates", [])
-                if isinstance(analysis.get("obsidian_evidence"), dict) else []
+        located_files = [
+            str(target.get("file") or "").strip()
+            for target in targets if isinstance(target, dict)
+            and str(target.get("file") or "").strip()
+        ]
+        actions: list[str] = []
+        for target in targets:
+            if not isinstance(target, dict):
+                continue
+            actions.extend(
+                str(item.get("action") or "").strip()
+                for item in target.get("tasks") or [] if isinstance(item, dict)
+                and str(item.get("action") or "").strip()
             )
-            dependency_result = self._classify_task_dependencies({
-                "title": payload.get("title"), "goal": payload.get("goal"),
-                "project": project, "modules": payload.get("modules") or [],
-                "located_symbols": located_symbols,
-            }, cached_candidates)
+        candidates = self.obsidian.search_task_dependencies(
+            str(payload.get("title") or ""), str(payload.get("goal") or ""),
+            payload.get("modules") or [], located_symbols,
+            project=project, located_files=located_files,
+            actions=list(dict.fromkeys(actions)),
+        )
+        dependency_result = self._classify_task_dependencies({
+            "title": payload.get("title"), "goal": payload.get("goal"),
+            "project": project, "modules": payload.get("modules") or [],
+            "located_symbols": located_symbols,
+        }, candidates)
+        if dependency_analysis is None:
             if dependency_result.get("decision") == "requires_confirmation":
                 return {
                     "status": "requires_confirmation",
                     "analysis_id": analysis_id,
                     "dependency_analysis": dependency_result,
                 }
-            dependency_analysis = {"decision": "independent"}
-        if not isinstance(dependency_analysis, dict):
-            raise ValueError("dependency_analysis must be an object")
-
-        decision = str(dependency_analysis.get("decision") or "").strip()
-        if decision not in {"independent", "depends_on", "continues_from"}:
-            raise ValueError("dependency_analysis.decision must be independent, depends_on or continues_from")
+            dependency_analysis = {
+                "decision": "independent",
+                "history_tasks": dependency_result.get("history_tasks") or [],
+                "history_edges": dependency_result.get("history_edges") or [],
+            }
+        elif isinstance(dependency_analysis, dict):
+            dependency_analysis = dict(dependency_analysis)
+            dependency_analysis.setdefault(
+                "history_tasks", dependency_result.get("history_tasks") or [],
+            )
+            dependency_analysis.setdefault(
+                "history_edges", dependency_result.get("history_edges") or [],
+            )
+        dependency_analysis = self._normalize_dependency_analysis(dependency_analysis)
         raw_relations = payload.get("relations") or []
         if not isinstance(raw_relations, list) or any(not isinstance(item, dict) for item in raw_relations):
             raise ValueError("relations must be an array of objects")
         relations = list(raw_relations)
-        if decision in {"depends_on", "continues_from"}:
-            target_task_id = str(
-                dependency_analysis.get("target_task_id")
-                or dependency_analysis.get("related_task_id") or ""
-            ).strip()
-            if not target_task_id:
-                raise ValueError("A dependent task requires dependency_analysis.target_task_id")
-            if not any(
-                isinstance(item, dict)
-                and str(item.get("relation_type") or item.get("type") or "") in {"depends_on", "continues_from"}
-                for item in relations
-            ):
-                relations.append({"target_task_id": target_task_id, "relation_type": decision})
 
         implementation_contract = {
             "targets": targets,
-            "ordered_steps": ordered_steps,
             "visual_references": self._manage_visual_references(
                 analysis_id, payload.get("visual_references")
             ),
         }
         review_contract = self._normalize_review_contract({
             "checks": review_checks,
-            "separate_acceptance_session": bool(payload.get("separate_acceptance_session", False)),
+            **(
+                {"quality_gates": payload["quality_gates"]}
+                if "quality_gates" in payload else {}
+            ),
         })
         completed = self.complete_location_analysis(
             analysis_id, evidence, targets, acceptance_plan, dependency_analysis,
@@ -957,7 +1193,6 @@ class TaskPlanningMixin:
             "implementation_contract": implementation_contract,
             "review_contract": review_contract,
             "relations": relations,
-            "workflow_version": 2,
         })
         task_payload["status"] = "ready"
         task = self.create_task(task_payload)
@@ -968,8 +1203,8 @@ class TaskPlanningMixin:
 
     def complete_location_analysis(
         self, analysis_id: str, location_evidence: dict[str, Any], targets: list[dict[str, Any]],
-        acceptance_plan: list[dict[str, Any]], dependency_analysis: dict[str, Any] | None = None,
-        implementation_contract: dict[str, Any] | None = None, review_contract: dict[str, Any] | None = None,
+        acceptance_plan: list[dict[str, Any]], dependency_analysis: dict[str, Any],
+        implementation_contract: dict[str, Any], review_contract: dict[str, Any],
     ) -> dict[str, Any]:
         analysis = self.get_location_analysis(analysis_id)
         location_status = self.location_status(analysis["project"])
@@ -982,12 +1217,16 @@ class TaskPlanningMixin:
         target_map: dict[str, set[str]] = {}
         for target in targets:
             file = self._normalize_target_file(target.get("file"))
+            mode = str(target.get("mode") or "modify").strip().lower()
+            if mode not in {"modify", "create", "delete", "config"}:
+                raise ValueError("Target mode must be modify, create, delete or config")
             symbols = target.get("symbols", [])
             if not isinstance(symbols, list) or any(not isinstance(symbol, str) for symbol in symbols):
                 raise ValueError("Target symbols must be an array of strings")
             target["file"] = file
+            target["mode"] = mode
             target["symbols"] = [symbol.strip() for symbol in symbols if symbol.strip()]
-            if not target["symbols"] and Path(file).suffix.lower() not in {".json", ".yaml", ".yml", ".toml", ".ini", ".sql", ".md", ".txt", ".css", ".scss", ".html"}:
+            if mode in {"modify", "delete"} and not target["symbols"] and Path(file).suffix.lower() not in {".json", ".yaml", ".yml", ".toml", ".ini", ".sql", ".md", ".txt", ".css", ".scss", ".html"}:
                 raise ValueError(f"Code target requires a component or method symbol: {file}")
             target.setdefault("reason", "")
             target_map.setdefault(file, set()).update(
@@ -1008,61 +1247,38 @@ class TaskPlanningMixin:
             item["check_type"] = check_type
             item["required"] = bool(item.get("required", True))
             item["timeout_seconds"] = max(1, min(int(item.get("timeout_seconds", 300)), 1800))
+            failure_category = str(item.get("failure_category") or "").strip().lower()
+            if failure_category and failure_category not in {
+                "project", "environment", "implementation",
+            }:
+                raise ValueError(
+                    "Acceptance failure_category must be project, environment or implementation"
+                )
+            if failure_category:
+                item["failure_category"] = failure_category
+            if str(item.get("repair_command") or "").strip():
+                if failure_category and failure_category != "environment":
+                    raise ValueError(
+                        "Acceptance repair_command is only allowed for environment failures"
+                    )
+                item["repair_command"] = str(item["repair_command"]).strip()
+                item["repair_timeout_seconds"] = max(
+                    1,
+                    min(
+                        int(item.get("repair_timeout_seconds", item["timeout_seconds"])),
+                        1800,
+                    ),
+                )
             if file not in target_map:
                 raise ValueError(f"Acceptance plan points outside located targets: {file}")
             if target_map[file] and (not symbol or symbol not in target_map[file]):
                 raise ValueError(f"Acceptance plan symbol is outside located targets: {file}#{symbol or '<missing>'}")
             item["file"] = file
-        if implementation_contract is not None:
-            implementation_contract = self._validate_implementation_contract(
-                implementation_contract, targets,
-            )
-        if review_contract is not None:
-            review_contract = self._normalize_review_contract(review_contract)
-        if analysis["stage"] == "review":
-            task = self.get_task(analysis["task_id"])
-            if not analysis.get("delivery_run_id"):
-                raise ValueError("Review location analysis is not bound to a delivery run")
-            delivery = self.get_run(analysis["delivery_run_id"])
-            if delivery["task_id"] != task["id"] or delivery["id"] != task.get("primary_run_id") or (
-                delivery["status"] != "waiting_review"
-                and not (delivery["run_type"] == "review" and delivery["status"] in ACTIVE_RUN_STATUSES)
-            ) or (analysis.get("delivery_attempt") is not None and analysis["delivery_attempt"] != delivery["attempt"]):
-                raise ValueError("Review location analysis delivery is no longer current")
-            delivered_targets: dict[str, set[str]] = {}
-            for location in delivery.get("changed_locations", []):
-                delivered_targets.setdefault(self._normalize_target_file(location.get("file")), set()).update(
-                    str(symbol).strip() for symbol in location.get("symbols", []) if str(symbol).strip()
-                )
-            evidence_files = {
-                self._normalize_target_file(file)
-                for file in location_evidence.get("files", [])
-                if isinstance(file, str) and file.strip()
-            }
-            for file, symbols in target_map.items():
-                if file not in delivered_targets and file not in evidence_files:
-                    raise ValueError(f"Review target is outside delivered changes and location evidence: {file}")
-                if file in delivered_targets:
-                    delivered_symbols = delivered_targets[file]
-                    if delivered_symbols and (not symbols or not symbols.issubset(delivered_symbols)):
-                        raise ValueError(f"Review symbols are outside the delivered changes: {file}")
-            if Counter(str(item.get("criterion") or "").strip() for item in acceptance_plan) != Counter(
-                str(item).strip() for item in task.get("acceptance_criteria", [])
-            ):
-                raise ValueError("Review acceptance plan must exactly match the confirmed acceptance criteria")
-            original_required_automated = {
-                (str(item.get("criterion") or "").strip(), str(item.get("command") or "").strip())
-                for item in task.get("acceptance_plan", [])
-                if bool(item.get("required", True))
-                and str(item.get("check_type") or ("automated" if item.get("command") else "static_review")) == "automated"
-            }
-            review_required_automated = {
-                (str(item.get("criterion") or "").strip(), str(item.get("command") or "").strip())
-                for item in acceptance_plan
-                if bool(item.get("required", True)) and item.get("check_type") == "automated"
-            }
-            if not original_required_automated.issubset(review_required_automated):
-                raise ValueError("Review acceptance plan cannot remove or downgrade required automated checks")
+        implementation_contract = self._validate_implementation_contract(
+            implementation_contract, targets,
+        )
+        review_contract = self._normalize_review_contract(review_contract)
+        normalized_dependency = self._normalize_dependency_analysis(dependency_analysis)
         with self.db.transaction() as connection:
             cursor = connection.execute(
                 """UPDATE location_analyses SET location_evidence=?, targets=?,
@@ -1070,9 +1286,9 @@ class TaskPlanningMixin:
                    status='completed', completed_at=CURRENT_TIMESTAMP
                    WHERE id=? AND status='prepared'""",
                 (json.dumps(location_evidence, ensure_ascii=False), json.dumps(targets, ensure_ascii=False),
-                 json.dumps(dependency_analysis or analysis.get("dependency_analysis") or {"decision": "independent"}, ensure_ascii=False),
-                 json.dumps(implementation_contract or analysis.get("implementation_contract") or {"targets": targets}, ensure_ascii=False),
-                 json.dumps(review_contract or analysis.get("review_contract") or {}, ensure_ascii=False), analysis_id),
+                 json.dumps(normalized_dependency, ensure_ascii=False),
+                 json.dumps(implementation_contract, ensure_ascii=False),
+                 json.dumps(review_contract, ensure_ascii=False), analysis_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("Location analysis is missing or already completed")

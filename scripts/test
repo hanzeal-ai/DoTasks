@@ -4,7 +4,7 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
-UV_BIN=${CODEX_TASKBOARD_UV_BIN:-}
+UV_BIN=${DOTASKS_UV_BIN:-}
 if [ -z "$UV_BIN" ]; then
   for candidate in /opt/homebrew/bin/uv /usr/local/bin/uv "$HOME/.local/bin/uv"; do
     if [ -x "$candidate" ]; then
@@ -21,7 +21,7 @@ if [ -z "$UV_BIN" ] || [ ! -x "$UV_BIN" ]; then
   exit 1
 fi
 
-NODE_BIN=${CODEX_TASKBOARD_NODE_BIN:-}
+NODE_BIN=${DOTASKS_NODE_BIN:-}
 if [ -z "$NODE_BIN" ]; then
   for candidate in /opt/homebrew/bin/node /usr/local/bin/node "$HOME"/.nvm/versions/node/*/bin/node; do
     if [ -x "$candidate" ]; then
@@ -36,9 +36,8 @@ if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
   echo "node not found; it is required by the frontend tests" >&2
   exit 1
 fi
-CODEX_TASKBOARD_NODE_BIN=$NODE_BIN
-export CODEX_TASKBOARD_NODE_BIN
-unset CODEX_TASKBOARD_HELPER_APP
+DOTASKS_NODE_BIN=$NODE_BIN
+export DOTASKS_NODE_BIN
 
 cd "$PROJECT_ROOT"
 if [ "$#" -eq 0 ]; then

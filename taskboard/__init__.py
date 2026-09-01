@@ -1,3 +1,3 @@
-"""Codex Taskboard core package."""
+"""DoTasks core package."""
 
 __version__ = "0.1.0"

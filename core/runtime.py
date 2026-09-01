@@ -44,7 +44,7 @@ def project_runtime_environment(
     project_path = Path(project).expanduser().resolve() if project else None
     directories: list[str] = []
 
-    for variable in ("CODEX_TASKBOARD_PYTHON_BIN", "CODEX_TASKBOARD_NODE_BIN"):
+    for variable in ("DOTASKS_PYTHON_BIN", "DOTASKS_NODE_BIN"):
         configured = environment.get(variable)
         if configured:
             _prepend_unique(directories, Path(configured).expanduser().parent)

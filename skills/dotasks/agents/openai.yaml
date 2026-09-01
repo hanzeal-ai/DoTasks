@@ -1,5 +1,5 @@
 interface:
-  display_name: "Codex Taskboard"
+  display_name: "DoTasks"
   short_description: "Confirm minimum task boundaries and manage delivery"
   default_prompt: "按最小实现分析当前需求，只对必须确认的边界一次性提问；我的回答足够后直接加入任务队列。"
 policy:

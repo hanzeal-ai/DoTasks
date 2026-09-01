@@ -17,7 +17,7 @@ from core.service.settings import TaskSettingsMixin
 class TaskboardServiceStructureTest(unittest.TestCase):
     def test_core_and_adapter_layers_are_separate_packages(self):
         root = Path(__file__).resolve().parents[1]
-        self.assertTrue((root / "core" / "dispatcher.py").is_file())
+        self.assertTrue((root / "core" / "service" / "native_dispatch.py").is_file())
         self.assertTrue((root / "core" / "service" / "__init__.py").is_file())
         self.assertFalse((root / "core" / "service.py").exists())
         self.assertFalse(any((root / "core").glob("service_*.py")))

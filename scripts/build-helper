@@ -3,10 +3,10 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-OUTPUT_ROOT=${CODEX_TASKBOARD_HELPER_OUTPUT_DIR:-"$PROJECT_ROOT/dist"}
-APP_NAME="Taskboard Helper.app"
+OUTPUT_ROOT=${DOTASKS_HELPER_OUTPUT_DIR:-"$PROJECT_ROOT/dist"}
+APP_NAME="DoTasks Helper.app"
 APP_PATH="$OUTPUT_ROOT/$APP_NAME"
-SIGN_IDENTITY=${CODEX_TASKBOARD_CODESIGN_IDENTITY:--}
+SIGN_IDENTITY=${DOTASKS_CODESIGN_IDENTITY:--}
 INSTALL=false
 
 if [ "${1:-}" = "--install" ]; then
@@ -17,14 +17,14 @@ elif [ "$#" -gt 0 ]; then
 fi
 
 case "$APP_PATH" in
-  */dist/"$APP_NAME"|*/TaskboardHelperBuild*/"$APP_NAME") ;;
+  */dist/"$APP_NAME"|*/DoTasksHelperBuild*/"$APP_NAME") ;;
   *)
     echo "Refusing to replace unexpected helper path: $APP_PATH" >&2
     exit 1
     ;;
 esac
 
-NPM_BIN=${CODEX_TASKBOARD_NPM_BIN:-}
+NPM_BIN=${DOTASKS_NPM_BIN:-}
 if [ -z "$NPM_BIN" ]; then
   for candidate in /opt/homebrew/bin/npm /usr/local/bin/npm "$HOME"/.nvm/versions/node/*/bin/npm; do
     if [ -x "$candidate" ]; then
@@ -53,7 +53,7 @@ if [ -z "$SWIFTC_BIN" ] || [ ! -x "$SWIFTC_BIN" ]; then
   exit 1
 fi
 
-UV_BIN=${CODEX_TASKBOARD_UV_BIN:-}
+UV_BIN=${DOTASKS_UV_BIN:-}
 if [ -z "$UV_BIN" ]; then
   for candidate in /opt/homebrew/bin/uv /usr/local/bin/uv "$HOME/.local/bin/uv"; do
     if [ -x "$candidate" ]; then
@@ -82,17 +82,15 @@ fi
   "$APP_PATH/Contents/Resources/runtime/static" \
   "$APP_PATH/Contents/Resources/runtime/vendor"
 /bin/cp "$PROJECT_ROOT/macos/HelperInfo.plist" "$APP_PATH/Contents/Info.plist"
-/usr/bin/plutil -insert TaskboardBootstrapProject -string "$PROJECT_ROOT" "$APP_PATH/Contents/Info.plist"
 "$SWIFTC_BIN" \
   -parse-as-library \
   -framework AppKit \
-  -o "$APP_PATH/Contents/MacOS/TaskboardHelper" \
-  "$PROJECT_ROOT/macos/TaskboardHelper.swift"
+  -o "$APP_PATH/Contents/MacOS/DoTasksHelper" \
+  "$PROJECT_ROOT/macos/DoTasksHelper.swift"
 /bin/cp -R "$PROJECT_ROOT"/core/* "$APP_PATH/Contents/Resources/runtime/core/"
 /bin/cp -R "$PROJECT_ROOT"/taskboard/* "$APP_PATH/Contents/Resources/runtime/taskboard/"
 /bin/cp "$PROJECT_ROOT/scripts/start" "$APP_PATH/Contents/Resources/runtime/scripts/start"
 /bin/cp "$PROJECT_ROOT/scripts/mcp-server" "$APP_PATH/Contents/Resources/runtime/scripts/mcp-server"
-/bin/cp "$PROJECT_ROOT/scripts/token-regression" "$APP_PATH/Contents/Resources/runtime/scripts/token-regression"
 /bin/cp -R "$PROJECT_ROOT"/skills/* "$APP_PATH/Contents/Resources/runtime/skills/"
 /bin/cp -R "$PROJECT_ROOT"/static/* "$APP_PATH/Contents/Resources/runtime/static/"
 "$UV_BIN" pip install \
@@ -104,10 +102,9 @@ fi
   --no-deps \
   -r "$PROJECT_ROOT/requirements.lock"
 /bin/chmod 755 \
-  "$APP_PATH/Contents/MacOS/TaskboardHelper" \
+  "$APP_PATH/Contents/MacOS/DoTasksHelper" \
   "$APP_PATH/Contents/Resources/runtime/scripts/start" \
-  "$APP_PATH/Contents/Resources/runtime/scripts/mcp-server" \
-  "$APP_PATH/Contents/Resources/runtime/scripts/token-regression"
+  "$APP_PATH/Contents/Resources/runtime/scripts/mcp-server"
 /usr/bin/find "$APP_PATH" -type d -name __pycache__ -prune -exec /bin/rm -rf {} +
 /usr/bin/codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" "$APP_PATH" >/dev/null
 /usr/bin/codesign --verify --deep --strict "$APP_PATH"
@@ -115,13 +112,18 @@ fi
 echo "Built: $APP_PATH"
 
 if [ "$INSTALL" = true ]; then
-  DATA_HOME=${CODEX_TASKBOARD_HOME:-"$HOME/Library/Application Support/Codex Taskboard"}
+  PREFERRED_DATA_HOME="$HOME/Library/Application Support/DoTasks"
+  if [ -n "${DOTASKS_HOME:-}" ]; then
+    DATA_HOME=$DOTASKS_HOME
+  else
+    DATA_HOME=$PREFERRED_DATA_HOME
+  fi
   INSTALL_PATH="$DATA_HOME/$APP_NAME"
-  HELPER_LABEL="local.sanmws.codex-taskboard-helper"
+  HELPER_LABEL="local.sanmws.dotasks-helper"
   LAUNCH_AGENT="$HOME/Library/LaunchAgents/$HELPER_LABEL.plist"
   /bin/mkdir -p "$DATA_HOME"
   case "$INSTALL_PATH" in
-    "$HOME"/Library/Application\ Support/Codex\ Taskboard/"$APP_NAME") ;;
+    "$DATA_HOME/$APP_NAME") ;;
     *)
       echo "Refusing to replace unexpected helper install path: $INSTALL_PATH" >&2
       exit 1
@@ -129,18 +131,37 @@ if [ "$INSTALL" = true ]; then
   esac
 
   SERVICE_DOMAIN="gui/$(/usr/bin/id -u)"
-  SERVICE_LABEL="com.codex-taskboard.server"
+  SERVICE_LABEL="com.dotasks.server"
+  if [ -x "$INSTALL_PATH/Contents/MacOS/DoTasksHelper" ]; then
+    /usr/bin/open -g "dotasks-helper://quit" >/dev/null 2>&1 || true
+    /bin/sleep 1
+  fi
   if /bin/launchctl print "$SERVICE_DOMAIN/$SERVICE_LABEL" >/dev/null 2>&1; then
     /bin/launchctl bootout "$SERVICE_DOMAIN/$SERVICE_LABEL"
   fi
   if /bin/launchctl print "$SERVICE_DOMAIN/$HELPER_LABEL" >/dev/null 2>&1; then
     /bin/launchctl bootout "$SERVICE_DOMAIN/$HELPER_LABEL"
   fi
-
-  if [ -x "$INSTALL_PATH/Contents/MacOS/TaskboardHelper" ]; then
-    /usr/bin/open -g "codex-taskboard-helper://quit" >/dev/null 2>&1 || true
-    /bin/sleep 1
-  fi
+  listener_pids=$(/usr/sbin/lsof -nP -t -iTCP:8765 -sTCP:LISTEN 2>/dev/null || true)
+  for listener_pid in $listener_pids; do
+    listener_command=$(/bin/ps -p "$listener_pid" -o command= 2>/dev/null || true)
+    case "$listener_command" in
+      *" -m taskboard.server"*) /bin/kill -TERM "$listener_pid" ;;
+      *)
+        echo "Refusing to stop non-DoTasks listener on port 8765: $listener_pid $listener_command" >&2
+        exit 1
+        ;;
+    esac
+  done
+  wait_attempt=0
+  while /usr/sbin/lsof -nP -t -iTCP:8765 -sTCP:LISTEN >/dev/null 2>&1; do
+    wait_attempt=$((wait_attempt + 1))
+    if [ "$wait_attempt" -ge 20 ]; then
+      echo "DoTasks server did not release port 8765" >&2
+      exit 1
+    fi
+    /bin/sleep 0.25
+  done
   /bin/rm -rf "$INSTALL_PATH"
   /usr/bin/ditto "$APP_PATH" "$INSTALL_PATH"
   /usr/bin/codesign --verify --deep --strict "$INSTALL_PATH"
@@ -154,7 +175,7 @@ if [ "$INSTALL" = true ]; then
   /usr/bin/plutil -create xml1 "$TEMP_AGENT"
   /usr/libexec/PlistBuddy -c "Add :Label string $HELPER_LABEL" "$TEMP_AGENT"
   /usr/libexec/PlistBuddy -c "Add :ProgramArguments array" "$TEMP_AGENT"
-  /usr/libexec/PlistBuddy -c "Add :ProgramArguments:0 string $INSTALL_PATH/Contents/MacOS/TaskboardHelper" "$TEMP_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :ProgramArguments:0 string $INSTALL_PATH/Contents/MacOS/DoTasksHelper" "$TEMP_AGENT"
   /usr/libexec/PlistBuddy -c "Add :RunAtLoad bool true" "$TEMP_AGENT"
   /usr/libexec/PlistBuddy -c "Add :KeepAlive bool true" "$TEMP_AGENT"
   /usr/libexec/PlistBuddy -c "Add :ProcessType string Interactive" "$TEMP_AGENT"

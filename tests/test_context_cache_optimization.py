@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from taskboard.mcp_server import handle
-from core.run_context import LIFECYCLE_TOOL_NAMES, TOOL_PROFILES, model_run_context
+from core.run_context import LIFECYCLE_TOOL_NAMES, model_run_context
 from core.service import TaskboardService
 
 
@@ -32,16 +32,16 @@ class ContextCacheOptimizationTest(unittest.TestCase):
         )
         subprocess.run(["git", "-C", str(self.project), "add", "."], check=True)
         subprocess.run(["git", "-C", str(self.project), "commit", "-qm", "initial"], check=True)
-        self.previous_vault = os.environ.get("CODEX_TASKBOARD_OBSIDIAN_VAULT")
-        os.environ["CODEX_TASKBOARD_OBSIDIAN_VAULT"] = str(Path(self.temp.name) / "vault")
+        self.previous_vault = os.environ.get("DOTASKS_OBSIDIAN_VAULT")
+        os.environ["DOTASKS_OBSIDIAN_VAULT"] = str(Path(self.temp.name) / "vault")
         self.service = TaskboardService(self.temp.name)
         self.service.set_dispatcher_enabled(True)
 
     def tearDown(self) -> None:
         if self.previous_vault is None:
-            os.environ.pop("CODEX_TASKBOARD_OBSIDIAN_VAULT", None)
+            os.environ.pop("DOTASKS_OBSIDIAN_VAULT", None)
         else:
-            os.environ["CODEX_TASKBOARD_OBSIDIAN_VAULT"] = self.previous_vault
+            os.environ["DOTASKS_OBSIDIAN_VAULT"] = self.previous_vault
         self.temp.cleanup()
 
     def create_task(
@@ -51,15 +51,14 @@ class ContextCacheOptimizationTest(unittest.TestCase):
         project = str(self.project)
         target = {"file": "src/APage.tsx", "symbols": ["APage"]}
         implementation_contract = {
-            "targets": [target],
-            "ordered_steps": [{
-                "file": "src/APage.tsx", "symbol": "APage",
+            "targets": [{**target, "mode": "modify", "tasks": [{
+                "symbol": "APage",
                 "action": "将智慧幼儿园替换为快乐智慧园" if mechanical else "修改组件",
-            }],
+            }]}],
         }
         review_contract = {
-            "checks": ["遵守项目规范"],
-            "separate_acceptance_session": separate_acceptance_session,
+            "checks": [{"id": "project-rules", "description": "遵守项目规范", "kind": "code"}],
+            "quality_gates": {"code_review": {"required": True, "reason": "code change"}},
         }
         acceptance_plan = [{
             "criterion": "功能可用",
@@ -106,14 +105,13 @@ class ContextCacheOptimizationTest(unittest.TestCase):
             "implementation_contract": implementation_contract,
             "review_contract": review_contract,
             "status": "ready",
-            "workflow_version": 2,
         })
 
-    def test_execution_context_groups_duplicate_acceptance_commands(self) -> None:
+    def test_execution_context_groups_duplicate_verification_checks(self) -> None:
         self.create_task(duplicate_acceptance_command=True)
         claim = self.service.claim_next_task("worker")
 
-        groups = claim["run"]["context_snapshot"]["acceptance_commands"]
+        groups = claim["run"]["context_snapshot"]["verify"]
         self.assertEqual(1, len(groups))
         self.assertEqual("automated", groups[0]["check_type"])
         self.assertEqual("test -f src/APage.tsx", groups[0]["command"])
@@ -123,26 +121,23 @@ class ContextCacheOptimizationTest(unittest.TestCase):
         )
         self.assertEqual(1, claim["dispatch_prompt"].count("test -f src/APage.tsx"))
 
-    def test_model_context_compacts_legacy_flat_acceptance_commands(self) -> None:
+    def test_model_context_preserves_canonical_verify_groups(self) -> None:
         command = "test -f src/APage.tsx"
         context = model_run_context({
             "stage": "execution",
-            "acceptance_commands": [
-                {
-                    "criterion": "功能可用", "expected": "目标文件存在",
-                    "check_type": "automated", "command": command,
-                },
-                {
-                    "criterion": "页面状态正确", "expected": "页面状态正确",
-                    "check_type": "automated", "command": command,
-                },
-            ],
+            "verify": [{
+                "check_type": "automated", "command": command,
+                "criteria": [
+                    {"criterion": "功能可用", "expected": "目标文件存在"},
+                    {"criterion": "页面状态正确", "expected": "页面状态正确"},
+                ],
+            }],
         })
 
-        self.assertEqual(1, len(context["acceptance_commands"]))
+        self.assertEqual(1, len(context["verify"]))
         self.assertEqual(
             ["功能可用", "页面状态正确"],
-            [item["criterion"] for item in context["acceptance_commands"][0]["criteria"]],
+            [item["criterion"] for item in context["verify"][0]["criteria"]],
         )
 
     def claim_and_deliver(self, task: dict) -> dict:
@@ -166,7 +161,7 @@ class ContextCacheOptimizationTest(unittest.TestCase):
         self.assertIn("RUN_CONTEXT_JSON=", claim["dispatch_prompt"])
         self.assertIn("submit_task_delivery", claim["dispatch_prompt"])
         self.assertIn("cache_metadata", claim["run"]["context_snapshot"])
-        self.assertEqual("implementing", claim["task"]["status"])
+        self.assertEqual("claimed", claim["task"]["status"])
         self.assertEqual("low", claim["run"]["context_snapshot"]["execution_profile"]["risk"])
         for excluded in (
             "location_evidence", "dependency_analysis", "review_contract", "conversation_summaries",
@@ -180,6 +175,20 @@ class ContextCacheOptimizationTest(unittest.TestCase):
             hashlib.sha256((self.project / "src" / "APage.tsx").read_bytes()).hexdigest(),
             snippet["sha256"],
         )
+        model_context = model_run_context(claim["run"]["context_snapshot"])
+        self.assertEqual({"id", "title", "goal"}, set(model_context["task"]))
+        self.assertEqual("src/APage.tsx", model_context["targets"][0]["file"])
+        self.assertEqual("modify", model_context["targets"][0]["mode"])
+        self.assertEqual(
+            "将智慧幼儿园替换为快乐智慧园",
+            model_context["targets"][0]["tasks"][0]["action"],
+        )
+        self.assertIn("verify", model_context)
+        for excluded in (
+            "located_targets", "implementation_steps", "acceptance_commands",
+            "target_snippet", "dependency_analysis", "direct_relations",
+        ):
+            self.assertNotIn(excluded, model_context)
         original_build_context = self.service.build_context
         self.service.build_context = lambda *_args, **_kwargs: self.fail("cache hit rebuilt context")
         try:
@@ -198,97 +207,6 @@ class ContextCacheOptimizationTest(unittest.TestCase):
             ["report_run_blocked", "submit_task_delivery"],
             persisted["tool_contract"]["allowed_completion_tools"],
         )
-
-    def test_delivery_artifact_checks_and_verifier_thread_are_reused(self) -> None:
-        task = self.create_task()
-        delivery = self.claim_and_deliver(task)
-        artifact = delivery["run"]["artifact_snapshot"]
-        self.assertTrue(artifact["diff"]["available"])
-        self.assertIn("// delivery", artifact["diff"]["content"])
-        self.assertEqual(64, len(artifact["diff"]["sha256"]))
-
-        review = self.service.claim_next_code_review_task("reviewer")
-        review_context = review["run"]["context_snapshot"]
-        self.assertNotIn("diff", review_context["delivery"])
-        self.assertEqual(
-            artifact["diff"]["base_revision"],
-            review_context["diff_scope"]["base_revision"],
-        )
-        self.assertEqual(["src/APage.tsx"], review_context["diff_scope"]["changed_files"])
-        self.assertIn("git diff", review["dispatch_prompt"])
-        self.assertEqual(
-            [{"id": "遵守项目规范", "description": "遵守项目规范", "kind": "static"}],
-            review_context["review_checks"],
-        )
-        for excluded in (
-            "location_evidence", "direct_relations", "conversation_summaries",
-            "dependency_analysis", "delivery_artifact",
-        ):
-            self.assertNotIn(excluded, review_context)
-        self.service.bind_conversation(task["id"], "code_review", "verifier-thread", review["run"]["id"])
-        self.service.review_code(
-            task["id"], review["run"]["id"], "pass", passed_items=["遵守项目规范"],
-        )
-        acceptance = self.service.claim_next_acceptance_task("acceptance")
-        self.assertEqual("verifier-thread", acceptance["resume_thread_id"])
-        acceptance_context = acceptance["run"]["context_snapshot"]
-        self.assertIn("acceptance", acceptance_context)
-        self.assertNotIn("diff", acceptance_context["delivery"])
-        self.assertNotIn("implementation", acceptance_context)
-        self.service.bind_conversation(
-            task["id"], "acceptance", "verifier-thread", acceptance["run"]["id"],
-        )
-
-        first = self.service.run_acceptance_checks(task["id"], acceptance["run"]["id"])
-        second = self.service.run_acceptance_checks(task["id"], acceptance["run"]["id"])
-        forced = self.service.run_acceptance_checks(task["id"], acceptance["run"]["id"], force=True)
-        self.assertEqual(0, first["cache_hits"])
-        self.assertEqual(1, second["cache_hits"])
-        self.assertEqual(1, second["checks"][0]["cache_hit"])
-        self.assertEqual(0, forced["cache_hits"])
-        screenshot = self.project / "acceptance-proof.png"
-        screenshot.write_bytes(b"acceptance-proof")
-        self.service.accept_task(
-            task["id"],
-            acceptance["run"]["id"],
-            "pass",
-            reasons=["聚焦检查和页面证据均通过"],
-            passed_criteria=["功能可用"],
-            failed_criteria=[],
-            criterion_results=[{
-                "criterion": "功能可用",
-                "status": "passed",
-                "evidence": "聚焦检查通过，截图已留存",
-                "artifact_refs": [str(screenshot)],
-            }],
-        )
-        result = self.service.list_acceptance_results(task["id"])[-1]
-        artifact_id = result["criterion_results"][0]["artifact_refs"][0]
-        self.assertTrue(artifact_id.startswith("artifact://acceptance/"))
-        managed_path = self.service.data_home / "artifacts" / artifact_id.removeprefix("artifact://")
-        self.assertTrue(managed_path.is_file())
-
-    def test_high_risk_contract_keeps_acceptance_in_a_separate_session(self) -> None:
-        task = self.create_task(separate_acceptance_session=True)
-        claim = self.service.claim_next_task("worker")
-        self.assertEqual("standard", claim["run"]["context_snapshot"]["execution_profile"]["risk"])
-        self.assertNotIn("target_snippet", claim["run"]["context_snapshot"])
-        self.service.bind_conversation(task["id"], "execution", "development-thread", claim["run"]["id"])
-        target = self.project / "src" / "APage.tsx"
-        target.write_text(target.read_text(encoding="utf-8") + "// delivery\n", encoding="utf-8")
-        self.service.submit_delivery(
-            claim["run"]["id"], "完成", "聚焦检查通过",
-            [{"file": "src/APage.tsx", "symbols": ["APage"]}],
-            [{"criterion": "功能可用", "evidence": "聚焦检查通过"}],
-        )
-        review = self.service.claim_next_code_review_task("reviewer")
-        self.service.bind_conversation(task["id"], "code_review", "review-thread", review["run"]["id"])
-        self.service.review_code(
-            task["id"], review["run"]["id"], "pass", passed_items=["遵守项目规范"],
-        )
-
-        acceptance = self.service.claim_next_acceptance_task("acceptance")
-        self.assertEqual("", acceptance["resume_thread_id"])
 
     def test_token_breakdown_remains_monotonic_and_is_reported_by_stage(self) -> None:
         task = self.create_task()
@@ -316,28 +234,6 @@ class ContextCacheOptimizationTest(unittest.TestCase):
         self.assertEqual(250, board_task["token_by_stage"]["execution"]["output_tokens"])
         self.assertEqual(520, board_task["token_by_stage"]["execution"]["effective_token_used"])
 
-    def test_lifecycle_profile_exposes_only_cached_run_tools(self) -> None:
-        with patch.dict(os.environ, {"CODEX_TASKBOARD_TOOL_PROFILE": "lifecycle"}):
-            response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-            names = {item["name"] for item in response["result"]["tools"]}
-            rejected = handle({
-                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                "params": {"name": "list_board", "arguments": {}},
-            })
-
-        self.assertEqual(set(LIFECYCLE_TOOL_NAMES), names)
-        self.assertTrue(rejected["result"]["isError"])
-        self.assertIn("unavailable in lifecycle profile", rejected["result"]["content"][0]["text"])
-
-    def test_stage_profiles_expose_only_the_current_stage_tools(self) -> None:
-        for profile in ("execution", "verifier", "code_review", "acceptance", "legacy_review"):
-            with self.subTest(profile=profile), patch.dict(
-                os.environ, {"CODEX_TASKBOARD_TOOL_PROFILE": profile}, clear=False,
-            ):
-                response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-                names = {item["name"] for item in response["result"]["tools"]}
-                self.assertEqual(set(TOOL_PROFILES[profile]), names)
-
     def test_execution_worker_has_a_bounded_blocking_exit(self) -> None:
         task = self.create_task()
         run = self.service.claim_next_task("worker")["run"]
@@ -350,29 +246,6 @@ class ContextCacheOptimizationTest(unittest.TestCase):
         self.assertEqual("interrupted", self.service.get_run(run["id"])["status"])
         with self.assertRaisesRegex(ValueError, "status must be"):
             self.service.report_run_blocked(task["id"], run["id"], "done", "invalid")
-
-    def test_fully_automated_acceptance_completes_without_a_conversation(self) -> None:
-        task = self.create_task()
-        self.claim_and_deliver(task)
-        review = self.service.claim_next_code_review_task("reviewer")
-        self.service.bind_conversation(task["id"], "code_review", "verifier-thread", review["run"]["id"])
-        self.service.review_code(
-            task["id"], review["run"]["id"], "pass", passed_items=["遵守项目规范"],
-        )
-        acceptance = self.service.claim_next_acceptance_task("acceptance")
-
-        result = self.service.auto_accept_automated_task(task["id"], acceptance["run"]["id"])
-
-        self.assertTrue(result["eligible"])
-        self.assertTrue(result["completed"])
-        self.assertEqual("done", result["task"]["status"])
-        self.assertEqual("completed", self.service.get_run(acceptance["run"]["id"])["status"])
-        self.assertFalse(self.service.get_run(acceptance["run"]["id"]).get("conversation_thread_id"))
-        verifier = next(
-            item for item in self.service.list_conversations(task["id"])
-            if item["thread_id"] == "verifier-thread"
-        )
-        self.assertEqual("completed", verifier["status"])
 
     def test_delivery_reuses_one_workspace_snapshot(self) -> None:
         task = self.create_task()

@@ -4,8 +4,8 @@ import json
 import uuid
 from typing import Any
 
-from ..run_context import compact_acceptance_commands
-from .domain import _decode_row
+from ..run_context import group_verification_checks
+from .domain import decode_row
 
 
 def _review_check_label(check: Any) -> str:
@@ -30,6 +30,9 @@ class TaskBatchMixin:
         run_id: str,
         run_type: str,
     ) -> str:
+        if not self._quality_gate_required(task, "code_review"):
+            # Tasks that skip the only independent review gate complete in development.
+            return ""
         existing = connection.execute(
             """SELECT batch.* FROM execution_batches batch
                JOIN execution_batch_tasks member ON member.batch_id=batch.id
@@ -77,8 +80,17 @@ class TaskBatchMixin:
         return batch_id
 
     def _try_join_open_batch(self, connection: Any, task_id: str) -> str:
+        # Parallel development owns one isolated worktree per task. Appending a
+        # second task into the owner's conversation would collapse that isolation.
+        if self.parallel_development_enabled():
+            return ""
         task = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if not task or task["status"] != "ready" or not task["project"]:
+        if (
+            not task
+            or task["status"] != "ready"
+            or not task["project"]
+            or not int(task["auto_dispatch"])
+        ):
             return ""
         try:
             dependency = json.loads(task["dependency_analysis"] or "{}")
@@ -86,9 +98,9 @@ class TaskBatchMixin:
         except (TypeError, json.JSONDecodeError):
             return ""
         if (
-            int(task["workflow_version"] or 1) < 2
-            or str(dependency.get("decision") or "") != "independent"
-            or bool(review.get("separate_acceptance_session", False))
+            str(dependency.get("decision") or "") != "independent"
+            or bool(dependency.get("conflicts_tasks"))
+            or not self._quality_gate_required({"review_contract": review}, "code_review")
         ):
             return ""
         batch = connection.execute(
@@ -98,7 +110,6 @@ class TaskBatchMixin:
                WHERE batch.project=? AND batch.admission_open=1
                  AND batch.state IN ('development','regrouping')
                  AND batch.appended_count < batch.max_appended_tasks
-                 AND COALESCE(json_extract(owner.review_contract, '$.separate_acceptance_session'), 0)=0
                  AND (
                    (batch.state='development' AND active.status IN ('awaiting_thread','running'))
                    OR (batch.state='regrouping' AND owner.status='rework')
@@ -182,7 +193,7 @@ class TaskBatchMixin:
                WHERE member.batch_id=? ORDER BY member.join_order""",
             (batch_id,),
         ).fetchall()
-        return [_decode_row(row) for row in rows]
+        return [decode_row(row) for row in rows]
 
     @staticmethod
     def _attach_batch_run(
@@ -222,7 +233,13 @@ class TaskBatchMixin:
             file = str(target.get("file") or "").strip()
             if not file:
                 continue
-            current = merged.setdefault(file, {"file": file, "symbols": [], "reasons": []})
+            current = merged.setdefault(file, {
+                "file": file,
+                "mode": str(target.get("mode") or "modify"),
+                "symbols": [],
+                "reasons": [],
+                "tasks": [],
+            })
             for symbol in target.get("symbols") or []:
                 value = str(symbol).strip()
                 if value and value not in current["symbols"]:
@@ -230,6 +247,9 @@ class TaskBatchMixin:
             reason = str(target.get("reason") or "").strip()
             if reason and reason not in current["reasons"]:
                 current["reasons"].append(reason)
+            for task in target.get("tasks") or []:
+                if isinstance(task, dict) and task not in current["tasks"]:
+                    current["tasks"].append(dict(task))
         return list(merged.values())
 
     def _batch_metadata(self, batch: dict[str, Any]) -> dict[str, Any]:
@@ -251,7 +271,6 @@ class TaskBatchMixin:
             return context
         tasks = self._batch_member_tasks(batch_id)
         targets: list[dict[str, Any]] = []
-        steps: list[dict[str, Any]] = []
         plans: list[dict[str, Any]] = []
         task_contexts = []
         for task in tasks:
@@ -261,8 +280,6 @@ class TaskBatchMixin:
                 if task.get(key) not in (None, "", [], {})
             })
             targets.extend((task.get("location_context") or {}).get("targets") or [])
-            for step in (task.get("implementation_contract") or {}).get("ordered_steps") or []:
-                steps.append({**step, "task_id": task["id"]})
             for item in task.get("acceptance_plan") or []:
                 plans.append({
                     **item,
@@ -272,9 +289,8 @@ class TaskBatchMixin:
         return {
             "batch": self._batch_metadata(batch),
             "tasks": task_contexts,
-            "located_targets": self._merge_targets(targets),
-            "implementation_steps": steps,
-            "acceptance_commands": compact_acceptance_commands(plans),
+            "targets": self._merge_targets(targets),
+            "verify": group_verification_checks(plans),
         }
 
     def _merge_batch_code_review_context(
@@ -285,8 +301,9 @@ class TaskBatchMixin:
             return context, list(context.get("review_checks") or [])
         tasks = self._batch_member_tasks(batch_id)
         targets: list[dict[str, Any]] = []
-        steps: list[dict[str, Any]] = []
         checks: list[str] = []
+        acceptance: list[dict[str, Any]] = []
+        acceptance_criteria: list[str] = []
         task_contexts = []
         for task in tasks:
             task_contexts.append({
@@ -296,57 +313,45 @@ class TaskBatchMixin:
             })
             implementation = task.get("implementation_contract") or {}
             targets.extend(implementation.get("targets") or [])
-            steps.extend({**step, "task_id": task["id"]} for step in implementation.get("ordered_steps") or [])
             checks.extend(
                 batch_item_label(task["id"], _review_check_label(item))
                 for item in (task.get("review_contract") or {}).get("checks") or []
                 if _review_check_label(item)
             )
+            task_acceptance_labels: list[str] = []
+            for item in task.get("acceptance_plan") or []:
+                label = batch_item_label(task["id"], item.get("criterion") or "")
+                task_acceptance_labels.append(label)
+                acceptance_criteria.append(label)
+                acceptance.append({**item, "task_id": task["id"], "criterion": label})
+            checks.extend(task_acceptance_labels)
+        checks = list(dict.fromkeys(checks))
         return ({
             **context,
             "batch": self._batch_metadata(batch),
             "tasks": task_contexts,
-            "implementation": {"targets": self._merge_targets(targets), "steps": steps},
+            "implementation": {"targets": self._merge_targets(targets)},
             "review_checks": checks,
-        }, checks)
-
-    def _merge_batch_acceptance_context(
-        self, context: dict[str, Any], batch_id: str
-    ) -> dict[str, Any]:
-        batch = self._batch_for_task(self._batch_member_tasks(batch_id)[0]["id"])
-        if not batch:
-            return context
-        tasks = self._batch_member_tasks(batch_id)
-        acceptance = []
-        criteria = []
-        task_contexts = []
-        for task in tasks:
-            task_contexts.append({
-                key: task.get(key)
-                for key in ("id", "title", "goal", "scope", "out_of_scope")
-                if task.get(key) not in (None, "", [], {})
-            })
-            for item in task.get("acceptance_plan") or []:
-                label = batch_item_label(task["id"], item.get("criterion") or "")
-                criteria.append(label)
-                acceptance.append({**item, "task_id": task["id"], "criterion": label})
-        return {
-            "batch": self._batch_metadata(batch),
-            "tasks": task_contexts,
-            "acceptance_criteria": criteria,
+            "acceptance_criteria": acceptance_criteria,
             "acceptance": acceptance,
-        }
+        }, checks)
 
     def _batch_review_items(self, task_id: str) -> list[str]:
         batch = self._batch_for_task(task_id)
         if not batch:
             return []
-        return [
-            batch_item_label(task["id"], _review_check_label(check))
+        return list(dict.fromkeys([
+            batch_item_label(task["id"], item)
             for task in self._batch_member_tasks(batch["id"])
-            for check in (task.get("review_contract") or {}).get("checks") or []
-            if _review_check_label(check)
-        ]
+            for item in [
+                *[
+                    _review_check_label(check)
+                    for check in (task.get("review_contract") or {}).get("checks") or []
+                    if _review_check_label(check)
+                ],
+                *[str(value).strip() for value in task.get("acceptance_criteria") or [] if str(value).strip()],
+            ]
+        ]))
 
     def _batch_acceptance_items(self, task_id: str) -> list[str]:
         batch = self._batch_for_task(task_id)
@@ -439,9 +444,10 @@ class TaskBatchMixin:
         reasons: list[str],
         passed_items: list[str],
         failed_criteria: list[str],
-    ) -> None:
-        next_status = "rework" if verdict == "fail" else "acceptance"
-        batch_state = "regrouping" if verdict == "fail" else "acceptance"
+    ) -> list[str]:
+        next_status = "rework" if verdict == "fail" else "done"
+        batch_state = "regrouping" if verdict == "fail" else "done"
+        completed_task_ids: list[str] = []
         for task in self._batch_member_tasks_in(connection, batch["id"]):
             if task["id"] == owner_task_id:
                 continue
@@ -485,79 +491,12 @@ class TaskBatchMixin:
                 connection, "task", task["id"], "code_reviewed",
                 {"verdict": verdict, "reasons": reasons, "batch_id": batch["id"]},
             )
+            if verdict == "pass":
+                completed_task_ids.append(task["id"])
         connection.execute(
             """UPDATE execution_batches SET state=?, admission_open=?, owner_run_id=NULL,
                active_turn_id='', updated_at=CURRENT_TIMESTAMP WHERE id=?""",
             (batch_state, int(verdict == "fail"), batch["id"]),
-        )
-
-    def _propagate_batch_acceptance(
-        self,
-        connection: Any,
-        batch: dict[str, Any],
-        owner_task_id: str,
-        run_id: str,
-        verdict: str,
-        reasons: list[str],
-        passed_criteria: list[str],
-        failed_criteria: list[str],
-        failure_locations: list[dict[str, Any]],
-        created_bug_task_id: str | None,
-        criterion_results: list[dict[str, Any]],
-    ) -> list[str]:
-        completed_task_ids: list[str] = []
-        for task in self._batch_member_tasks_in(connection, batch["id"]):
-            if task["id"] == owner_task_id:
-                continue
-            prefix = f"[{task['id']}] "
-            task_passed = [item[len(prefix):] for item in passed_criteria if item.startswith(prefix)]
-            task_failed = [item[len(prefix):] for item in failed_criteria if item.startswith(prefix)]
-            task_results = [
-                {**item, "criterion": str(item.get("criterion") or "")[len(prefix):]}
-                for item in criterion_results
-                if str(item.get("criterion") or "").startswith(prefix)
-            ]
-            round_no = connection.execute(
-                "SELECT COALESCE(MAX(round),0)+1 value FROM acceptance_results WHERE task_id=?",
-                (task["id"],),
-            ).fetchone()["value"]
-            connection.execute(
-                """INSERT INTO acceptance_results(
-                       task_id,run_id,delivery_run_id,round,verdict,reasons,
-                       passed_criteria,failed_criteria,failure_locations,
-                       created_bug_task_id,criterion_results
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    task["id"], run_id, task.get("primary_run_id"), round_no, verdict,
-                    json.dumps(reasons, ensure_ascii=False),
-                    json.dumps(task_passed, ensure_ascii=False),
-                    json.dumps(task_failed, ensure_ascii=False),
-                    json.dumps(failure_locations, ensure_ascii=False),
-                    created_bug_task_id,
-                    json.dumps(task_results, ensure_ascii=False),
-                ),
-            )
-            next_status = "done" if verdict == "pass" else "acceptance_blocked"
-            connection.execute(
-                """UPDATE tasks SET status=?, active_run_id=NULL, assigned_to=NULL,
-                   last_failure_reason=? WHERE id=?""",
-                (
-                    next_status,
-                    "" if verdict == "pass" else ("；".join(reasons) or "验收失败"),
-                    task["id"],
-                ),
-            )
-            self._event(
-                connection, "task", task["id"], "acceptance_completed",
-                {"verdict": verdict, "batch_id": batch["id"], "created_bug_task_id": created_bug_task_id},
-            )
-            self._queue_obsidian_sync(connection, "task", task["id"])
-            if verdict == "pass":
-                completed_task_ids.append(task["id"])
-        connection.execute(
-            """UPDATE execution_batches SET state=?, admission_open=0,
-               owner_run_id=NULL, active_turn_id='', updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-            ("done" if verdict == "pass" else "acceptance_failed", batch["id"]),
         )
         return completed_task_ids
 
@@ -598,12 +537,16 @@ class TaskBatchMixin:
                 "batch_revision": int(item["revision"]),
                 "task": {
                     key: task.get(key)
-                    for key in ("id", "title", "goal", "scope", "out_of_scope")
+                    for key in ("id", "title", "goal")
                     if task.get(key) not in (None, "", [], {})
                 },
-                "located_targets": (task.get("location_context") or {}).get("targets") or [],
-                "implementation_steps": (task.get("implementation_contract") or {}).get("ordered_steps") or [],
-                "acceptance_plan": task.get("acceptance_plan") or [],
+                "constraints": {
+                    key: task.get(key)
+                    for key in ("scope", "out_of_scope")
+                    if task.get(key) not in (None, "", [], {})
+                },
+                "targets": (task.get("implementation_contract") or {}).get("targets") or [],
+                "verify": group_verification_checks(task.get("acceptance_plan") or []),
             }
             result.append(item)
         return result

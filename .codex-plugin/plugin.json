@@ -1,7 +1,7 @@
 {
-  "name": "codex-taskboard",
-  "version": "0.1.0+codex.20260827084905",
-  "description": "Confirm minimum task boundaries and orchestrate traceable, token-aware multi-conversation delivery tasks.",
+  "name": "dotasks",
+  "version": "0.1.0+codex.20260901090208",
+  "description": "Queue work and orchestrate traceable delivery through visible native Codex tasks.",
   "author": {
     "name": "sanmws"
   },
@@ -14,9 +14,9 @@
   ],
   "skills": "./skills/",
   "interface": {
-    "displayName": "Codex Taskboard",
-    "shortDescription": "Orchestrate independent execution and review tasks",
-    "longDescription": "Manually invoke Taskboard to analyze a minimum implementation boundary, create a ready task, dispatch independent implementation, review and rework conversations, send project notifications, and retain compact project knowledge through CodeGraph and Obsidian integrations.",
+    "displayName": "DoTasks",
+    "shortDescription": "Schedule work in native Codex tasks",
+    "longDescription": "Manually confirm a minimum implementation boundary, queue ready work, and use a native Codex Controller task to create or resume visible implementation, combined Code Review and rework tasks with MCP-backed lifecycle callbacks. Non-code work skips Code Review after complete delivery evidence.",
     "developerName": "sanmws",
     "category": "Productivity",
     "capabilities": [

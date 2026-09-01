@@ -115,11 +115,11 @@ export function formatCompactTokenCount(value) {
   return new Intl.NumberFormat("zh-CN", {notation:"compact", maximumFractionDigits:1}).format(Math.max(0, Number(value) || 0));
 }
 
-export function expandTaskboardSlashCommand(value) {
+export function expandDoTasksSlashCommand(value) {
   const message = String(value || "").trim();
-  const match = message.match(/^\/taskboard(?:\s+([\s\S]*))?$/i);
+  const match = message.match(/^\/dotasks(?:\s+([\s\S]*))?$/i);
   if (!match) return message;
-  return `$codex-taskboard${match[1] ? `\n\n${match[1].trim()}` : ""}`;
+  return `$dotasks${match[1] ? `\n\n${match[1].trim()}` : ""}`;
 }
 
 export function taskNeedsAttention(task, attentionStatuses, autoDispatchStatuses) {
@@ -142,9 +142,7 @@ export function taskRecoveryAction(task, {restartWaitingConfirmation = false} = 
   }
   if (task.status === "blocked") {
     const recoveries = {
-      review: {label: "返回验收", status: "review"},
       code_review: {label: "返回 Code Review", status: "code_review"},
-      acceptance: {label: "返回功能验收", status: "acceptance"},
       rework: {label: "返回返工", status: "rework"},
     };
     const recovery = recoveries[task.blocked_from_status]
@@ -157,9 +155,7 @@ export function taskRecoveryAction(task, {restartWaitingConfirmation = false} = 
   const autoDispatchLabels = {
     ready: "继续自动领取",
     rework: "继续返工",
-    review: "继续验收",
     code_review: "继续 Code Review",
-    acceptance: "继续功能验收",
   };
   if (autoDispatchLabels[task.status] && Number(task.auto_dispatch) === 0) {
     return {kind: "enable_auto", label: autoDispatchLabels[task.status]};
@@ -175,10 +171,7 @@ const TASK_CONVERSATION_ROLES = {
   implementing: ["execution", "rework", "bugfix"],
   waiting_confirmation: ["rework", "bugfix", "execution", "source"],
   rework: ["rework", "bugfix", "execution"],
-  review: ["review"],
   code_review: ["code_review"],
-  acceptance: ["acceptance"],
-  acceptance_blocked: ["acceptance"],
   failed: ["rework", "bugfix", "execution"],
 };
 

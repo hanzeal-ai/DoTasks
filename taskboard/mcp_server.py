@@ -1,16 +1,160 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from typing import Any, Callable
 
-from core.run_context import TOOL_PROFILES
 from core.service import TaskboardService
 from .version import VERSION
 
 
 SERVICE = TaskboardService()
+
+QUALITY_GATES_SCHEMA = {
+    "type": "object",
+    "description": (
+        "Per-task stage decision made during analysis. A skipped stage does not "
+        "remove acceptance criteria or development verification evidence."
+    ),
+    "properties": {
+        gate: {
+            "type": "object",
+            "properties": {
+                "required": {"type": "boolean"},
+                "reason": {"type": "string", "minLength": 1},
+            },
+            "required": ["required", "reason"],
+            "additionalProperties": False,
+        }
+        for gate in ("code_review",)
+    },
+    "required": ["code_review"],
+    "additionalProperties": False,
+}
+
+TARGET_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "file": {"type": "string", "minLength": 1},
+        "mode": {"type": "string", "enum": ["modify", "create", "delete", "config"], "default": "modify"},
+        "symbols": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "reason": {"type": "string"},
+        "tasks": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "action": {"type": "string", "minLength": 1},
+                "expected": {"type": "string"},
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        }},
+    },
+    "required": ["file", "mode", "symbols", "tasks"],
+    "additionalProperties": False,
+}
+
+DEPENDENCY_ANALYSIS_SCHEMA = {
+    "type": "object",
+    "description": "DoTasks-only scheduling metadata; never exposed to development or Code Review workers.",
+    "properties": {
+        "decision": {"type": "string", "enum": ["independent", "depends_on", "continues_from"]},
+        "depends_tasks": {"type": "array", "items": {"type": "string"}},
+        "conflicts_tasks": {"type": "array", "items": {"type": "string"}},
+        "history_tasks": {"type": "array", "items": {"type": "string"}},
+        "continues_from_task_id": {"type": "string"},
+        "history_edges": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "from": {"type": "string"}, "to": {"type": "string"}, "type": {"type": "string"},
+            },
+            "required": ["from", "to", "type"],
+            "additionalProperties": False,
+        }},
+    },
+    "required": ["decision"],
+    "additionalProperties": False,
+}
+
+
+def _location_evidence_variant(
+    tools: list[str],
+    *,
+    required: list[str] | None = None,
+    properties: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    schema_properties: dict[str, Any] = {
+        "tool": {"type": "string", "enum": tools},
+        "query": {"type": "string", "minLength": 1},
+        "files": {
+            "type": "array", "minItems": 1,
+            "items": {"type": "string", "minLength": 1},
+        },
+        "symbols": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "project_path": {"type": "string", "minLength": 1},
+        "repository_revision": {"type": "string"},
+        "repository_workspace_fingerprint": {"type": "string"},
+    }
+    schema_properties.update(properties or {})
+    return {
+        "type": "object",
+        "properties": schema_properties,
+        "required": ["tool", "query", "files", *(required or [])],
+        "additionalProperties": False,
+    }
+
+
+LOCATION_EVIDENCE_SCHEMA = {
+    "description": (
+        "Evidence from exactly one bounded location route. CLI evidence uses the "
+        "canonical command field containing the executed argv array; never use an "
+        "argv field or a shell command string."
+    ),
+    "oneOf": [
+        _location_evidence_variant(["codegraph_explore"]),
+        _location_evidence_variant(
+            ["codegraph_cli_explore"],
+            required=["command", "exit_code"],
+            properties={
+                "command": {
+                    "type": "array", "minItems": 4,
+                    "items": {"type": "string", "minLength": 1},
+                    "description": "Exact executed argv beginning with codegraph, explore.",
+                },
+                "exit_code": {"type": "integer", "enum": [0]},
+            },
+        ),
+        _location_evidence_variant(
+            ["gitnexus_query", "gitnexus_context"],
+            required=["project_path"],
+        ),
+        _location_evidence_variant(
+            ["gitnexus_cli_query"],
+            required=["project_path", "command", "exit_code"],
+            properties={
+                "command": {
+                    "type": "array", "minItems": 3,
+                    "items": {"type": "string", "minLength": 1},
+                    "description": "Exact executed GitNexus argv array.",
+                },
+                "exit_code": {"type": "integer", "enum": [0]},
+            },
+        ),
+        _location_evidence_variant(
+            ["source_match"],
+            required=["project_path", "commands"],
+            properties={
+                "commands": {
+                    "type": "array", "minItems": 1,
+                    "items": {
+                        "type": "array", "minItems": 1,
+                        "items": {"type": "string", "minLength": 1},
+                    },
+                },
+            },
+        ),
+    ],
+}
 
 
 TOOLS = [
@@ -49,7 +193,7 @@ TOOLS = [
                 "available": {"type": "boolean"},
                 "state": {"type": "string", "enum": ["connected", "stale", "error"]},
                 "summary": {"type": "string"},
-                "evidence": {"type": "object", "description": "For connected state include a bounded query and non-empty files. Supported tools: codegraph_explore; codegraph_cli_explore with argv and exit_code=0; gitnexus_query or gitnexus_context with project_path; gitnexus_cli_query with project_path, argv, and exit_code=0; or source_match with project_path and read-only search commands."},
+                "evidence": LOCATION_EVIDENCE_SCHEMA,
                 "agent_id": {"type": "string"},
             },
             "required": ["project", "available", "state", "evidence"],
@@ -57,25 +201,46 @@ TOOLS = [
     },
     {
         "name": "complete_location_analysis",
-        "description": "Persist bounded location evidence, exact file/symbol targets, implementation ordered_steps, review checks and criterion-level acceptance plan.",
+        "description": "Persist bounded location evidence, exact file/symbol target tasks, review checks and criterion-level acceptance plan.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "analysis_id": {"type": "string"}, "location_evidence": {"type": "object", "description": "Evidence from the selected CodeGraph, GitNexus, or source_match route."},
-                "targets": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
-                    "file": {"type": "string", "minLength": 1}, "symbols": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "reason": {"type": "string"}
-                }, "required": ["file", "symbols"]}},
-                "dependency_analysis": {"type": "object", "description": "v2 fixed structure: decision is independent, depends_on, or continues_from; dependent decisions also require target_task_id.", "properties": {"decision": {"type": "string", "enum": ["independent", "depends_on", "continues_from"]}, "target_task_id": {"type": "string"}}, "required": ["decision"]},
-                "implementation_contract": {"type": "object", "description": "Targets must match the completed location evidence exactly and ordered_steps must contain code-change actions only; verification belongs in acceptance_plan.", "properties": {
-                    "targets": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"file": {"type": "string", "minLength": 1}, "symbols": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}}, "required": ["file", "symbols"]}},
-                    "ordered_steps": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"file": {"type": "string", "minLength": 1}, "symbol": {"type": "string", "minLength": 1}, "action": {"type": "string", "minLength": 1}}, "required": ["file", "symbol", "action"]}}
-                }, "required": ["targets", "ordered_steps"]},
-                "review_contract": {"type": "object", "description": "v2 code/static review only; functional, runtime, and visual checks belong in acceptance_plan.", "properties": {"checks": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"id": {"type": "string", "minLength": 1}, "description": {"type": "string", "minLength": 1}, "kind": {"type": "string", "enum": ["code", "static"]}}, "required": ["id", "description", "kind"]}}, "separate_acceptance_session": {"type": "boolean", "default": False}}, "required": ["checks"]},
+                "analysis_id": {"type": "string"}, "location_evidence": LOCATION_EVIDENCE_SCHEMA,
+                "targets": {"type": "array", "minItems": 1, "items": TARGET_SCHEMA},
+                "dependency_analysis": DEPENDENCY_ANALYSIS_SCHEMA,
+                "implementation_contract": {"type": "object", "description": "Targets and their tasks must match the completed location evidence exactly; verification belongs in acceptance_plan.", "properties": {
+                    "targets": {"type": "array", "minItems": 1, "items": TARGET_SCHEMA},
+                }, "required": ["targets"], "additionalProperties": False},
+                "review_contract": {
+                    "type": "object",
+                    "description": "Combined Code Review contract; code/static checks and acceptance_plan are verified in one stage. Non-code tasks set quality_gates.code_review.required=false.",
+                    "properties": {
+                        "checks": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string", "minLength": 1},
+                                    "description": {"type": "string", "minLength": 1},
+                                    "kind": {"type": "string", "enum": ["code", "static"]},
+                                },
+                                "required": ["id", "description", "kind"],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "quality_gates": QUALITY_GATES_SCHEMA,
+                    },
+                    "required": ["checks", "quality_gates"],
+                    "additionalProperties": False,
+                },
                 "acceptance_plan": {"type": "array", "items": {"type": "object", "properties": {
                     "criterion": {"type": "string"}, "file": {"type": "string"}, "symbol": {"type": "string"},
                     "method": {"type": "string"}, "command": {"type": "string"}, "expected": {"type": "string"},
                     "check_type": {"type": "string", "enum": ["automated", "static_review", "manual_runtime"]},
-                    "required": {"type": "boolean"}, "timeout_seconds": {"type": "integer"}
+                    "required": {"type": "boolean"}, "timeout_seconds": {"type": "integer"},
+                    "failure_category": {"type": "string", "enum": ["project", "environment", "implementation"]},
+                    "repair_command": {"type": "string"}, "repair_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 1800}
                 }, "required": ["criterion", "file", "method", "expected"]}},
             },
             "required": ["analysis_id", "location_evidence", "targets", "dependency_analysis", "implementation_contract", "review_contract", "acceptance_plan"],
@@ -83,11 +248,11 @@ TOOLS = [
     },
     {
         "name": "finalize_task_intake",
-        "description": "Persist intake_kind=requirement as a requirement planning entity, or create a ready v2 direct task for intake_kind=task (the backward-compatible default).",
+        "description": "Persist intake_kind=requirement as a planning entity, or create a ready direct task for intake_kind=task.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "intake_kind": {"type": "string", "enum": ["requirement", "task"], "default": "task"},
+                "intake_kind": {"type": "string", "enum": ["requirement", "task"]},
                 "analysis_id": {"type": "string"},
                 "title": {"type": "string"},
                 "project": {
@@ -107,36 +272,36 @@ TOOLS = [
                 "auto_dispatch": {"type": "boolean"},
                 "location_summary": {"type": "string"},
                 "agent_id": {"type": "string"},
-                "location_evidence": {"type": "object", "description": "One bounded CodeGraph, GitNexus, or source_match evidence object."},
-                "targets": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
-                    "file": {"type": "string", "minLength": 1}, "symbols": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "reason": {"type": "string"}
-                }, "required": ["file", "symbols"]}},
-                "ordered_steps": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
-                    "file": {"type": "string", "minLength": 1}, "symbol": {"type": "string", "minLength": 1}, "action": {"type": "string", "minLength": 1}
-                }, "required": ["file", "symbol", "action"]}},
-                "visual_references": {"type": "array", "description": "All requirement screenshots and visual references; each source path is copied immediately into Taskboard-managed storage.", "items": {"type": "object", "properties": {"path": {"type": "string", "minLength": 1}, "purpose": {"type": "string"}}, "required": ["path"]}},
+                "location_evidence": LOCATION_EVIDENCE_SCHEMA,
+                "targets": {"type": "array", "minItems": 1, "items": TARGET_SCHEMA},
+                "visual_references": {"type": "array", "description": "All requirement screenshots and visual references; each source path is copied immediately into DoTasks-managed storage.", "items": {"type": "object", "properties": {"path": {"type": "string", "minLength": 1}, "purpose": {"type": "string"}}, "required": ["path"]}},
                 "review_checks": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"id": {"type": "string", "minLength": 1}, "description": {"type": "string", "minLength": 1}, "kind": {"type": "string", "enum": ["code", "static"]}}, "required": ["id", "description", "kind"]}},
-                "separate_acceptance_session": {"type": "boolean", "default": False},
+                "quality_gates": QUALITY_GATES_SCHEMA,
                 "acceptance_plan": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
                     "criterion": {"type": "string"}, "file": {"type": "string"}, "symbol": {"type": "string"},
                     "method": {"type": "string"}, "command": {"type": "string"}, "expected": {"type": "string"},
                     "check_type": {"type": "string", "enum": ["automated", "static_review", "manual_runtime"]},
                     "required": {"type": "boolean", "default": True}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+                    "failure_category": {"type": "string", "enum": ["project", "environment", "implementation"]},
+                    "repair_command": {"type": "string"}, "repair_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 1800},
                     "artifact_refs": {"type": "array", "items": {"type": "string"}}
                 }, "required": ["criterion", "file", "symbol", "method", "expected", "check_type"]}},
-                "dependency_analysis": {"type": "object", "description": "Omit for automatic classification. Supply an explicit independent, depends_on, or continues_from decision only after resolving a returned strong candidate."},
+                "dependency_analysis": DEPENDENCY_ANALYSIS_SCHEMA,
                 "relations": {"type": "array", "items": {"type": "object"}},
                 "acceptance_criteria": {"type": "array", "items": {"type": "string"}, "description": "Requirement-level outcomes; direct task criteria continue to be derived from acceptance_plan."},
                 "decomposition_tasks": {"type": "array", "items": {"type": "object"}, "description": "Optional stable decomposition plan, materialized only when the requirement is dispatched."},
             },
-            "required": ["title", "project", "goal"],
+            "required": ["intake_kind", "title", "project", "goal"],
             "anyOf": [
                 {"properties": {"intake_kind": {"const": "requirement"}}, "required": ["intake_kind"]},
-                {"required": [
+                {"properties": {"intake_kind": {"const": "task"}}, "required": [
+                    "intake_kind",
                     "analysis_id", "scope", "out_of_scope", "location_evidence",
-                    "targets", "ordered_steps", "review_checks", "acceptance_plan"
+                    "targets", "review_checks", "quality_gates",
+                    "acceptance_plan"
                 ]}
             ],
+            "additionalProperties": False,
         },
     },
     {
@@ -155,15 +320,16 @@ TOOLS = [
                     "title": {"type": "string", "minLength": 1},
                     "goal": {"type": "string", "minLength": 1},
                     "analysis_id": {"type": "string", "minLength": 1},
-                    "location_evidence": {"type": "object"},
-                    "targets": {"type": "array", "minItems": 1, "items": {"type": "object"}},
-                    "ordered_steps": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+                    "location_evidence": LOCATION_EVIDENCE_SCHEMA,
+                    "targets": {"type": "array", "minItems": 1, "items": TARGET_SCHEMA},
                     "review_checks": {"type": "array", "minItems": 1},
+                    "quality_gates": QUALITY_GATES_SCHEMA,
                     "acceptance_plan": {"type": "array", "minItems": 1, "items": {"type": "object"}},
                     "depends_on": {"type": "array", "items": {"type": "string"}},
                 }, "required": [
                     "key", "title", "goal", "analysis_id", "location_evidence",
-                    "targets", "ordered_steps", "review_checks", "acceptance_plan",
+                    "targets", "review_checks", "quality_gates",
+                    "acceptance_plan",
                 ],
             }},
         }, "required": ["requirement_id", "run_id", "tasks"]},
@@ -175,11 +341,6 @@ TOOLS = [
             "requirement_id": {"type": "string"}, "run_id": {"type": "string"},
             "error": {"type": "string"},
         }, "required": ["requirement_id", "run_id", "error"]},
-    },
-    {
-        "name": "analyze_task_dependencies",
-        "description": "Return structured Obsidian and Taskboard evidence for independent, depends_on, or continues_from classification.",
-        "inputSchema": {"type": "object", "properties": {"title": {"type": "string"}, "project": {"type": "string"}, "goal": {"type": "string"}, "modules": {"type": "array", "items": {"type": "string"}}, "located_symbols": {"type": "array", "items": {"type": "string"}}}, "required": ["title", "project", "goal"]},
     },
     {
         "name": "detect_task_change",
@@ -241,30 +402,74 @@ TOOLS = [
         },
     },
     {
-        "name": "dispatch_next_task",
-        "description": "Atomically claim the next dependency-ready task and return a prompt for a new independent Codex execution conversation.",
+        "name": "claim_next_dispatch",
+        "description": "Claim or recover one persisted native-Codex dispatch from the independent development or code_review lane.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "worker_id": {"type": "string"},
+                "worker_id": {"type": "string", "minLength": 1},
                 "project": {"type": "string"},
-                "lease_seconds": {"type": "integer"},
+                "lease_seconds": {"type": "integer", "minimum": 300, "maximum": 7200},
+                "stage": {
+                    "type": "string",
+                    "enum": ["development", "code_review"],
+                },
             },
-            "required": ["worker_id"],
+            "required": ["worker_id", "stage"],
         },
     },
     {
-        "name": "bind_task_conversation",
-        "description": "Attach a source, execution, rework, or review Codex conversation to a task/run.",
+        "name": "claim_dispatch_batch",
+        "description": "Recover or fill every configured native-Codex dispatch slot for the development or code_review lane.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "task_id": {"type": "string"}, "run_id": {"type": "string"},
-                "role": {"type": "string", "enum": ["source", "execution", "rework", "bugfix", "review", "code_review", "acceptance"]},
-                "thread_id": {"type": "string"}, "title": {"type": "string"},
+                "worker_id": {"type": "string", "minLength": 1},
+                "project": {"type": "string"},
+                "lease_seconds": {"type": "integer", "minimum": 300, "maximum": 7200},
+                "stage": {"type": "string", "enum": ["development", "code_review"]},
             },
-            "required": ["task_id", "role", "thread_id"],
+            "required": ["worker_id", "stage"],
         },
+    },
+    {
+        "name": "mark_dispatch_pending",
+        "description": "Persist an asynchronous native Codex task creation while only clientThreadId is available. Do not bind the run until a real threadId is resolved.",
+        "inputSchema": {"type": "object", "properties": {
+            "run_id": {"type": "string"}, "client_thread_id": {"type": "string"},
+            "host_id": {"type": "string"}, "codex_project_id": {"type": "string"},
+        }, "required": ["run_id", "client_thread_id"]},
+    },
+    {
+        "name": "bind_native_dispatch",
+        "description": "Bind a persisted dispatch to its real native Codex thread. Supply resume_fallback_reason only when resuming the recorded thread failed and a replacement native task was created.",
+        "inputSchema": {"type": "object", "properties": {
+            "run_id": {"type": "string"}, "thread_id": {"type": "string"},
+            "host_id": {"type": "string"}, "codex_project_id": {"type": "string"},
+            "resume_fallback_reason": {"type": "string"},
+        }, "required": ["run_id", "thread_id"]},
+    },
+    {
+        "name": "renew_dispatch_lease",
+        "description": "Renew the claimed stage while the native Codex task is being created or executed.",
+        "inputSchema": {"type": "object", "properties": {
+            "run_id": {"type": "string"},
+            "lease_seconds": {"type": "integer", "minimum": 300, "maximum": 7200},
+        }, "required": ["run_id"]},
+    },
+    {
+        "name": "get_dispatch_status",
+        "description": "Read a native dispatch and reconcile its terminal state from the underlying DoTasks run.",
+        "inputSchema": {"type": "object", "properties": {
+            "run_id": {"type": "string"},
+        }, "required": ["run_id"]},
+    },
+    {
+        "name": "report_dispatch_failed",
+        "description": "Fail an unsubmitted native dispatch and release it for the scheduler's retry policy.",
+        "inputSchema": {"type": "object", "properties": {
+            "run_id": {"type": "string"}, "reason": {"type": "string", "minLength": 1},
+        }, "required": ["run_id", "reason"]},
     },
     {
         "name": "submit_task_delivery",
@@ -274,6 +479,7 @@ TOOLS = [
             "properties": {
                 "run_id": {"type": "string"}, "delivery_summary": {"type": "string"},
                 "verification_result": {"type": "string"},
+                "workspace_path": {"type": "string", "description": "Required for a worktree dispatch; use the worker's absolute current Git worktree path."},
                 "batch_revision": {"type": "integer", "minimum": 1},
                 "changed_locations": {"type": "array", "items": {"type": "object"}},
                 "acceptance_evidence": {"type": "array", "items": {"type": "object", "properties": {"criterion": {"type": "string", "minLength": 1}, "status": {"type": "string", "enum": ["passed", "failed", "blocked", "pending"]}, "evidence": {"type": "string", "minLength": 1}, "artifact_refs": {"type": "array", "items": {"type": "string"}}}, "required": ["criterion", "status", "evidence"]}},
@@ -297,48 +503,12 @@ TOOLS = [
     },
     {
         "name": "review_code",
-        "description": "Complete the independent code review stage.",
-        "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}, "run_id": {"type": "string"}, "verdict": {"type": "string", "enum": ["pass", "fail"]}, "reasons": {"type": "array", "items": {"type": "string"}}, "passed_items": {"type": "array", "items": {"type": "string"}}, "failed_criteria": {"type": "array", "items": {"type": "string"}}}, "required": ["task_id", "run_id", "verdict"]},
-    },
-    {
-        "name": "accept_task",
-        "description": "Complete the independent functional acceptance stage; failures create a linked bug for normal tasks.",
-        "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}, "run_id": {"type": "string"}, "verdict": {"type": "string", "enum": ["pass", "fail"]}, "reasons": {"type": "array", "items": {"type": "string"}}, "passed_criteria": {"type": "array", "items": {"type": "string"}}, "failed_criteria": {"type": "array", "items": {"type": "string"}}, "failure_locations": {"type": "array", "items": {"type": "object"}}, "criterion_results": {"type": "array", "items": {"type": "object", "properties": {"criterion": {"type": "string", "minLength": 1}, "status": {"type": "string", "enum": ["passed", "failed", "blocked"]}, "evidence": {"type": "string", "minLength": 1}, "artifact_refs": {"type": "array", "items": {"type": "string", "minLength": 1}}}, "required": ["criterion", "status", "evidence", "artifact_refs"]}}}, "required": ["task_id", "run_id", "verdict", "passed_criteria", "failed_criteria", "criterion_results"]},
-    },
-    {
-        "name": "prepare_review_location",
-        "description": "Use Obsidian and a bounded CodeGraph plan to re-locate only actual changed files/symbols before creating a review conversation.",
-        "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]},
-    },
-    {
-        "name": "prepare_task_review",
-        "description": "Create an independent review run from a completed review-location analysis.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"task_id": {"type": "string"}, "review_location_analysis_id": {"type": "string"}, "reviewer_id": {"type": "string"}},
-            "required": ["task_id", "review_location_analysis_id"],
-        },
-    },
-    {
-        "name": "transition_task",
-        "description": "Move a task through the validated workflow state machine.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string"},
-                "status": {"type": "string"},
-                "reason": {"type": "string"},
-                "codex_thread_id": {"type": "string"},
-                "assigned_to": {"type": "string"},
-                "token_used": {"type": "integer"},
-                "auto_dispatch": {"type": "boolean"},
-            },
-            "required": ["task_id", "status"],
-        },
+        "description": "Complete combined Code Review; project/environment failures schedule bounded self-healing rework.",
+        "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}, "run_id": {"type": "string"}, "verdict": {"type": "string", "enum": ["pass", "fail"]}, "reasons": {"type": "array", "items": {"type": "string"}}, "passed_items": {"type": "array", "items": {"type": "string"}}, "failed_criteria": {"type": "array", "items": {"type": "string"}}, "failure_category": {"type": "string", "enum": ["project", "environment", "implementation"]}, "failure_locations": {"type": "array", "minItems": 1, "description": "Required for project/environment failures. Each item identifies an exact project file to create or modify during bounded self-healing rework.", "items": TARGET_SCHEMA}}, "required": ["task_id", "run_id", "verdict"]},
     },
     {
         "name": "run_acceptance_checks",
-        "description": "Execute automated checks and persist results; passed checks are reused only for the same delivery and workspace fingerprint unless force=true.",
+        "description": "Execute automated checks, classify project/environment failures, try a bounded self-heal, and persist results; passed checks are reused only for the same delivery and workspace fingerprint unless force=true.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -350,70 +520,9 @@ TOOLS = [
         },
     },
     {
-        "name": "review_task",
-        "description": "Accept or reject a task only after the current delivery's review location gate; criterion results must exactly cover the confirmed acceptance criteria.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string"},
-                "verdict": {"type": "string", "enum": ["pass", "fail"]},
-                "reasons": {"type": "array", "items": {"type": "string"}},
-                "passed_items": {"type": "array", "items": {"type": "string"}, "description": "Exact confirmed acceptance criteria that passed; all criteria are required for a pass verdict."},
-                "failed_criteria": {"type": "array", "items": {"type": "string"}, "description": "Exact confirmed acceptance criteria that failed; required for fail verdict."},
-                "run_id": {"type": "string"},
-            },
-            "required": ["task_id", "verdict", "passed_items", "run_id"],
-        },
-    },
-    {
-        "name": "relate_tasks",
-        "description": "Create a typed relation between two tasks, such as changed_from or depends_on.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "source_task_id": {"type": "string"},
-                "target_task_id": {"type": "string"},
-                "relation_type": {"type": "string", "enum": ["changed_from", "defect_of", "depends_on", "continues_from", "blocks", "split_from", "child_of", "references", "duplicates", "replaces", "conflicts_with"]},
-                "description": {"type": "string"},
-            },
-            "required": ["source_task_id", "target_task_id", "relation_type"],
-        },
-    },
-    {
-        "name": "suggest_task_relations",
-        "description": "Recommend direct historical or active-task relations using project, module and wording overlap. Recommendations require user confirmation before persistence.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"task_id": {"type": "string"}, "limit": {"type": "integer"}},
-            "required": ["task_id"],
-        },
-    },
-    {
-        "name": "get_task_context",
-        "description": "Return a cached immutable run snapshot when run_id is provided; otherwise compile a bounded live task context for manual planning.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string"},
-                "run_id": {"type": "string", "description": "Lifecycle run ID. Provide it in autonomous execution, review and acceptance sessions."},
-                "project_path": {"type": "string"},
-            },
-            "required": ["task_id"],
-        },
-    },
-    {
         "name": "get_task_details",
         "description": "Return a task with all run, conversation, review and relation records.",
         "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]},
-    },
-    {
-        "name": "update_conversation_summary",
-        "description": "Store a bounded summary for a linked Codex conversation; full chat history is not copied into future contexts.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"task_id": {"type": "string"}, "thread_id": {"type": "string"}, "summary": {"type": "string"}, "status": {"type": "string"}},
-            "required": ["task_id", "thread_id", "summary"],
-        },
     },
     {
         "name": "open_taskboard",
@@ -433,26 +542,14 @@ def _report_location(arguments: dict[str, Any]) -> Any:
 def _complete_location(arguments: dict[str, Any]) -> Any:
     return SERVICE.complete_location_analysis(
         arguments["analysis_id"], arguments["location_evidence"], arguments["targets"],
-        arguments["acceptance_plan"], arguments.get("dependency_analysis"),
-        arguments.get("implementation_contract"), arguments.get("review_contract"),
-    )
-
-
-def _transition_task(arguments: dict[str, Any]) -> Any:
-    updates = {
-        key: arguments[key]
-        for key in ("codex_thread_id", "assigned_to", "token_used", "auto_dispatch")
-        if key in arguments
-    }
-    return SERVICE.transition_task(
-        arguments["task_id"], arguments["status"], arguments.get("reason", ""), **updates,
+        arguments["acceptance_plan"], arguments["dependency_analysis"],
+        arguments["implementation_contract"], arguments["review_contract"],
     )
 
 
 TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "list_board": lambda _arguments: SERVICE.board(),
     "prepare_task_location": lambda arguments: SERVICE.prepare_location_analysis(arguments, "creation"),
-    "analyze_task_dependencies": SERVICE.analyze_task_dependencies,
     "detect_task_change": SERVICE.detect_task_change,
     "prepare_task_change_location": lambda arguments: SERVICE.prepare_location_analysis(
         arguments, "change", arguments["candidate_task_id"],
@@ -478,58 +575,47 @@ TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
         requirement_id=arguments["requirement_id"],
         decomposition_run_id=arguments["run_id"], error=arguments["error"],
     ),
-    "dispatch_next_task": lambda arguments: SERVICE.claim_next_task(arguments["worker_id"], arguments.get("project"), arguments.get("lease_seconds", 1800)),
-    "bind_task_conversation": lambda arguments: SERVICE.bind_conversation(arguments["task_id"], arguments["role"], arguments["thread_id"], arguments.get("run_id"), arguments.get("title", "")),
-    "submit_task_delivery": lambda arguments: SERVICE.submit_delivery(arguments["run_id"], arguments["delivery_summary"], arguments["verification_result"], arguments["changed_locations"], arguments["acceptance_evidence"], batch_revision=arguments.get("batch_revision")),
+    "claim_next_dispatch": lambda arguments: SERVICE.claim_next_native_dispatch(
+        arguments["worker_id"], arguments.get("project"),
+        arguments.get("lease_seconds", 1800), arguments["stage"],
+    ),
+    "claim_dispatch_batch": lambda arguments: SERVICE.claim_native_dispatch_batch(
+        arguments["worker_id"], arguments.get("project"),
+        arguments.get("lease_seconds", 1800), arguments["stage"],
+    ),
+    "mark_dispatch_pending": lambda arguments: SERVICE.mark_native_dispatch_pending(
+        arguments["run_id"], arguments["client_thread_id"], arguments.get("host_id", ""),
+        arguments.get("codex_project_id", ""),
+    ),
+    "bind_native_dispatch": lambda arguments: SERVICE.bind_native_dispatch(
+        arguments["run_id"], arguments["thread_id"], arguments.get("host_id", ""),
+        arguments.get("codex_project_id", ""), arguments.get("resume_fallback_reason", ""),
+    ),
+    "renew_dispatch_lease": lambda arguments: SERVICE.renew_native_dispatch(
+        arguments["run_id"], arguments.get("lease_seconds", 1800),
+    ),
+    "get_dispatch_status": lambda arguments: SERVICE.get_native_dispatch(arguments["run_id"]),
+    "report_dispatch_failed": lambda arguments: SERVICE.fail_native_dispatch(
+        arguments["run_id"], arguments["reason"],
+    ),
+    "submit_task_delivery": lambda arguments: SERVICE.submit_delivery(arguments["run_id"], arguments["delivery_summary"], arguments["verification_result"], arguments["changed_locations"], arguments["acceptance_evidence"], batch_revision=arguments.get("batch_revision"), workspace_path=arguments.get("workspace_path")),
     "report_run_blocked": lambda arguments: SERVICE.report_run_blocked(
         arguments["task_id"], arguments["run_id"], arguments["status"], arguments["reason"],
     ),
-    "prepare_review_location": lambda arguments: SERVICE.prepare_review_location(arguments["task_id"]),
-    "prepare_task_review": lambda arguments: SERVICE.prepare_review_run(arguments["task_id"], arguments["review_location_analysis_id"], arguments.get("reviewer_id", "codex-reviewer")),
-    "transition_task": _transition_task,
     "run_acceptance_checks": lambda arguments: SERVICE.run_acceptance_checks(
         arguments["task_id"], arguments["run_id"], bool(arguments.get("force", False)),
     ),
-    "review_task": lambda arguments: SERVICE.review_task(arguments["task_id"], arguments["verdict"], arguments.get("reasons"), arguments.get("passed_items"), arguments.get("run_id"), arguments.get("failed_criteria")),
-    "review_code": lambda arguments: SERVICE.review_code(arguments["task_id"], arguments["run_id"], arguments["verdict"], arguments.get("reasons"), arguments.get("passed_items"), arguments.get("failed_criteria")),
-    "accept_task": lambda arguments: SERVICE.accept_task(arguments["task_id"], arguments["run_id"], arguments["verdict"], arguments.get("reasons"), arguments.get("passed_criteria"), arguments.get("failed_criteria"), arguments.get("failure_locations"), arguments.get("criterion_results")),
-    "relate_tasks": lambda arguments: SERVICE.add_relation(arguments["source_task_id"], arguments["target_task_id"], arguments["relation_type"], arguments.get("description", "")),
-    "suggest_task_relations": lambda arguments: SERVICE.suggest_relations(arguments["task_id"], arguments.get("limit", 8)),
-    "get_task_context": lambda arguments: (
-        SERVICE.get_run_context(arguments["task_id"], arguments["run_id"], arguments.get("project_path"))
-        if arguments.get("run_id")
-        else SERVICE.build_context(arguments["task_id"], arguments.get("project_path"))
-    ),
+    "review_code": lambda arguments: SERVICE.review_code(arguments["task_id"], arguments["run_id"], arguments["verdict"], arguments.get("reasons"), arguments.get("passed_items"), arguments.get("failed_criteria"), arguments.get("failure_category"), arguments.get("failure_locations")),
     "get_task_details": lambda arguments: SERVICE.task_details(arguments["task_id"]),
-    "update_conversation_summary": lambda arguments: SERVICE.update_conversation_summary(arguments["task_id"], arguments["thread_id"], arguments["summary"], arguments.get("status", "completed")),
     "open_taskboard": lambda _arguments: {"url": "http://127.0.0.1:8765", "startup": "./scripts/start"},
 }
 
 
-def _tool_profile() -> str:
-    return os.environ.get("CODEX_TASKBOARD_TOOL_PROFILE", "").strip()
-
-
-def _profile_tools() -> frozenset[str] | None:
-    profile = _tool_profile()
-    if not profile:
-        return None
-    if profile not in TOOL_PROFILES:
-        raise ValueError(f"Unknown Taskboard tool profile: {profile}")
-    return TOOL_PROFILES[profile]
-
-
 def _visible_tools() -> list[dict[str, Any]]:
-    names = _profile_tools()
-    if names is None:
-        return TOOLS
-    return [tool for tool in TOOLS if tool["name"] in names]
+    return TOOLS
 
 
 def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
-    names = _profile_tools()
-    if names is not None and name not in names:
-        raise ValueError(f"Tool is unavailable in {_tool_profile()} profile: {name}")
     handler = TOOL_HANDLERS.get(name)
     if handler is None:
         raise ValueError(f"Unknown tool: {name}")
@@ -545,17 +631,16 @@ def _task_ack(result: Any) -> dict[str, Any]:
         "task_id": task.get("id"),
         "status": task.get("status"),
         "active_run_id": task.get("active_run_id"),
-        "parent_acceptance_task_id": task.get("parent_acceptance_task_id"),
     }
 
 
 def _compact_lifecycle_result(name: str, result: Any) -> Any:
     """Return only the fields needed for the model's next decision."""
-    if _profile_tools() is None or not isinstance(result, dict):
+    if not isinstance(result, dict):
         return result
     if name in {
-        "get_task_context", "prepare_review_location", "prepare_task_review",
         "report_location_status", "complete_location_analysis",
+        "finalize_task_intake", "submit_requirement_decomposition",
     }:
         return result
     if name == "run_acceptance_checks":
@@ -567,6 +652,11 @@ def _compact_lifecycle_result(name: str, result: Any) -> Any:
                 "exit_code": item.get("exit_code"),
                 "duration_ms": item.get("duration_ms"),
                 "cache_hit": bool(item.get("cache_hit")),
+                "failure_category": item.get("failure_category"),
+                "repair_attempted": bool(item.get("repair_attempted")),
+                "repair_status": item.get("repair_status"),
+                "repair_output": str(item.get("repair_output") or "")[-1000:],
+                "initial_status": item.get("initial_status"),
                 "output": str(item.get("output") or "")[-2000:],
             })
         return {
@@ -576,6 +666,8 @@ def _compact_lifecycle_result(name: str, result: Any) -> Any:
             "delivery_run_id": result.get("delivery_run_id"),
             "workspace_fingerprint": result.get("workspace_fingerprint"),
             "cache_hits": result.get("cache_hits", 0),
+            "self_heal_attempts": result.get("self_heal_attempts", 0),
+            "self_healed": result.get("self_healed", 0),
             "all_required_passed": bool(result.get("all_required_passed")),
             "checks": checks,
         }
@@ -608,7 +700,7 @@ def handle(message: dict[str, Any]) -> dict[str, Any] | None:
         return _response(request_id, {
             "protocolVersion": message.get("params", {}).get("protocolVersion", "2025-03-26"),
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "codex-taskboard", "version": VERSION},
+            "serverInfo": {"name": "dotasks", "version": VERSION},
         })
     if method == "notifications/initialized":
         return None

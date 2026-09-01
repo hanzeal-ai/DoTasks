@@ -21,7 +21,7 @@ const module = await import(`data:text/javascript;charset=utf-8,${{encodeURIComp
 {body}
 """
         return subprocess.run(
-            [os.environ.get("CODEX_TASKBOARD_NODE_BIN", "node"), "--input-type=module", "-e", script],
+            [os.environ.get("DOTASKS_NODE_BIN", "node"), "--input-type=module", "-e", script],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
@@ -31,6 +31,17 @@ const module = await import(`data:text/javascript;charset=utf-8,${{encodeURIComp
     def test_header_does_not_show_integration_statuses(self):
         css = (WEB_SOURCE / "styles.css").read_text(encoding="utf-8")
         self.assertIn(".integration-statuses { display: none; }", css)
+
+    def test_project_chat_controls_are_removed_from_the_rendered_app(self):
+        index = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
+        html = (WEB_SOURCE / "App.jsx").read_text(encoding="utf-8")
+        app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")
+
+        self.assertNotIn("chatkit.js", index)
+        self.assertNotIn('id="new-chat"', html)
+        self.assertNotIn('className="projects-section"', html)
+        self.assertNotIn("项目 / 聊天", html)
+        self.assertNotIn("loadProjects();", app.split("async function load(", 1)[1].split("function scheduleBoardRefresh", 1)[0])
 
     def test_request_guard_rejects_stale_scopes(self):
         completed = self.run_module_script("""
@@ -60,7 +71,7 @@ for (const [value, expected] of cases) {
         self.assertEqual(0, completed.returncode, completed.stderr)
 
     def test_only_period_token_cards_use_metric_formatting(self):
-        app = (WEB_SOURCE / "legacy-app.js").read_text(encoding="utf-8")
+        app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")
         period_summary = app.split(
             'return `<div class="token-summary token-period-summary">', 1
         )[1].split('</div><div class="token-chart-grid">', 1)[0]
@@ -146,7 +157,7 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
         self.assertEqual("0", content["min-height"])
         self.assertEqual("hidden", content["overflow"])
         board = declarations("#content.board-columns > .board")
-        self.assertEqual("repeat(5, minmax(250px, 1fr))", board["grid-template-columns"])
+        self.assertEqual("repeat(4, minmax(250px, 1fr))", board["grid-template-columns"])
         self.assertEqual("1 1 auto", board["flex"])
         self.assertEqual("0", board["min-height"])
         self.assertEqual("stretch", board["align-items"])
@@ -160,7 +171,7 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
 
     def test_full_height_layout_keeps_board_controls_and_counts_wired(self):
         html = (WEB_SOURCE / "App.jsx").read_text(encoding="utf-8")
-        app = (WEB_SOURCE / "legacy-app.js").read_text(encoding="utf-8")
+        app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")
         css = (WEB_SOURCE / "styles.css").read_text(encoding="utf-8")
 
         def declaration_value(source: str, selector: str, name: str) -> str:
@@ -175,20 +186,34 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
 
         for control_id in (
             "board-nav",
+            "requirements-nav",
             "dispatcher-toggle",
-            "attention-tasks",
+            "completed-tasks",
             "settings-button",
         ):
             self.assertIn(f'id="{control_id}"', html)
         self.assertIn("const taskColumns = columns.map(column =>", app)
+        self.assertNotIn('class="column column-requirements"', app)
+        self.assertIn("renderRequirementsBoard", app)
+        self.assertIn("requirementCard(requirement, tasks)", app)
+        self.assertIn("task.requirement_id === requirement.id", app)
+        self.assertIn("left.requirement_task_key", app)
+        self.assertIn('class="requirement-task"', app)
         self.assertIn("<span>${visible.length}</span>", app)
         self.assertIn('document.querySelector("#content").innerHTML', app)
-        self.assertLess(html.index('id="board-nav"'), html.index('id="token-panel"'))
-        self.assertLess(html.index('id="dispatcher-toggle"'), html.index('id="attention-tasks"'))
-        self.assertLess(html.index('id="attention-tasks"'), html.index('id="settings-button"'))
+        self.assertLess(html.index('id="board-nav"'), html.index('id="requirements-nav"'))
+        self.assertLess(html.index('id="requirements-nav"'), html.index('id="token-panel"'))
+        self.assertIn("任务看板", html)
+        self.assertIn("需求看板", html)
+        self.assertIn("Token 看板", html)
+        self.assertIn("Codex 原生任务调度", html)
+        self.assertLess(html.index('id="dispatcher-toggle"'), html.index('id="completed-tasks"'))
+        self.assertLess(html.index('id="completed-tasks"'), html.index('id="settings-button"'))
         self.assertIn('event.target.closest("#board-nav")', app)
+        self.assertIn('event.target.closest("#requirements-nav")', app)
         self.assertIn('event.target.closest("#settings-button")', app)
-        self.assertIn('event.target.closest("#attention-tasks")', app)
+        self.assertIn('event.target.closest("#completed-tasks")', app)
+        self.assertIn('column.key === "attention"', app)
         self.assertIn('event.target.closest("#dispatcher-toggle")', app)
         responsive = css.split("@media (max-width: 760px)", 1)[1].split(
             "@media (prefers-color-scheme: dark)", 1
@@ -199,29 +224,30 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
             declaration_value(responsive, "#content.board-columns > .board", "padding"),
         )
 
-    def test_project_archive_view_and_actions_are_wired(self):
+    def test_project_archive_view_and_actions_are_not_rendered(self):
         html = (WEB_SOURCE / "App.jsx").read_text(encoding="utf-8")
-        app = (WEB_SOURCE / "legacy-app.js").read_text(encoding="utf-8")
-        self.assertIn('id="project-archive-toggle"', html)
-        self.assertIn('data-archive-project=', app)
-        self.assertIn('data-restore-project=', app)
-        self.assertIn('window.confirm(`确定归档项目', app)
-        self.assertIn('/api/codex/projects/archive', app)
-        self.assertIn('/api/codex/projects/restore', app)
-        self.assertIn('state.view = "board"', app)
-        self.assertIn('?archived=true', app)
+        self.assertNotIn('id="project-archive-toggle"', html)
+        self.assertNotIn('id="add-project"', html)
+        self.assertNotIn('id="project-list"', html)
+
+    def test_conversation_controls_open_native_tasks_and_keep_detail_copy(self):
+        app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")
+        self.assertIn('data-open-thread="${escapeHtml(conversation.thread_id)}"', app)
+        self.assertIn('codex://threads/${encodeURIComponent(openThread.dataset.openThread)}', app)
+        self.assertIn('data-copy-thread=', app)
+        self.assertIn("复制原生任务 ID", app)
 
     def test_settings_button_opens_task_token_budget_configuration(self):
         html = (WEB_SOURCE / "App.jsx").read_text(encoding="utf-8")
-        app = (WEB_SOURCE / "legacy-app.js").read_text(encoding="utf-8")
-        self.assertLess(html.index('id="attention-tasks"'), html.index('id="settings-button"'))
+        app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")
+        self.assertLess(html.index('id="completed-tasks"'), html.index('id="settings-button"'))
         self.assertIn('id="task-settings-form"', app)
         self.assertIn('name="task_token_budget"', app)
         self.assertIn('name="max_batch_appended_tasks"', app)
         self.assertIn('api("/api/settings"', app)
 
     def test_frontend_loads_workflow_metadata_instead_of_duplicating_statuses(self):
-        app = (WEB_SOURCE / "legacy-app.js").read_text(encoding="utf-8")
+        app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")
         core = (WEB_SOURCE / "ui-core.js").read_text(encoding="utf-8")
         self.assertIn('api("/api/workflow")', app)
         self.assertNotIn('draft:"草稿"', core)
@@ -231,28 +257,36 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
 const conversations = [
   {role: "execution", thread_id: "dev-thread"},
   {role: "code_review", thread_id: "review-thread"},
-  {role: "acceptance", thread_id: "acceptance-thread"},
 ];
 if (module.selectTaskConversation({status: "implementing", conversations}).thread_id !== "dev-thread") throw new Error("development did not select its thread");
 if (module.selectTaskConversation({status: "code_review", conversations}).thread_id !== "review-thread") throw new Error("review did not select its thread");
-if (module.selectTaskConversation({status: "acceptance", conversations}).thread_id !== "acceptance-thread") throw new Error("acceptance did not select its thread");
 if (module.selectTaskConversation({status: "paused", paused_from_status: "code_review", conversations}).thread_id !== "review-thread") throw new Error("paused stage was not restored");
 """)
         self.assertEqual(0, completed.returncode, completed.stderr)
 
     def test_taskboard_slash_command_expands_to_explicit_skill_invocation(self):
         completed = self.run_module_script("""
-if (module.expandTaskboardSlashCommand("/taskboard") !== "$codex-taskboard") throw new Error("bare command was not expanded");
-if (module.expandTaskboardSlashCommand("/taskboard 打开任务看板") !== "$codex-taskboard\\n\\n打开任务看板") throw new Error("command arguments were not preserved");
-if (module.expandTaskboardSlashCommand("/TASKBOARD\\n调度下一项任务") !== "$codex-taskboard\\n\\n调度下一项任务") throw new Error("multiline command was not expanded");
-if (module.expandTaskboardSlashCommand("/taskboards") !== "/taskboards") throw new Error("unrelated command was rewritten");
+if (module.expandDoTasksSlashCommand("/dotasks") !== "$dotasks") throw new Error("canonical command was not expanded");
+if (module.expandDoTasksSlashCommand("/dotasks 打开任务看板") !== "$dotasks\\n\\n打开任务看板") throw new Error("command arguments were not preserved");
+if (module.expandDoTasksSlashCommand("/DOTASKS\\n调度下一项任务") !== "$dotasks\\n\\n调度下一项任务") throw new Error("multiline command was not expanded");
+if (module.expandDoTasksSlashCommand("/taskboard") !== "/taskboard") throw new Error("retired command was rewritten");
 """)
         self.assertEqual(0, completed.returncode, completed.stderr)
+
+    def test_frontend_uses_dotasks_brand(self):
+        html = (WEB_SOURCE / "App.jsx").read_text(encoding="utf-8")
+        index = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
+        icon = (WEB_ROOT / "public/dotasks-mark.svg").read_text(encoding="utf-8")
+        self.assertIn(">DoTasks<", html)
+        self.assertIn('alt="DoTasks"', html)
+        self.assertIn("<title>DoTasks</title>", index)
+        self.assertIn(">DoTasks</title>", icon)
+        self.assertNotIn("Codex Taskboard", html + index + icon)
 
     def test_attention_includes_stages_with_paused_auto_dispatch(self):
         completed = self.run_module_script("""
 const statuses = new Set(["failed", "blocked"]);
-const pausedStages = new Set(["rework", "code_review", "acceptance"]);
+const pausedStages = new Set(["rework", "code_review"]);
 if (!module.taskNeedsAttention({status: "failed", auto_dispatch: 1}, statuses, pausedStages)) throw new Error("failed task was omitted");
 if (!module.taskNeedsAttention({status: "code_review", auto_dispatch: 0}, statuses, pausedStages)) throw new Error("paused review was omitted");
 if (module.taskNeedsAttention({status: "code_review", auto_dispatch: 1}, statuses, pausedStages)) throw new Error("active review was included");
@@ -272,20 +306,20 @@ if (failed.label !== "重新执行" || failed.status !== "ready") throw new Erro
 const blocked = module.taskRecoveryAction({status: "blocked", blocked_from_status: "code_review"});
 if (blocked.label !== "返回 Code Review" || blocked.status !== "code_review") throw new Error("blocked recovery action is incorrect");
 if (module.taskRecoveryAction({status: "paused"}).kind !== "resume") throw new Error("paused task has no resume action");
-if (module.taskRecoveryAction({status: "acceptance", auto_dispatch: 0}).kind !== "enable_auto") throw new Error("paused acceptance has no continue action");
+if (module.taskRecoveryAction({status: "code_review", auto_dispatch: 0}).kind !== "enable_auto") throw new Error("paused review has no continue action");
 """)
         self.assertEqual(0, completed.returncode, completed.stderr)
 
-    def test_attention_dialog_exposes_cancel_and_recovery_controls(self):
-        app = (WEB_SOURCE / "legacy-app.js").read_text(encoding="utf-8")
+    def test_attention_column_exposes_cancel_and_recovery_controls(self):
+        app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")
         self.assertIn('data-cancel-task=', app)
-        self.assertIn('restartWaitingConfirmation: true', app)
+        self.assertIn('restartWaitingConfirmation: needsAttention', app)
         self.assertIn('status: "cancelled"', app)
         self.assertIn('updates.token_budget = nextBudget', app)
 
     def test_task_change_confirmation_is_an_interactive_dialog(self):
         html = (WEB_SOURCE / "App.jsx").read_text(encoding="utf-8")
-        app = (WEB_SOURCE / "legacy-app.js").read_text(encoding="utf-8")
+        app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")
         self.assertIn('id="task-change-dialog"', html)
         self.assertIn('data-decision="revise"', app)
         self.assertIn('data-decision="create_new"', app)

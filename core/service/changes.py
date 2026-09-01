@@ -7,8 +7,8 @@ from typing import Any
 from .domain import (
     GENERIC_MATCH_TERMS,
     JSON_FIELDS,
-    _decode_row,
-    _search_tokens,
+    decode_row,
+    search_tokens,
     specific_modules,
 )
 
@@ -50,7 +50,7 @@ class TaskChangeMixin:
             raise ValueError("modules must be an array of strings")
         source_thread_id = str(payload.get("source_thread_id") or "").strip()
         explicit_task_id = str(payload.get("task_id") or "").strip()
-        query_tokens = _search_tokens(" ".join((title, goal, *modules)))
+        query_tokens = search_tokens(" ".join((title, goal, *modules)))
         normalized_modules = specific_modules(modules)
 
         with self.db.connection() as connection:
@@ -70,7 +70,7 @@ class TaskChangeMixin:
 
         candidates: list[dict[str, Any]] = []
         for row in rows:
-            task = _decode_row(row)
+            task = decode_row(row)
             if explicit_task_id and task["id"] != explicit_task_id:
                 continue
             # Automatic change detection is intentionally limited to active
@@ -97,7 +97,7 @@ class TaskChangeMixin:
             if module_overlap:
                 score += min(50, 25 * len(module_overlap))
                 reasons.append("模块重合：" + "、".join(module_overlap[:3]))
-            task_tokens = _search_tokens(
+            task_tokens = search_tokens(
                 " ".join(
                     (
                         task.get("title", ""),
@@ -338,7 +338,6 @@ class TaskChangeMixin:
                     }
                 ]
                 proposed["status"] = "ready"
-                proposed["workflow_version"] = 2
                 result = self.create_task(proposed)
             with self.db.transaction() as connection:
                 connection.execute(
@@ -441,6 +440,7 @@ class TaskChangeMixin:
                 or location.get("dependency_analysis")
                 or {"decision": "independent"}
             )
+            dependency = self._normalize_dependency_analysis(dependency)
             connection.execute(
                 """UPDATE tasks SET title=?, type=?, modules=?, status=?, priority=?, goal=?, scope=?,
                    out_of_scope=?, acceptance_criteria=?, source_thread_id=COALESCE(?, source_thread_id),
@@ -478,6 +478,24 @@ class TaskChangeMixin:
             )
             connection.execute("DELETE FROM task_targets WHERE task_id=?", (task_id,))
             self._store_task_targets(connection, task_id, location.get("targets", []))
+            connection.execute(
+                "DELETE FROM task_relations WHERE source_task_id=? "
+                "AND relation_type IN ('depends_on','continues_from','conflicts_with')",
+                (task_id,),
+            )
+            for related_id in dependency["depends_tasks"]:
+                self._insert_relation_in_connection(
+                    connection, task_id, related_id, "depends_on", "revised scheduling dependency",
+                )
+            if dependency.get("continues_from_task_id"):
+                self._insert_relation_in_connection(
+                    connection, task_id, dependency["continues_from_task_id"],
+                    "continues_from", "revised task continuation",
+                )
+            for related_id in dependency["conflicts_tasks"]:
+                self._insert_relation_in_connection(
+                    connection, task_id, related_id, "conflicts_with", "revised scheduling conflict",
+                )
             after = {
                 "title": title,
                 "type": proposed.get("type", current.get("type", "feature")),
@@ -542,62 +560,7 @@ class TaskChangeMixin:
         implementation: dict[str, Any],
         review: dict[str, Any],
     ) -> None:
-        targets = (
-            implementation.get("targets") if isinstance(implementation, dict) else None
+        self._validate_implementation_contract(
+            implementation, location.get("targets") or []
         )
-        steps = (
-            implementation.get("ordered_steps")
-            if isinstance(implementation, dict)
-            else None
-        )
-        if not isinstance(targets, list) or not targets:
-            raise ValueError("implementation_contract.targets is required")
-        located_keys = {
-            (
-                self._normalize_target_file(item.get("file")),
-                tuple(
-                    sorted(
-                        str(symbol).strip()
-                        for symbol in item.get("symbols", [])
-                        if str(symbol).strip()
-                    )
-                ),
-            )
-            for item in location.get("targets", [])
-            if isinstance(item, dict)
-        }
-        contract_keys = {
-            (
-                self._normalize_target_file(item.get("file")),
-                tuple(
-                    sorted(
-                        str(symbol).strip()
-                        for symbol in item.get("symbols", [])
-                        if str(symbol).strip()
-                    )
-                ),
-            )
-            for item in targets
-            if isinstance(item, dict)
-        }
-        if not located_keys or contract_keys != located_keys:
-            raise ValueError(
-                "implementation_contract.targets must exactly match location analysis targets"
-            )
-        if not isinstance(steps, list) or not steps:
-            raise ValueError("implementation_contract.ordered_steps must be non-empty")
-        for step in steps:
-            if not isinstance(step, dict) or not all(
-                str(step.get(key) or "").strip() for key in ("file", "symbol", "action")
-            ):
-                raise ValueError(
-                    "Every implementation step requires file, symbol and action"
-                )
-            file = self._normalize_target_file(step["file"])
-            symbol = str(step["symbol"]).strip()
-            if not any(
-                file == target_file and symbol in symbols
-                for target_file, symbols in contract_keys
-            ):
-                raise ValueError("Implementation step target is outside locked targets")
         self._normalize_review_contract(review)

@@ -1,12 +1,12 @@
 # Taskboard Management and Review
 
-Read this reference only for explicit dispatch, review, rework, traceability, relation, or board-management requests. Taskboard-generated lifecycle conversations use `$codex-taskboard-lifecycle` instead.
+Read this reference only for explicit dispatch, review, rework, traceability, relation, or board-management requests. DoTasks-generated lifecycle conversations use `$dotasks-lifecycle` instead.
 
 ## Dispatch and execution
 
 - Do not implement a queued task in the intake or dispatcher conversation.
-- `dispatch_next_task` claims only a ready or rework task whose dependencies are complete and whose located targets do not conflict with active work. Never bypass project serialization or target locks.
-- A new execution or rework conversation must use the returned `$codex-taskboard-lifecycle` prompt and be bound with the real thread ID. Never bind the dispatcher conversation.
+- `$dotasks-controller` calls `claim_next_dispatch` with independent `code_review` and `development` stages. Each lane has one active dispatch, different lanes may run concurrently, and all claims still preserve dependency, project-serialization, and target-lock gates. Requirement decomposition shares the development lane.
+- A new or resumed native worker task must use the persisted `$dotasks-lifecycle` prompt and be bound with `bind_native_dispatch` only after a real thread ID exists. Never bind the controller conversation or a `clientThreadId`.
 - Execution starts from saved targets, location evidence, acceptance plan and `RUN_CONTEXT_JSON`. Current code is authoritative; expand location only when a saved target is missing or contradicted.
 - Only `submit_task_delivery` moves implementation into code review. It requires exact in-lock changed locations and criterion-level evidence. Store a compact conversation summary after delivery.
 - A material new product decision moves the task to `waiting_confirmation`; an external blocker is reported concretely.
@@ -14,9 +14,9 @@ Read this reference only for explicit dispatch, review, rework, traceability, re
 ## Review and rework
 
 - Prepare review location from actual changed symbols and their direct callers/tests. Reuse the ordered location strategy from the main skill: CodeGraph, then GitNexus, then bounded direct source matching. A missing graph index does not block review location.
-- Code review reads the implementation and review contracts plus actual diff; it does not edit. Only `review_code` may pass this stage.
-- Functional acceptance uses saved criterion evidence and `run_acceptance_checks`; only `accept_task` may finish the task. Never describe blocked or unrun checks as passing.
-- Failed code review returns to rework. Failed acceptance creates the linked Bug flow defined by the service. Interrupted review remains review; it is not an execution failure.
+- Code Review reads the implementation and review contracts plus actual diff, runs the saved automated acceptance plan with `run_acceptance_checks`, and does not edit. Only `review_code` may pass this combined stage.
+- `review_code` must partition the exact combined set of review checks and acceptance criteria. Never describe warnings, blocked checks, or unrun checks as passing.
+- Failed Code Review returns to rework; passing completes the task. Interrupted review remains review; it is not an execution failure. Genuinely non-code tasks skip this stage and complete from fully passing delivery evidence.
 - Repeated equivalent failures and interruptions respect persisted backoff and operator pause state. Never bypass a paused task or disabled dispatcher.
 
 ## Traceability and relations

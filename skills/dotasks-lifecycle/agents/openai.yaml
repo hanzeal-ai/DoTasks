@@ -1,0 +1,6 @@
+interface:
+  display_name: "DoTasks Lifecycle"
+  short_description: "Run an explicit DoTasks execution or review lifecycle"
+  default_prompt: "执行 DoTasks 提供的当前生命周期提示；必须包含任务 ID 和运行 ID。"
+policy:
+  allow_implicit_invocation: false

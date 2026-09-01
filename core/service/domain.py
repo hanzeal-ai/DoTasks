@@ -13,6 +13,7 @@ __all__ = [
     "CONVERSATION_ROLES",
     "DISPATCH_PREPARATION_LIMIT",
     "DISPATCH_RETRY_DELAYS_SECONDS",
+    "REQUIREMENT_DECOMPOSITION_ATTEMPT_LIMIT",
     "JSON_FIELDS",
     "GENERIC_MATCH_TERMS",
     "GENERIC_MODULE_KEYS",
@@ -26,8 +27,8 @@ __all__ = [
     "decode_row",
     "search_tokens",
     "specific_modules",
-    "_decode_row",
-    "_search_tokens",
+    "decode_row",
+    "search_tokens",
 ]
 
 
@@ -71,19 +72,18 @@ ACTIVE_TASK_STATUSES = {
     "investigating",
     "implementing",
     "waiting_confirmation",
-    "review",
+    "code_review",
     "failed",
     "blocked",
 }
 REVIEW_INTERRUPT_LIMIT = 3
 REVIEW_RETRY_DELAYS_SECONDS = (30, 120, 600)
 REVIEW_STAGE_BY_RUN_TYPE = {
-    "review": "review",
     "code_review": "code_review",
-    "acceptance": "acceptance",
 }
 DISPATCH_PREPARATION_LIMIT = 3
 DISPATCH_RETRY_DELAYS_SECONDS = (30, 120, 600)
+REQUIREMENT_DECOMPOSITION_ATTEMPT_LIMIT = 3
 
 # Broad layer names and common change verbs are useful search hints, but they
 # are not strong enough to relate two tasks or interrupt a fast intake flow.
@@ -166,8 +166,3 @@ def decode_row(
             if field in item:
                 item[field] = json.loads(item[field] or "{}")
     return item
-
-
-# Compatibility aliases for the existing private helper names used by service modules.
-_search_tokens = search_tokens
-_decode_row = decode_row

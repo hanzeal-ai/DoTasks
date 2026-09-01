@@ -5,7 +5,6 @@ import json
 import tempfile
 import threading
 import unittest
-from pathlib import Path
 
 from taskboard.server import MAX_JSON_BODY_BYTES, build_server
 
@@ -43,24 +42,44 @@ class TaskboardHTTPServerTest(unittest.TestCase):
         status, _, payload = self.request("GET", "/api/settings")
         self.assertEqual(200, status)
         self.assertEqual(
-            {"task_token_budget": 60000, "max_batch_appended_tasks": 3}, payload
+            {
+                "task_token_budget": 60000,
+                "max_batch_appended_tasks": 3,
+                "parallel_development_enabled": False,
+                "max_parallel_development": 2,
+            }, payload
         )
 
         status, _, payload = self.request(
             "POST",
             "/api/settings",
             json.dumps(
-                {"task_token_budget": 120000, "max_batch_appended_tasks": 4}
+                {
+                    "task_token_budget": 120000,
+                    "max_batch_appended_tasks": 4,
+                    "parallel_development_enabled": True,
+                    "max_parallel_development": 3,
+                }
             ).encode("utf-8"),
             Origin=self.origin,
             **{"Content-Type": "application/json"},
         )
         self.assertEqual(200, status)
         self.assertEqual(
-            {"task_token_budget": 120000, "max_batch_appended_tasks": 4}, payload
+            {
+                "task_token_budget": 120000,
+                "max_batch_appended_tasks": 4,
+                "parallel_development_enabled": True,
+                "max_parallel_development": 3,
+            }, payload
         )
         self.assertEqual(
-            {"task_token_budget": 120000, "max_batch_appended_tasks": 4},
+            {
+                "task_token_budget": 120000,
+                "max_batch_appended_tasks": 4,
+                "parallel_development_enabled": True,
+                "max_parallel_development": 3,
+            },
             self.server.RequestHandlerClass.service.task_settings(),
         )
 
@@ -146,27 +165,24 @@ class TaskboardHTTPServerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "loopback"):
             build_server("0.0.0.0", 0, self.temporary.name)
 
-    def test_project_archive_and_restore_endpoints_are_idempotent(self) -> None:
-        project = str((Path(self.temporary.name) / "stale-project").resolve())
+    def test_project_and_chat_endpoints_are_removed(self) -> None:
         headers = {"Origin": self.origin, "Content-Type": "application/json"}
-        status, _, first = self.request("POST", "/api/codex/projects/archive", json.dumps({"path": project}).encode(), **headers)
-        status_again, _, second = self.request("POST", "/api/codex/projects/archive", json.dumps({"path": project}).encode(), **headers)
-        self.assertEqual((200, True, False), (status, first["changed"], second["changed"]))
-        self.assertEqual(200, status_again)
+        for method, path in (
+            ("GET", "/api/codex/projects"),
+            ("GET", "/api/codex/threads"),
+            ("POST", "/api/codex/threads"),
+            ("POST", "/api/chatkit"),
+        ):
+            body = b"{}" if method == "POST" else None
+            status, _, payload = self.request(method, path, body, **(headers if body else {}))
+            self.assertEqual(404, status, path)
+            self.assertEqual("API route not found", payload["error"])
 
-        status, _, first = self.request("POST", "/api/codex/projects/restore", json.dumps({"path": project}).encode(), **headers)
-        status_again, _, second = self.request("POST", "/api/codex/projects/restore", json.dumps({"path": project}).encode(), **headers)
-        self.assertEqual((200, True, False), (status, first["changed"], second["changed"]))
-        self.assertEqual(200, status_again)
-
-    def test_project_archive_rejects_invalid_path_and_untrusted_origin(self) -> None:
-        body = json.dumps({"path": "relative/project"}).encode()
-        status, _, payload = self.request("POST", "/api/codex/projects/archive", body, Origin=self.origin, **{"Content-Type": "application/json"})
-        self.assertEqual(400, status)
-        self.assertIn("normalized absolute", payload["error"])
-        status, _, payload = self.request("POST", "/api/codex/projects/archive", body, Origin="https://untrusted.example", **{"Content-Type": "application/json"})
-        self.assertEqual(403, status)
-        self.assertIn("Untrusted", payload["error"])
+    def test_health_reports_native_controller_execution_mode(self) -> None:
+        status, _, payload = self.request("GET", "/api/health")
+        self.assertEqual(200, status)
+        self.assertEqual("native_codex_controller", payload["dispatcher"]["execution_mode"])
+        self.assertIsNone(payload["dispatcher"]["running"])
 
 
 if __name__ == "__main__":

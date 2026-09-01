@@ -2,7 +2,7 @@ import {defineConfig} from "vite";
 import react from "@vitejs/plugin-react";
 import {fileURLToPath, URL} from "node:url";
 
-const backendOrigin = process.env.CODEX_TASKBOARD_BACKEND_ORIGIN || "http://127.0.0.1:8765";
+const backendOrigin = process.env.DOTASKS_BACKEND_ORIGIN || "http://127.0.0.1:8765";
 
 export default defineConfig({
   plugins: [react()],

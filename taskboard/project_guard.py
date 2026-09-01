@@ -14,27 +14,6 @@ class ProjectWorkspaceGuard:
     """Validate project paths and capture reproducible Git workspace baselines."""
 
     @staticmethod
-    def _require_helper_authorization(project: str) -> None:
-        """Enforce persisted folder consent when running under Taskboard Helper."""
-        if not os.environ.get("CODEX_TASKBOARD_HELPER_APP"):
-            return
-        data_home = Path(
-            os.environ.get("CODEX_TASKBOARD_HOME")
-            or Path.home() / "Library/Application Support/Codex Taskboard"
-        ).expanduser()
-        store_path = data_home / "authorized-projects.json"
-        try:
-            payload = json.loads(store_path.read_text(encoding="utf-8"))
-            bookmarks = payload.get("bookmarks") if isinstance(payload, dict) else None
-        except (OSError, json.JSONDecodeError):
-            bookmarks = None
-        if not isinstance(bookmarks, dict) or project not in bookmarks:
-            raise ValueError(
-                "Project has not been authorized by Taskboard Helper; "
-                "add it from the Taskboard project picker first"
-            )
-
-    @staticmethod
     def normalize_project(project: str | Path | None) -> str:
         value = str(project or "").strip()
         return str(Path(value).expanduser().resolve()) if value else ""
@@ -53,9 +32,7 @@ class ProjectWorkspaceGuard:
             raise ValueError(f"Project directory does not exist: {path}") from exc
         if not resolved.is_dir():
             raise ValueError(f"Project path is not a directory: {resolved}")
-        normalized = str(resolved)
-        ProjectWorkspaceGuard._require_helper_authorization(normalized)
-        return normalized
+        return str(resolved)
 
     @staticmethod
     def normalize_target_file(value: Any) -> str:

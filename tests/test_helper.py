@@ -7,84 +7,52 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
-from urllib.parse import parse_qs, urlparse
 
-from taskboard.helper import TaskboardHelperClient, TaskboardHelperError
 from taskboard.project_guard import ProjectWorkspaceGuard
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class TaskboardHelperClientTest(unittest.TestCase):
+class ProjectWorkspaceGuardTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.home = Path(self.temp.name).resolve()
         self.project = self.home / "project"
         self.project.mkdir()
-        self.helper = self.home / "Taskboard Helper.app"
-        executable = self.helper / "Contents" / "MacOS" / "TaskboardHelper"
-        executable.parent.mkdir(parents=True)
-        executable.touch()
+        self.file = self.home / "file.txt"
+        self.file.write_text("not a directory", encoding="utf-8")
 
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def client_with_response(self, payload):
-        def opener(arguments, **_kwargs):
-            request_id = parse_qs(urlparse(arguments[-1]).query)["request"][0]
-            response = self.home / "helper-requests" / f"{request_id}.json"
-            response.write_text(json.dumps(payload), encoding="utf-8")
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-        return TaskboardHelperClient(
-            self.home, helper_app=self.helper, opener=opener, sleep=lambda _value: None,
-        )
-
-    def test_authorize_project_returns_helper_selection(self) -> None:
-        client = self.client_with_response({"project": str(self.project)})
-
-        self.assertEqual(str(self.project), client.authorize_project())
-        self.assertEqual([], list((self.home / "helper-requests").glob("*.json")))
-
-    def test_authorize_project_returns_none_when_cancelled(self) -> None:
-        client = self.client_with_response({"cancelled": True})
-
-        self.assertIsNone(client.authorize_project())
-
-    def test_authorize_project_surfaces_helper_error(self) -> None:
-        client = self.client_with_response({"error": "authorization failed"})
-
-        with self.assertRaisesRegex(TaskboardHelperError, "authorization failed"):
-            client.authorize_project()
-
-    def test_packaged_runtime_rejects_projects_without_a_bookmark(self) -> None:
-        store = self.home / "authorized-projects.json"
+    def test_packaged_runtime_accepts_existing_absolute_directory_without_helper_state(self) -> None:
         environment = {
-            "CODEX_TASKBOARD_HELPER_APP": str(self.helper),
-            "CODEX_TASKBOARD_HOME": str(self.home),
+            "DOTASKS_HELPER_APP": str(self.home / "DoTasks Helper.app"),
+            "DOTASKS_HOME": str(self.home),
         }
         with patch.dict(os.environ, environment, clear=False):
-            with self.assertRaisesRegex(ValueError, "not been authorized"):
-                ProjectWorkspaceGuard.require_project_directory(self.project)
-            store.write_text(
-                json.dumps({"bookmarks": {str(self.project): "bookmark"}}),
-                encoding="utf-8",
-            )
             self.assertEqual(
                 str(self.project),
                 ProjectWorkspaceGuard.require_project_directory(self.project),
             )
 
+    def test_rejects_relative_missing_and_non_directory_paths(self) -> None:
+        with self.assertRaisesRegex(ValueError, "absolute path"):
+            ProjectWorkspaceGuard.require_project_directory("relative/project")
+        with self.assertRaisesRegex(ValueError, "does not exist"):
+            ProjectWorkspaceGuard.require_project_directory(self.home / "missing")
+        with self.assertRaisesRegex(ValueError, "not a directory"):
+            ProjectWorkspaceGuard.require_project_directory(self.file)
+
 
 @unittest.skipUnless(sys.platform == "darwin", "macOS helper test")
 class MacosHelperTest(unittest.TestCase):
     def test_builds_hidden_hardened_signed_helper_bundle(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="TaskboardHelperBuild") as temporary:
+        with tempfile.TemporaryDirectory(prefix="DoTasksHelperBuild") as temporary:
             environment = os.environ.copy()
-            environment["CODEX_TASKBOARD_HELPER_OUTPUT_DIR"] = temporary
+            environment["DOTASKS_HELPER_OUTPUT_DIR"] = temporary
             environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
             subprocess.run(
                 ["/bin/sh", str(ROOT / "scripts" / "build-helper")],
@@ -94,11 +62,11 @@ class MacosHelperTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            app = Path(temporary) / "Taskboard Helper.app"
-            self.assertTrue((app / "Contents" / "MacOS" / "TaskboardHelper").is_file())
+            app = Path(temporary) / "DoTasks Helper.app"
+            self.assertTrue((app / "Contents" / "MacOS" / "DoTasksHelper").is_file())
             runtime = app / "Contents" / "Resources" / "runtime"
             self.assertTrue((runtime / "scripts" / "start").is_file())
-            self.assertTrue((runtime / "taskboard" / "helper.py").is_file())
+            self.assertFalse((runtime / "taskboard" / "helper.py").exists())
             self.assertTrue((runtime / "taskboard" / "project_guard.py").is_file())
             self.assertTrue((runtime / "core" / "service" / "__init__.py").is_file())
             self.assertTrue((runtime / "vendor" / "tomli" / "__init__.py").is_file())
@@ -114,12 +82,25 @@ class MacosHelperTest(unittest.TestCase):
                 ).stdout.strip(),
             )
             self.assertEqual(
-                "codex-taskboard-helper",
+                "dotasks-helper",
                 subprocess.run(
                     ["/usr/bin/plutil", "-extract", "CFBundleURLTypes.0.CFBundleURLSchemes.0", "raw", str(info)],
                     check=True, capture_output=True, text=True,
                 ).stdout.strip(),
             )
+            self.assertEqual(
+                "DoTasks Helper",
+                subprocess.run(
+                    ["/usr/bin/plutil", "-extract", "CFBundleDisplayName", "raw", str(info)],
+                    check=True, capture_output=True, text=True,
+                ).stdout.strip(),
+            )
+            info_dump = subprocess.run(
+                ["/usr/bin/plutil", "-p", str(info)],
+                check=True, capture_output=True, text=True,
+            ).stdout
+            self.assertNotIn("BootstrapProject", info_dump)
+            self.assertNotIn("Authorization", info_dump)
             subprocess.run(
                 ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)],
                 check=True, capture_output=True, text=True,
@@ -133,17 +114,17 @@ class MacosHelperTest(unittest.TestCase):
     def test_runtime_scripts_prefer_homebrew_python(self) -> None:
         for name, module in (("mcp-server", "taskboard.mcp_server"), ("start", "taskboard.server")):
             script = (ROOT / "scripts" / name).read_text()
-            self.assertIn("CODEX_TASKBOARD_PYTHON_BIN", script)
+            self.assertIn("DOTASKS_PYTHON_BIN", script)
             self.assertIn("/opt/homebrew/bin/python3", script)
             self.assertIn("Python 3.9 or newer", script)
             self.assertIn('VENDOR_DIR="$PROJECT_DIR/vendor"', script)
             self.assertIn(f'exec "$PYTHON_BIN" -B -m {module}', script)
 
-    def test_mcp_server_enables_installed_helper_authorization_guard(self) -> None:
+    def test_mcp_server_does_not_enable_a_helper_project_guard(self) -> None:
         with tempfile.TemporaryDirectory(prefix="TaskboardMcpGuard") as temporary:
             home = Path(temporary)
             data_home = home / "Taskboard Data"
-            helper = data_home / "Taskboard Helper.app" / "Contents" / "MacOS" / "TaskboardHelper"
+            helper = data_home / "DoTasks Helper.app" / "Contents" / "MacOS" / "DoTasksHelper"
             helper.parent.mkdir(parents=True)
             helper.write_text("#!/bin/sh\n", encoding="utf-8")
             helper.chmod(0o755)
@@ -157,8 +138,8 @@ class MacosHelperTest(unittest.TestCase):
                 "import json, os\n"
                 "from pathlib import Path\n"
                 "Path(os.environ['CAPTURE_PATH']).write_text(json.dumps({\n"
-                "    'home': os.environ.get('CODEX_TASKBOARD_HOME'),\n"
-                "    'helper': os.environ.get('CODEX_TASKBOARD_HELPER_APP'),\n"
+                "    'home': os.environ.get('DOTASKS_HOME'),\n"
+                "    'dotasks_helper': os.environ.get('DOTASKS_HELPER_APP'),\n"
                 "}))\n"
                 "PY\n",
                 encoding="utf-8",
@@ -168,12 +149,12 @@ class MacosHelperTest(unittest.TestCase):
             environment.update(
                 {
                     "HOME": str(home),
-                    "CODEX_TASKBOARD_HOME": str(data_home),
-                    "CODEX_TASKBOARD_PYTHON_BIN": str(python),
+                    "DOTASKS_HOME": str(data_home),
+                    "DOTASKS_PYTHON_BIN": str(python),
                     "CAPTURE_PATH": str(capture),
                 }
             )
-            environment.pop("CODEX_TASKBOARD_HELPER_APP", None)
+            environment.pop("DOTASKS_HELPER_APP", None)
 
             subprocess.run(
                 ["/bin/sh", str(ROOT / "scripts" / "mcp-server")],
@@ -186,16 +167,32 @@ class MacosHelperTest(unittest.TestCase):
 
             payload = json.loads(capture.read_text(encoding="utf-8"))
             self.assertEqual(str(data_home), payload["home"])
-            self.assertEqual(str(data_home / "Taskboard Helper.app"), payload["helper"])
+            self.assertIsNone(payload["dotasks_helper"])
+
+    def test_helper_starts_server_without_project_authorization_code(self) -> None:
+        source = (ROOT / "macos" / "DoTasksHelper.swift").read_text()
+        self.assertIn("applicationDidFinishLaunching", source)
+        self.assertIn("startServer()", source)
+        for obsolete in (
+            "NSOpenPanel", "authorized-projects.json", "BookmarkStore",
+            "requestAuthorization", "restoreBookmarks", "persistAuthorization",
+        ):
+            self.assertNotIn(obsolete, source)
 
     def test_helper_supplies_stable_launch_agent_tool_paths(self) -> None:
-        source = (ROOT / "macos" / "TaskboardHelper.swift").read_text()
+        source = (ROOT / "macos" / "DoTasksHelper.swift").read_text()
         self.assertIn('"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"', source)
         self.assertIn('environment["PATH"]', source)
 
     def test_install_uses_a_persistent_user_launch_agent(self) -> None:
         script = (ROOT / "scripts" / "build-helper").read_text()
-        self.assertIn('HELPER_LABEL="local.sanmws.codex-taskboard-helper"', script)
+        self.assertIn('HELPER_LABEL="local.sanmws.dotasks-helper"', script)
+        self.assertLess(
+            script.index('dotasks-helper://quit'),
+            script.index('launchctl bootout "$SERVICE_DOMAIN/$HELPER_LABEL"'),
+        )
+        self.assertIn('-iTCP:8765 -sTCP:LISTEN', script)
+        self.assertIn('*" -m taskboard.server"*', script)
         self.assertIn('Add :RunAtLoad bool true', script)
         self.assertIn('Add :KeepAlive bool true', script)
         self.assertIn('launchctl bootstrap "$SERVICE_DOMAIN" "$LAUNCH_AGENT"', script)

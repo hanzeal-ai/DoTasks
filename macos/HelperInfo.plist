@@ -5,15 +5,15 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>zh_CN</string>
   <key>CFBundleDisplayName</key>
-  <string>Taskboard Helper</string>
+  <string>DoTasks Helper</string>
   <key>CFBundleExecutable</key>
-  <string>TaskboardHelper</string>
+  <string>DoTasksHelper</string>
   <key>CFBundleIdentifier</key>
-  <string>local.sanmws.codex-taskboard-helper</string>
+  <string>local.sanmws.dotasks-helper</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>Taskboard Helper</string>
+  <string>DoTasks Helper</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -24,10 +24,10 @@
   <array>
     <dict>
       <key>CFBundleURLName</key>
-      <string>Taskboard Project Authorization</string>
+      <string>DoTasks Helper Control</string>
       <key>CFBundleURLSchemes</key>
       <array>
-        <string>codex-taskboard-helper</string>
+        <string>dotasks-helper</string>
       </array>
     </dict>
   </array>

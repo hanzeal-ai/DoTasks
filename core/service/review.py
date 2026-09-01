@@ -9,10 +9,55 @@ from collections import Counter
 from typing import Any
 
 from ..runtime import project_runtime_environment
+from ..self_healing import (
+    SELF_HEAL_ATTEMPT_LIMIT,
+    classify_recoverable_failure,
+    infer_environment_repair_command,
+)
 
 
 class TaskReviewMixin:
     """Delivery validation, automated checks, review decisions, and acceptance records."""
+
+    @staticmethod
+    def _run_project_command(
+        command: str, project: str, timeout_seconds: int,
+    ) -> tuple[str, int | None, str, int]:
+        started = time.monotonic()
+        exit_code: int | None = None
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=project,
+                env=project_runtime_environment(project),
+                shell=True,
+                executable="/bin/zsh",
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+            exit_code = completed.returncode
+            status = "passed" if completed.returncode == 0 else "failed"
+            output = "\n".join(
+                part for part in (completed.stdout, completed.stderr) if part
+            ).strip()
+        except subprocess.TimeoutExpired as exc:
+            status = "timeout"
+            output = "\n".join(
+                str(part)
+                for part in (
+                    exc.stdout,
+                    exc.stderr,
+                    f"Timed out after {timeout_seconds}s",
+                )
+                if part
+            )
+        except OSError as exc:
+            status = "error"
+            output = str(exc)
+        duration_ms = max(0, int((time.monotonic() - started) * 1000))
+        return status, exit_code, output, duration_ms
 
     def _validate_changed_locations(
         self,
@@ -43,19 +88,21 @@ class TaskReviewMixin:
                     f"Changed symbols are outside the task target lock: {file}; "
                     f"submitted={json.dumps(sorted(submitted_symbols), ensure_ascii=False)}; "
                     f"allowed={json.dumps(sorted(allowed_symbols), ensure_ascii=False)}. "
-                    "Use the exact symbols from RUN_CONTEXT_JSON.located_targets "
+                    "Use the exact symbols from RUN_CONTEXT_JSON.targets "
                     "and retry the same active run."
                 )
 
     def _validate_workspace_delta(
         self, task: dict[str, Any], run: dict[str, Any], changed_locations: list[dict[str, Any]],
         current: dict[str, Any] | None = None, task_ids: list[str] | None = None,
+        workspace_path: str | None = None,
     ) -> dict[str, Any]:
         task_ids = task_ids or [task["id"]]
         baseline = (run.get("context_snapshot") or {}).get("workspace_baseline") or {}
         if not baseline.get("available"):
             return current or {}
-        current = current or self._workspace_state(task.get("project"))
+        workspace = workspace_path or task.get("project")
+        current = current or self._workspace_state(workspace)
         if not current.get("available"):
             raise ValueError("Cannot verify the actual Git workspace changes")
         before = baseline.get("files") or {}
@@ -68,7 +115,7 @@ class TaskReviewMixin:
         current_revision = str(current.get("revision") or "")
         if baseline_revision and current_revision and baseline_revision != current_revision:
             committed = self._git(
-                self._normalize_project(task.get("project")), "diff", "--name-only", "-z",
+                self._normalize_project(workspace), "diff", "--name-only", "-z",
                 baseline_revision, current_revision, "--",
             )
             if committed.returncode != 0:
@@ -111,6 +158,7 @@ class TaskReviewMixin:
         token_used: int = 0,
         *,
         batch_revision: int | None = None,
+        workspace_path: str | None = None,
     ) -> dict[str, Any]:
         run = self.get_run(run_id)
         task = self.get_task(run["task_id"])
@@ -150,9 +198,22 @@ class TaskReviewMixin:
             location["symbols"] = [symbol.strip() for symbol in symbols if symbol.strip()]
             location.setdefault("summary", "")
         self._validate_changed_locations(task["id"], changed_locations, batch_task_ids)
-        workspace_state = self._workspace_state(task.get("project"))
+        execution_environment = str(run.get("execution_environment") or "local")
+        execution_workspace = str(workspace_path or task.get("project") or "")
+        if execution_environment == "worktree":
+            execution_workspace = self._validate_execution_workspace(
+                str(task.get("project") or ""), execution_workspace,
+                require_worktree=True,
+            )
+        elif workspace_path:
+            execution_workspace = self._validate_execution_workspace(
+                str(task.get("project") or ""), execution_workspace,
+                require_worktree=False,
+            )
+        workspace_state = self._workspace_state(execution_workspace)
         self._validate_workspace_delta(
-            task, run, changed_locations, workspace_state, batch_task_ids
+            task, run, changed_locations, workspace_state, batch_task_ids,
+            execution_workspace,
         )
         if not isinstance(acceptance_evidence, list) or not acceptance_evidence or any(not isinstance(item, dict) for item in acceptance_evidence):
             raise ValueError("acceptance_evidence is required")
@@ -194,8 +255,10 @@ class TaskReviewMixin:
                 for item in task.get("acceptance_plan") or []
                 if isinstance(item, dict)
             }
+        requires_code_review = self._quality_gate_required(task, "code_review")
         normalized_evidence: list[dict[str, Any]] = []
         incomplete_automated: list[str] = []
+        incomplete_without_review: list[str] = []
         for item in acceptance_evidence:
             normalized = dict(item)
             criterion = str(normalized.get("criterion") or "")
@@ -209,10 +272,8 @@ class TaskReviewMixin:
                 or ("passed" if check_type == "automated" else "pending")
             ).strip().lower()
             normalized["status"] = status
-            if check_type != "automated" and status not in {"pending", "blocked"}:
-                raise ValueError(
-                    "Development must leave static_review and manual_runtime criteria pending or blocked for acceptance"
-                )
+            if not requires_code_review and status != "passed":
+                incomplete_without_review.append(criterion)
             if (
                 check_type == "automated"
                 and bool(plan.get("required", True))
@@ -225,18 +286,60 @@ class TaskReviewMixin:
                 "Required automated verification must pass before delivery: "
                 + ", ".join(incomplete_automated)
             )
+        if incomplete_without_review:
+            raise ValueError(
+                "Every acceptance criterion must pass during development when Code Review is skipped: "
+                + ", ".join(incomplete_without_review)
+            )
         acceptance_evidence = normalized_evidence
         baseline = (run.get("context_snapshot") or {}).get("workspace_baseline") or {}
+        artifact_path = artifact_sha256 = ""
+        base_revision = str(
+            run.get("base_revision")
+            or ((run.get("context_snapshot") or {}).get("workspace_baseline") or {}).get("revision")
+            or ""
+        )
+        if execution_environment == "worktree":
+            artifact_path, artifact_sha256 = self._capture_delivery_patch(
+                run_id,
+                execution_workspace,
+                base_revision,
+                [str(item["file"]) for item in changed_locations],
+            )
         artifact_snapshot = {
             "context_version": int(task.get("context_version") or 1),
             "workspace": workspace_state,
             "diff": self._workspace_diff(
-                task.get("project"), str(baseline.get("revision") or ""),
+                execution_workspace, str(baseline.get("revision") or ""),
                 [str(item["file"]) for item in changed_locations],
             ),
+            "execution_workspace": execution_workspace,
+            "artifact_path": artifact_path,
+            "artifact_sha256": artifact_sha256,
+            "base_ref": str(run.get("base_ref") or ""),
         }
+        if requires_code_review:
+            next_stage = "code_review"
+        else:
+            next_stage = "done"
+        delivery_run_status = "waiting_review" if next_stage == "code_review" else "completed"
+        conversation_status = "waiting_review" if delivery_run_status == "waiting_review" else "completed"
         if token_used:
             self.record_run_token_usage(run_id, token_used)
+        integration_result: dict[str, Any] = {}
+        if execution_environment == "worktree" and not requires_code_review:
+            integration_result = self._integrate_delivery_artifact(
+                task,
+                run_id,
+                {
+                    **run,
+                    "workspace_path": execution_workspace,
+                    "base_revision": base_revision,
+                    "output_revision": str(workspace_state.get("revision") or ""),
+                    "artifact_path": artifact_path,
+                    "artifact_sha256": artifact_sha256,
+                },
+            )
         with self.db.transaction() as connection:
             if batch:
                 sealed = connection.execute(
@@ -255,24 +358,37 @@ class TaskReviewMixin:
                         "review_dispatch_required": False,
                     }
             run_cursor = connection.execute(
-                """UPDATE task_runs SET status='waiting_review', delivery_summary=?, verification_result=?, changed_locations=?, acceptance_evidence=?, artifact_snapshot=?, token_used=MAX(token_used, ?),
+                """UPDATE task_runs SET status=?, delivery_summary=?, verification_result=?, changed_locations=?, acceptance_evidence=?, artifact_snapshot=?, token_used=MAX(token_used, ?),
+                   workspace_path=?, base_revision=?, output_revision=?, artifact_path=?, artifact_sha256=?,
+                   integration_status=?, integration_error='', integration_revision=?,
+                   workspace_sync_status=?, workspace_sync_error=?,
+                   completed_at=CASE WHEN ?='completed' THEN CURRENT_TIMESTAMP ELSE completed_at END,
                    updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running'""",
-                (delivery_summary.strip(), verification_result.strip(), json.dumps(changed_locations, ensure_ascii=False),
+                (delivery_run_status, delivery_summary.strip(), verification_result.strip(), json.dumps(changed_locations, ensure_ascii=False),
                  json.dumps(acceptance_evidence, ensure_ascii=False), json.dumps(artifact_snapshot, ensure_ascii=False),
-                 token_used, run_id),
+                 token_used, execution_workspace, base_revision,
+                 str(workspace_state.get("revision") or ""), artifact_path, artifact_sha256,
+                 str(integration_result.get("integration_status") or (
+                     "pending" if execution_environment == "worktree" else "local"
+                 )),
+                 str(integration_result.get("integration_revision") or ""),
+                 str(integration_result.get("workspace_sync_status") or (
+                     "pending" if execution_environment == "worktree" else "local"
+                 )),
+                 str(integration_result.get("workspace_sync_error") or ""),
+                 delivery_run_status, run_id),
             )
             if run_cursor.rowcount != 1:
                 raise ValueError("Execution run changed concurrently")
-            next_stage = "code_review" if int(task.get("workflow_version") or 1) >= 2 else "review"
             task_cursor = connection.execute(
-                f"""UPDATE tasks SET status='{next_stage}', delivery_summary=?, verification_result=?,
+                """UPDATE tasks SET status=?, delivery_summary=?, verification_result=?,
                    token_used=(SELECT COALESCE(SUM(r.token_used), 0) FROM task_runs r WHERE r.task_id=tasks.id),
                    effective_token_used=(SELECT COALESCE(SUM(r.effective_token_used), 0) FROM task_runs r WHERE r.task_id=tasks.id),
                    active_run_id=NULL, assigned_to=NULL,
                    primary_run_id=?,
                    review_interrupt_count=0, review_retry_after=NULL, updated_at=CURRENT_TIMESTAMP
                    WHERE id=? AND active_run_id=? AND status IN ('investigating','implementing','rework')""",
-                (delivery_summary.strip(), verification_result.strip(), run_id, task["id"], run_id),
+                (next_stage, delivery_summary.strip(), verification_result.strip(), run_id, task["id"], run_id),
             )
             if task_cursor.rowcount != 1:
                 raise ValueError("Task changed concurrently during delivery")
@@ -288,117 +404,35 @@ class TaskReviewMixin:
                     acceptance_evidence,
                     artifact_snapshot,
                 )
-            self._event(connection, "run", run_id, "delivery_submitted", {"task_id": task["id"]})
-            connection.execute(
-                "UPDATE task_conversations SET status='waiting_review', updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
-                (run_id,),
+            self._event(
+                connection,
+                "run",
+                run_id,
+                "delivery_submitted",
+                {
+                    "task_id": task["id"],
+                    "next_stage": next_stage,
+                    "requires_code_review": requires_code_review,
+                },
             )
             connection.execute(
-                "UPDATE task_run_conversations SET status='waiting_review', updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
-                (run_id,),
+                "UPDATE task_conversations SET status=?, updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
+                (conversation_status, run_id),
+            )
+            connection.execute(
+                "UPDATE task_run_conversations SET status=?, updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
+                (conversation_status, run_id),
             )
             self._queue_obsidian_sync(connection, "task", task["id"])
         updated = self.get_task(task["id"])
+        if updated["status"] == "done":
+            self._create_experience(updated)
         self.flush_integration_outbox()
-        return {"task": updated, "run": self.get_run(run_id), "review_dispatch_required": True}
-
-    def prepare_review_location(self, task_id: str) -> dict[str, Any]:
-        task = self.get_task(task_id)
-        if task["status"] != "review":
-            raise ValueError("Task must be in review")
-        runs = [run for run in self.list_runs(task_id) if run["id"] == task.get("primary_run_id") and run.get("acceptance_evidence")]
-        if not runs:
-            raise ValueError("No submitted delivery is available for review")
-        latest = runs[-1]
-        payload = {
-            "project": task["project"], "title": task["title"], "goal": task["goal"],
-            "modules": task["modules"] + [item.get("file", "") for item in latest["changed_locations"]],
-        }
-        prepared = self.prepare_location_analysis(payload, "review", task_id, latest["id"])
-        prepared["changed_locations"] = latest["changed_locations"]
-        prepared["acceptance_evidence"] = latest["acceptance_evidence"]
-        prepared["acceptance_criteria"] = task["acceptance_criteria"]
-        return prepared
-
-    def prepare_review_run(self, task_id: str, review_location_analysis_id: str, reviewer_id: str = "codex-reviewer", lease_seconds: int = 1800) -> dict[str, Any]:
-        task = self.get_task(task_id)
-        if task["status"] != "review":
-            raise ValueError("Task must be in review")
-        analysis = self.get_location_analysis(review_location_analysis_id)
-        if analysis["stage"] != "review" or analysis["task_id"] != task_id or analysis["status"] != "completed":
-            raise ValueError("A completed review location analysis for this task is required")
-        deliveries = [run for run in self.list_runs(task_id) if run["id"] == task.get("primary_run_id") and run.get("acceptance_evidence")]
-        if not deliveries:
-            raise ValueError("No submitted delivery is available for review")
-        latest_delivery = deliveries[-1]
-        if analysis.get("delivery_run_id") != latest_delivery["id"] or (
-            analysis.get("delivery_attempt") is not None and analysis["delivery_attempt"] != latest_delivery["attempt"]
-        ):
-            raise ValueError("Review location analysis belongs to an older delivery")
-        review_context = {
-            "task_id": task_id,
-            "review_location_analysis_id": analysis["id"],
-            "delivery_run_id": latest_delivery["id"],
-            "targets": analysis["targets"],
-            "location_evidence": analysis["location_evidence"],
-            "obsidian_evidence": analysis["obsidian_evidence"],
-            "acceptance_plan": analysis["acceptance_plan"],
-            "changed_locations": latest_delivery["changed_locations"],
-            "acceptance_evidence": latest_delivery["acceptance_evidence"],
-            "verification_result": latest_delivery["verification_result"],
-        }
-        with self.db.transaction() as connection:
-            existing = connection.execute(
-                """SELECT id FROM task_runs WHERE id=? AND task_id=? AND run_type='review'
-                   AND delivery_run_id=? AND status IN ('awaiting_thread','running')""",
-                (task.get("active_run_id"), task_id, latest_delivery["id"]),
-            ).fetchone()
-            if existing:
-                run_id = existing["id"]
-                if task.get("active_run_id") != run_id:
-                    raise ValueError("Task active review run does not match the prepared run")
-            else:
-                delivery = connection.execute(
-                    """SELECT id FROM task_runs WHERE id=? AND task_id=?
-                       AND run_type IN ('execution','rework') AND status='waiting_review'""",
-                    (task.get("primary_run_id"), task_id),
-                ).fetchone()
-                if not delivery:
-                    raise ValueError("Task has no current delivery awaiting review")
-                attempt = connection.execute(
-                    "SELECT COALESCE(MAX(attempt),0)+1 AS value FROM task_runs WHERE task_id=?",
-                    (task_id,),
-                ).fetchone()["value"]
-                run_id = self.db.next_id(connection, "RUN")
-                connection.execute(
-                    """INSERT INTO task_runs(
-                           id, task_id, parent_run_id, delivery_run_id, run_type, attempt,
-                           status, claimed_by, lease_token, lease_expires_at
-                       ) VALUES(?, ?, ?, ?, 'review', ?, 'awaiting_thread', ?, ?, datetime('now', ?))""",
-                    (
-                        run_id, task_id, delivery["id"], delivery["id"], attempt, reviewer_id,
-                        uuid.uuid4().hex, f"+{max(300, min(lease_seconds, 7200))} seconds",
-                    ),
-                )
-                connection.execute(
-                    "UPDATE tasks SET active_run_id=?, assigned_to=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='review'",
-                    (run_id, reviewer_id, task_id),
-                )
-            connection.execute(
-                "UPDATE task_runs SET context_snapshot=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                (json.dumps(review_context, ensure_ascii=False), run_id),
-            )
         return {
-            "task": self.get_task(task_id),
+            "task": updated,
             "run": self.get_run(run_id),
-            "dispatch_prompt": (
-                f"独立验收 Codex Taskboard 任务 {task_id}（验收运行 {run_id}）。"
-                "先读取该运行的 context_snapshot；只检查其中的 targets、changed_locations、直接依赖和 acceptance_plan。"
-                "依据逐条 acceptance_evidence 与已保存的 CodeGraph、GitNexus 或源码匹配影响证据验证，不重新扫描整个项目，也不修改实现；"
-                "先调用 run_acceptance_checks 执行自动化检查，再调用 review_task；失败时列出原因和已通过项。"
-                "passed_items 与 failed_criteria 必须使用原始验收标准的精确文本并完整覆盖全部标准；"
-                "通过时 passed_items 必须包含全部原始验收标准，范围外发现不得用于打回。"
-            ),
+            "next_stage": next_stage,
+            "review_dispatch_required": next_stage in {"review", "code_review"},
         }
 
     def run_acceptance_checks(
@@ -406,19 +440,23 @@ class TaskReviewMixin:
     ) -> dict[str, Any]:
         task = self.get_task(task_id)
         run = self.get_run(run_id)
-        if task["status"] not in {"review", "acceptance"} or task.get("active_run_id") != run_id:
+        if task["status"] not in {"review", "code_review", "acceptance"} or task.get("active_run_id") != run_id:
             raise ValueError("Acceptance checks require the active review run")
-        if run["task_id"] != task_id or run["run_type"] not in {"review", "acceptance"} or run["status"] != "running":
+        if run["task_id"] != task_id or run["run_type"] not in {"review", "code_review", "acceptance"} or run["status"] != "running":
             raise ValueError("Acceptance checks require a running review run")
         context = run.get("context_snapshot") or {}
         delivery_run_id = str(context.get("delivery_run_id") or run.get("delivery_run_id") or "")
         if not delivery_run_id or delivery_run_id != task.get("primary_run_id"):
             raise ValueError("Acceptance checks are not bound to the current delivery")
+        delivery_run = self.get_run(delivery_run_id)
+        execution_workspace = str(
+            delivery_run.get("workspace_path") or task.get("project") or ""
+        )
         plans = [
             item for item in (context.get("acceptance") or context.get("acceptance_plan") or [])
             if str(item.get("check_type") or ("automated" if item.get("command") else "static_review")) == "automated"
         ]
-        workspace = self._workspace_state(task.get("project"))
+        workspace = self._workspace_state(execution_workspace)
         workspace_fingerprint = str(workspace.get("fingerprint") or "") if workspace.get("available") else ""
         results: list[dict[str, Any]] = []
         for plan in plans:
@@ -442,12 +480,28 @@ class TaskReviewMixin:
                     cursor = connection.execute(
                         """INSERT INTO acceptance_check_runs(
                                task_id, review_run_id, delivery_run_id, criterion, command,
-                               status, exit_code, output, duration_ms, workspace_fingerprint, cache_hit
-                           ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1)""",
+                               status, exit_code, output, duration_ms, workspace_fingerprint, cache_hit,
+                               failure_category, repair_attempted, repair_command, repair_status,
+                               repair_output, initial_status, initial_exit_code, initial_output
+                           ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             task_id, run_id, delivery_run_id, criterion, command,
                             cached_item["status"], cached_item["exit_code"], cached_item["output"],
                             workspace_fingerprint,
+                            cached_item.get("failure_category", ""),
+                            0,
+                            cached_item.get("repair_command", ""),
+                            (
+                                "cached_healed"
+                                if cached_item.get("repair_status") in {
+                                    "healed", "cached_healed",
+                                }
+                                else ""
+                            ),
+                            cached_item.get("repair_output", ""),
+                            cached_item.get("initial_status", ""),
+                            cached_item.get("initial_exit_code"),
+                            cached_item.get("initial_output", ""),
                         ),
                     )
                     check_id = cursor.lastrowid
@@ -458,47 +512,90 @@ class TaskReviewMixin:
                 results.append(self.get_acceptance_check(check_id))
                 continue
             timeout_seconds = max(1, min(int(plan.get("timeout_seconds", 300)), 1800))
-            started = time.monotonic()
-            exit_code: int | None = None
-            try:
-                completed = subprocess.run(
-                    command,
-                    cwd=task["project"],
-                    env=project_runtime_environment(task["project"]),
-                    shell=True,
-                    executable="/bin/zsh",
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_seconds,
-                    check=False,
-                )
-                exit_code = completed.returncode
-                status = "passed" if completed.returncode == 0 else "failed"
-                output = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
-            except subprocess.TimeoutExpired as exc:
-                status = "timeout"
-                output = "\n".join(
-                    str(part) for part in (exc.stdout, exc.stderr, f"Timed out after {timeout_seconds}s") if part
-                )
-            except OSError as exc:
-                status = "error"
-                output = str(exc)
-            duration_ms = max(0, int((time.monotonic() - started) * 1000))
+            status, exit_code, output, duration_ms = self._run_project_command(
+                command, execution_workspace, timeout_seconds
+            )
+            initial_status, initial_exit_code, initial_output = status, exit_code, output
+            failure_category = (
+                classify_recoverable_failure(output, command)
+                if status != "passed" else ""
+            )
+            configured_category = str(plan.get("failure_category") or "").strip().lower()
+            if status != "passed" and configured_category in {
+                "project", "environment", "implementation",
+            }:
+                failure_category = configured_category
+            repair_attempted = 0
+            repair_command = ""
+            repair_status = ""
+            repair_output = ""
+            if failure_category == "environment":
+                repair_command = str(plan.get("repair_command") or "").strip()
+                if not repair_command:
+                    repair_command = infer_environment_repair_command(
+                        execution_workspace, output
+                    )
+                with self.db.connection() as connection:
+                    prior_repairs = connection.execute(
+                        """SELECT COUNT(*) value FROM acceptance_check_runs
+                           WHERE delivery_run_id=? AND criterion=? AND command=?
+                             AND repair_attempted=1""",
+                        (delivery_run_id, criterion, command),
+                    ).fetchone()["value"]
+                if repair_command and int(prior_repairs) < SELF_HEAL_ATTEMPT_LIMIT:
+                    repair_attempted = 1
+                    repair_timeout = max(
+                        1,
+                        min(int(plan.get("repair_timeout_seconds", timeout_seconds)), 1800),
+                    )
+                    (
+                        repair_run_status,
+                        repair_exit_code,
+                        repair_output,
+                        repair_duration_ms,
+                    ) = self._run_project_command(
+                        repair_command, execution_workspace, repair_timeout
+                    )
+                    duration_ms += repair_duration_ms
+                    if repair_run_status == "passed":
+                        status, exit_code, output, retry_duration_ms = self._run_project_command(
+                            command, execution_workspace, timeout_seconds
+                        )
+                        duration_ms += retry_duration_ms
+                        repair_status = "healed" if status == "passed" else "retry_failed"
+                    else:
+                        repair_status = "failed"
+                        repair_output = (
+                            f"exit_code={repair_exit_code}\n{repair_output}"
+                        ).strip()
+                    refreshed_workspace = self._workspace_state(execution_workspace)
+                    if refreshed_workspace.get("available"):
+                        workspace_fingerprint = str(
+                            refreshed_workspace.get("fingerprint") or ""
+                        )
             with self.db.transaction() as connection:
                 cursor = connection.execute(
                     """INSERT INTO acceptance_check_runs(
                            task_id, review_run_id, delivery_run_id, criterion, command,
-                           status, exit_code, output, duration_ms, workspace_fingerprint, cache_hit
-                       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                           status, exit_code, output, duration_ms, workspace_fingerprint, cache_hit,
+                           failure_category, repair_attempted, repair_command, repair_status,
+                           repair_output, initial_status, initial_exit_code, initial_output
+                       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         task_id, run_id, delivery_run_id, criterion, command,
                         status, exit_code, output[-12000:], duration_ms, workspace_fingerprint,
+                        failure_category, repair_attempted, repair_command, repair_status,
+                        repair_output[-12000:], initial_status, initial_exit_code,
+                        initial_output[-12000:],
                     ),
                 )
                 check_id = cursor.lastrowid
                 self._event(connection, "run", run_id, "acceptance_check_completed", {
                     "check_id": check_id, "criterion": plan.get("criterion"), "status": status,
                     "exit_code": exit_code, "duration_ms": duration_ms,
+                    "failure_category": failure_category,
+                    "repair_attempted": bool(repair_attempted),
+                    "repair_status": repair_status,
                 })
             results.append(self.get_acceptance_check(check_id))
         return {
@@ -507,6 +604,12 @@ class TaskReviewMixin:
             "delivery_run_id": delivery_run_id,
             "workspace_fingerprint": workspace_fingerprint,
             "cache_hits": sum(int(item.get("cache_hit") or 0) for item in results),
+            "self_heal_attempts": sum(
+                int(item.get("repair_attempted") or 0) for item in results
+            ),
+            "self_healed": sum(
+                item.get("repair_status") == "healed" for item in results
+            ),
             "checks": results,
             "all_required_passed": all(
                 (not bool(plan.get("required", True))) or result["status"] == "passed"
@@ -563,159 +666,6 @@ class TaskReviewMixin:
             raise ValueError(f"Required acceptance checks were not run: {', '.join(missing)}")
         if failed:
             raise ValueError(f"Required acceptance checks did not pass: {', '.join(failed)}")
-
-    def review_task(
-        self, task_id: str, verdict: str, reasons: list[str] | None = None,
-        passed_items: list[str] | None = None, run_id: str | None = None,
-        failed_criteria: list[str] | None = None,
-    ) -> dict[str, Any]:
-        task = self.get_task(task_id)
-        if task["status"] != "review":
-            raise ValueError("Task must be in review before it can be reviewed")
-        if verdict not in {"pass", "fail"}:
-            raise ValueError("verdict must be pass or fail")
-        reasons = reasons or []
-        passed_items = passed_items or []
-        failed_criteria = failed_criteria or []
-        if any(not isinstance(item, str) or not item.strip() for item in [*reasons, *passed_items, *failed_criteria]):
-            raise ValueError("Review reasons and criterion results must be non-empty strings")
-        if verdict == "fail" and not reasons:
-            raise ValueError("Review failure requires reasons")
-        criteria_list = [str(item) for item in task.get("acceptance_criteria", [])]
-        criteria = set(criteria_list)
-        if verdict == "fail":
-            if not failed_criteria:
-                raise ValueError("Review failure requires failed_criteria")
-            unknown = set(failed_criteria) - criteria
-            if unknown:
-                raise ValueError(f"Review cannot fail outside confirmed acceptance criteria: {', '.join(sorted(unknown))}")
-        elif failed_criteria:
-            raise ValueError("Passing review cannot include failed_criteria")
-        unknown_passed = set(passed_items) - criteria
-        if unknown_passed:
-            raise ValueError(f"Review passed_items are outside confirmed acceptance criteria: {', '.join(sorted(unknown_passed))}")
-        if set(passed_items) & set(failed_criteria):
-            raise ValueError("A review criterion cannot be both passed and failed")
-        result_counter = Counter(passed_items) + Counter(failed_criteria)
-        if result_counter != Counter(criteria_list):
-            raise ValueError("Review results must exactly cover every confirmed acceptance criterion")
-        if not run_id:
-            raise ValueError("run_id from a located independent review is required")
-        run = self.get_run(run_id)
-        if run["task_id"] != task_id or run["run_type"] != "review" or run["status"] != "running":
-            raise ValueError("Invalid or inactive review run")
-        if task.get("active_run_id") != run_id:
-            raise ValueError("Review run is no longer the task's active run")
-        review_context = run.get("context_snapshot") or {}
-        analysis_id = str(review_context.get("review_location_analysis_id") or "")
-        delivery_run_id = str(review_context.get("delivery_run_id") or "")
-        if not analysis_id or not delivery_run_id or not review_context.get("targets") or not review_context.get("acceptance_plan"):
-            raise ValueError("Review location analysis must be completed and prepared before review_task")
-        analysis = self.get_location_analysis(analysis_id)
-        if (
-            analysis["stage"] != "review" or analysis["task_id"] != task_id
-            or analysis["status"] != "completed" or analysis.get("delivery_run_id") != delivery_run_id
-        ):
-            raise ValueError("Review location analysis is missing, stale or belongs to another delivery")
-        delivery_run = self.get_run(delivery_run_id)
-        if (
-            delivery_run["task_id"] != task_id
-            or delivery_run["id"] != task.get("primary_run_id")
-            or delivery_run["run_type"] not in {"execution", "rework"}
-            or delivery_run["status"] != "waiting_review"
-            or str(run.get("delivery_run_id") or "") != delivery_run_id
-        ):
-            raise ValueError("Reviewed delivery is no longer current")
-        if Counter(str(item.get("criterion") or "") for item in review_context["acceptance_plan"]) != Counter(criteria_list):
-            raise ValueError("Prepared review plan does not cover the confirmed acceptance criteria")
-        if verdict == "pass":
-            self._assert_required_acceptance_checks_passed(run_id, review_context["acceptance_plan"])
-        with self.db.transaction() as connection:
-            previous_review = connection.execute(
-                "SELECT failed_criteria, reasons FROM reviews WHERE task_id=? AND verdict='fail' ORDER BY round DESC LIMIT 1",
-                (task_id,),
-            ).fetchone()
-            round_number = connection.execute(
-                "SELECT COALESCE(MAX(round), 0) + 1 AS next_round FROM reviews WHERE task_id = ?", (task_id,)
-            ).fetchone()["next_round"]
-            connection.execute(
-                "INSERT INTO reviews(task_id, round, verdict, reasons, passed_items, failed_criteria) VALUES(?, ?, ?, ?, ?, ?)",
-                (task_id, round_number, verdict, json.dumps(reasons, ensure_ascii=False),
-                 json.dumps(passed_items, ensure_ascii=False), json.dumps(failed_criteria, ensure_ascii=False)),
-            )
-            connection.execute(
-                "UPDATE task_runs SET status='completed', completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                (run_id,),
-            )
-            if verdict == "fail":
-                normalized_reasons = {str(item).strip() for item in reasons if str(item).strip()}
-                repeated_failure = bool(previous_review) and (
-                    set(json.loads(previous_review["failed_criteria"] or "[]")) == set(failed_criteria)
-                    and {str(item).strip() for item in json.loads(previous_review["reasons"] or "[]") if str(item).strip()} == normalized_reasons
-                )
-                connection.execute(
-                    """UPDATE tasks SET status='rework', active_run_id=NULL, assigned_to=NULL,
-                       review_failed_at=CURRENT_TIMESTAMP, last_review_reasons=?, last_failed_criteria=?,
-                       review_rework_count=review_rework_count+1, auto_dispatch=?,
-                       review_interrupt_count=0, review_retry_after=NULL, updated_at=CURRENT_TIMESTAMP
-                       WHERE id=?""",
-                    (
-                        json.dumps(reasons, ensure_ascii=False), json.dumps(failed_criteria, ensure_ascii=False),
-                        0 if repeated_failure else 1, task_id,
-                    ),
-                )
-                connection.execute(
-                    "UPDATE task_runs SET status='review_failed', completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='waiting_review'",
-                    (delivery_run_id,),
-                )
-                connection.execute(
-                    "UPDATE task_conversations SET status='review_failed', updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
-                    (delivery_run_id,),
-                )
-                connection.execute(
-                    "UPDATE task_run_conversations SET status='review_failed', updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
-                    (delivery_run_id,),
-                )
-            else:
-                connection.execute(
-                    """INSERT INTO acceptance_results(task_id, run_id, delivery_run_id, round, verdict,
-                       reasons, passed_criteria, failed_criteria, failure_locations)
-                       VALUES(?, ?, ?, (SELECT COALESCE(MAX(round),0)+1 FROM acceptance_results WHERE task_id=?), 'pass', ?, ?, '[]', '[]')""",
-                    (task_id, run_id, delivery_run_id, task_id, json.dumps(reasons, ensure_ascii=False), json.dumps(passed_items, ensure_ascii=False)),
-                )
-                connection.execute(
-                    """UPDATE tasks SET status='done', active_run_id=NULL, assigned_to=NULL,
-                       auto_dispatch=1, retry_required=0, retry_run_type=NULL,
-                       review_interrupt_count=0, review_retry_after=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                    (task_id,),
-                )
-                connection.execute(
-                    "UPDATE task_runs SET status='completed', completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='waiting_review'",
-                    (delivery_run_id,),
-                )
-                connection.execute(
-                    "UPDATE task_conversations SET status='completed', updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
-                    (delivery_run_id,),
-                )
-                connection.execute(
-                    "UPDATE task_run_conversations SET status='completed', updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
-                    (delivery_run_id,),
-                )
-            connection.execute(
-                "UPDATE task_conversations SET status='completed', updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
-                (run_id,),
-            )
-            connection.execute(
-                "UPDATE task_run_conversations SET status='completed', updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
-                (run_id,),
-            )
-            self._event(connection, "task", task_id, "reviewed", {"round": round_number, "verdict": verdict, "reasons": reasons})
-            self._queue_obsidian_sync(connection, "task", task_id)
-        updated = self.get_task(task_id)
-        if verdict == "pass":
-            self._create_experience(updated)
-        self.flush_integration_outbox()
-        return updated
 
     def list_reviews(self, task_id: str) -> list[dict[str, Any]]:
         with self.db.connection() as connection:

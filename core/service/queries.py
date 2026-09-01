@@ -3,11 +3,34 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .domain import ACTIVE_RUN_STATUSES, _decode_row
+from .domain import ACTIVE_RUN_STATUSES, decode_row
 
 
 class TaskQueryMixin:
     """Read models used by API, MCP, lifecycle, and reporting surfaces."""
+
+    def list_requirements(self) -> list[dict[str, Any]]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """SELECT r.*,
+                          COUNT(t.id) AS child_task_count
+                   FROM requirements r
+                   LEFT JOIN tasks t ON t.requirement_id=r.id
+                   GROUP BY r.id
+                   ORDER BY r.created_at DESC"""
+            ).fetchall()
+        requirements = []
+        for row in rows:
+            requirement = dict(row)
+            for field in (
+                "modules", "scope", "out_of_scope", "acceptance_criteria",
+                "decomposition_plan",
+            ):
+                requirement[field] = json.loads(requirement.get(field) or "[]")
+            requirement["auto_dispatch"] = bool(requirement.get("auto_dispatch"))
+            requirement["child_task_count"] = int(requirement.get("child_task_count") or 0)
+            requirements.append(requirement)
+        return requirements
 
     def list_tasks(self) -> list[dict[str, Any]]:
         with self.db.connection() as connection:
@@ -36,7 +59,7 @@ class TaskQueryMixin:
                 """SELECT task_id, run_id, role, thread_id, title, summary, status, created_at, updated_at
                    FROM task_run_conversations ORDER BY task_id, created_at"""
             ).fetchall()
-        tasks = [_decode_row(row) for row in rows]
+        tasks = [decode_row(row) for row in rows]
         metrics: dict[str, dict[str, dict[str, int]]] = {}
         for row in metric_rows:
             metrics.setdefault(row["task_id"], {})[row["run_type"]] = {
@@ -88,7 +111,7 @@ class TaskQueryMixin:
             row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if not row:
             raise KeyError(f"Task not found: {task_id}")
-        task = _decode_row(row)
+        task = decode_row(row)
         with self.db.connection() as connection:
             task["target_conflicts"] = self._target_conflicts(connection, task_id)
             task["project_blockers"] = self._project_blockers(connection, task_id)
@@ -107,7 +130,6 @@ class TaskQueryMixin:
             "conversations": self.list_conversations(task_id),
             "relations": self.task_relations(task_id),
             "reviews": self.list_reviews(task_id),
-            "acceptance_results": self.list_acceptance_results(task_id),
             "acceptance_checks": self.list_acceptance_checks(task_id),
             "revisions": self.list_task_revisions(task_id),
             "events": self.list_events("task", task_id) + self.list_events("run", task_id=task_id),

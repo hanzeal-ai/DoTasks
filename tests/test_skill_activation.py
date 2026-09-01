@@ -9,17 +9,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SkillActivationTest(unittest.TestCase):
-    def test_taskboard_skills_require_explicit_invocation(self):
-        manual_skill = (ROOT / "skills/codex-taskboard/SKILL.md").read_text(encoding="utf-8")
-        lifecycle_skill = (ROOT / "skills/codex-taskboard-lifecycle/SKILL.md").read_text(encoding="utf-8")
-        manual_agent = (ROOT / "skills/codex-taskboard/agents/openai.yaml").read_text(encoding="utf-8")
+    def test_dotasks_skills_require_explicit_invocation(self):
+        manual_skill = (ROOT / "skills/dotasks/SKILL.md").read_text(encoding="utf-8")
+        lifecycle_skill = (ROOT / "skills/dotasks-lifecycle/SKILL.md").read_text(encoding="utf-8")
+        manual_agent = (ROOT / "skills/dotasks/agents/openai.yaml").read_text(encoding="utf-8")
         lifecycle_agent = (
-            ROOT / "skills/codex-taskboard-lifecycle/agents/openai.yaml"
+            ROOT / "skills/dotasks-lifecycle/agents/openai.yaml"
         ).read_text(encoding="utf-8")
 
         self.assertIn("allow_implicit_invocation: false", manual_agent)
         self.assertIn("allow_implicit_invocation: false", lifecycle_agent)
-        self.assertIn("$codex-taskboard-lifecycle", lifecycle_skill)
+        self.assertIn("$dotasks-lifecycle", lifecycle_skill)
         self.assertIn("TASK-*", lifecycle_skill)
         self.assertIn("RUN-*", lifecycle_skill)
         self.assertIn("preflight every `changed_locations` entry", lifecycle_skill)
@@ -28,8 +28,8 @@ class SkillActivationTest(unittest.TestCase):
         self.assertIn("Do not use", manual_skill.split("---", 2)[1])
 
     def test_new_task_skill_keeps_management_details_progressive(self):
-        manual_skill = (ROOT / "skills/codex-taskboard/SKILL.md").read_text(encoding="utf-8")
-        reference = ROOT / "skills/codex-taskboard/references/management-and-review.md"
+        manual_skill = (ROOT / "skills/dotasks/SKILL.md").read_text(encoding="utf-8")
+        reference = ROOT / "skills/dotasks/references/management-and-review.md"
         self.assertTrue(reference.is_file())
         self.assertIn("references/management-and-review.md", manual_skill)
         self.assertIn("Do not load that reference during ordinary new-task intake", manual_skill)
@@ -41,6 +41,56 @@ class SkillActivationTest(unittest.TestCase):
         self.assertIn("Do not load implementation-domain skills", manual_skill)
         self.assertIn("Use one graph query only", manual_skill)
         self.assertIn("generic-module-only", manual_skill)
+
+    def test_auto_dispatch_uses_event_driven_native_handoffs(self):
+        manual_skill = (ROOT / "skills/dotasks/SKILL.md").read_text(encoding="utf-8")
+        lifecycle_skill = (
+            ROOT / "skills/dotasks-lifecycle/SKILL.md"
+        ).read_text(encoding="utf-8")
+        controller_skill = (
+            ROOT / "skills/dotasks-controller/SKILL.md"
+        ).read_text(encoding="utf-8")
+        controller_agent = (
+            ROOT / "skills/dotasks-controller/agents/openai.yaml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Automatic dispatch kickoff", manual_skill)
+        self.assertIn("auto_dispatch=true", manual_skill)
+        self.assertIn("Claim the `development` stage once", manual_skill)
+        self.assertIn("`kickoff`", controller_skill)
+        self.assertIn("`handoff`", controller_skill)
+        self.assertIn("One event-driven sweep", controller_skill)
+        self.assertIn("claim_dispatch_batch", controller_skill)
+        self.assertIn("execution_environment=worktree", controller_skill)
+        self.assertIn("base_revision", controller_skill)
+        self.assertNotIn("starting from `working-tree`", controller_skill)
+        self.assertIn("create_thread", controller_skill)
+        self.assertIn("Only this successful binding moves", controller_skill)
+        self.assertIn("Reconcile bound native workers", controller_skill)
+        self.assertIn("wait_threads", controller_skill)
+        self.assertIn("get_dispatch_status", controller_skill)
+        self.assertIn("report_dispatch_failed", controller_skill)
+        self.assertIn("已结束但未提交生命周期回调", controller_skill)
+        self.assertIn("Event-driven native handoff", lifecycle_skill)
+        self.assertIn("workspace_path", lifecycle_skill)
+        self.assertIn("Never create a scheduled task", lifecycle_skill)
+        self.assertNotIn("Configure one recurring heartbeat", controller_skill)
+        self.assertNotIn("`continuous`", controller_skill)
+        self.assertIn("allow_implicit_invocation: false", controller_agent)
+        self.assertIn("$dotasks-controller", controller_agent)
+
+    def test_plugin_exposes_only_current_skill_names(self):
+        manifest = json.loads((ROOT / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual("dotasks", manifest["name"])
+        self.assertEqual("DoTasks", manifest["interface"]["displayName"])
+        for name in ("dotasks", "dotasks-controller", "dotasks-lifecycle"):
+            skill = (ROOT / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
+            agent = (ROOT / "skills" / name / "agents/openai.yaml").read_text(encoding="utf-8")
+            self.assertIn(f"name: {name}", skill)
+            self.assertIn("DoTasks", agent)
+            self.assertIn("allow_implicit_invocation: false", agent)
+        for retired in ("codex-taskboard", "codex-taskboard-controller", "codex-taskboard-lifecycle"):
+            self.assertFalse((ROOT / "skills" / retired / "SKILL.md").exists())
 
     def test_plugin_registers_codegraph_mcp_with_taskboard(self):
         config = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
