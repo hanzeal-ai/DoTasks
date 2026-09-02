@@ -12,6 +12,7 @@ from typing import Any
 from ..run_context import freeze_run_context, prompt_context
 from ..self_healing import (
     SELF_HEAL_ATTEMPT_LIMIT,
+    classify_recoverable_failure,
     normalize_self_heal_locations,
 )
 from .domain import (
@@ -182,8 +183,10 @@ class TaskLifecycleMixin:
         run_id: str,
         status: str,
         reason: str,
+        failure_category: str | None = None,
+        failure_locations: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Expose only the exceptional execution exits needed by a stage worker."""
+        """Expose exceptional exits and schedule one safe, bounded repair when possible."""
         status = str(status or "").strip()
         reason = str(reason or "").strip()
         if status not in {"waiting_confirmation", "blocked"}:
@@ -201,6 +204,62 @@ class TaskLifecycleMixin:
             raise ValueError(
                 "An active execution run belonging to the task is required"
             )
+        category = str(failure_category or "").strip().lower()
+        if category and category not in {"project", "environment", "implementation"}:
+            raise ValueError(
+                "failure_category must be project, environment or implementation"
+            )
+        if status == "blocked":
+            category = category or classify_recoverable_failure(reason)
+            locations = normalize_self_heal_locations(failure_locations)
+            if category in {"project", "environment"} and locations:
+                self_heal = self._self_heal_plan(
+                    task, category, [reason], locations,
+                )
+                # An execution worker gets one bounded repair for a concrete,
+                # safely located project/environment problem. Further reports
+                # enter attention instead of creating an automatic loop.
+                scheduled = int(self_heal["attempt"]) == 1
+                healing_state = self_heal["contract"].get("self_heal") or {}
+                healing_state["attempt_limit"] = 1
+                healing_state["scheduled"] = scheduled
+                self_heal["contract"]["self_heal"] = healing_state
+                if scheduled:
+                    with self.db.transaction() as connection:
+                        self._interrupt_active_run(connection, run_id)
+                        connection.execute(
+                            """UPDATE tasks SET status='rework', active_run_id=NULL,
+                               assigned_to=NULL, retry_required=1, retry_run_type=?,
+                               auto_dispatch=1, implementation_contract=?,
+                               last_failure_reason=?, last_failure_at=CURRENT_TIMESTAMP,
+                               updated_at=CURRENT_TIMESTAMP WHERE id=? AND active_run_id=?""",
+                            (
+                                run["run_type"],
+                                json.dumps(self_heal["contract"], ensure_ascii=False),
+                                reason,
+                                task_id,
+                                run_id,
+                            ),
+                        )
+                        self._persist_self_heal_targets(
+                            connection, task_id, self_heal["locations"],
+                        )
+                        self._event(
+                            connection,
+                            "task",
+                            task_id,
+                            "self_heal_scheduled",
+                            {
+                                "stage": "execution",
+                                "failure_category": category,
+                                "attempt": 1,
+                                "attempt_limit": 1,
+                                "locations": self_heal["locations"],
+                            },
+                        )
+                        self._queue_obsidian_sync(connection, "task", task_id)
+                    self.flush_integration_outbox()
+                    return self.get_task(task_id)
         return self.transition_task(task_id, status, reason)
 
     def _validate_transition(

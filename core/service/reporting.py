@@ -100,7 +100,8 @@ class TaskReportingMixin:
         with self.db.connection() as connection:
             rows = connection.execute(
                 """SELECT *, CASE WHEN source_task_id=? THEN 'outgoing' ELSE 'incoming' END AS direction
-                   FROM task_relations WHERE source_task_id=? OR target_task_id=? ORDER BY created_at""",
+                   FROM task_relations WHERE source_task_id=? OR target_task_id=?
+                   ORDER BY created_at DESC, id DESC""",
                 (task_id, task_id, task_id),
             ).fetchall()
         return [dict(row) for row in rows]

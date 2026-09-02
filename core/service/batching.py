@@ -424,9 +424,12 @@ class TaskBatchMixin:
         reasons: list[str],
         passed_items: list[str],
         failed_criteria: list[str],
+        next_status: str,
     ) -> list[str]:
-        next_status = "rework" if verdict == "fail" else "done"
-        batch_state = "regrouping" if verdict == "fail" else "done"
+        batch_state = (
+            "regrouping" if next_status == "rework"
+            else ("attention" if verdict == "fail" else "done")
+        )
         completed_task_ids: list[str] = []
         for task in self._batch_member_tasks_in(connection, batch["id"]):
             if task["id"] == owner_task_id:
@@ -457,13 +460,15 @@ class TaskBatchMixin:
             connection.execute(
                 """UPDATE tasks SET status=?, active_run_id=NULL, assigned_to=NULL,
                    last_review_reasons=?, last_failed_criteria=?,
-                   review_rework_count=review_rework_count+?, updated_at=CURRENT_TIMESTAMP
+                   review_rework_count=review_rework_count+?, auto_dispatch=?,
+                   updated_at=CURRENT_TIMESTAMP
                    WHERE id=?""",
                 (
                     next_status,
                     json.dumps(reasons, ensure_ascii=False),
                     json.dumps(task_failed, ensure_ascii=False),
                     int(verdict == "fail"),
+                    int(next_status != "waiting_confirmation"),
                     task["id"],
                 ),
             )
@@ -476,6 +481,6 @@ class TaskBatchMixin:
         connection.execute(
             """UPDATE execution_batches SET state=?, admission_open=?, owner_run_id=NULL,
                updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-            (batch_state, int(verdict == "fail"), batch["id"]),
+            (batch_state, int(next_status == "rework"), batch["id"]),
         )
         return completed_task_ids

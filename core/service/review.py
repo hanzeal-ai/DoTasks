@@ -12,6 +12,7 @@ from ..self_healing import (
     classify_recoverable_failure,
     normalize_self_heal_locations,
 )
+from .domain import REVIEW_REWORK_LIMIT
 
 
 class TaskReviewMixin:
@@ -603,10 +604,21 @@ class TaskReviewMixin:
                 "UPDATE task_runs SET status='completed', completed_at=CURRENT_TIMESTAMP WHERE id=? AND status='waiting_review'",
                 (run.get("delivery_run_id"),),
             )
+            review_rework_attempt = (
+                int(task.get("review_rework_count") or 0) + 1
+                if verdict == "fail" else 0
+            )
+            implementation_rework_allowed = (
+                self_heal["category"] != "implementation"
+                or review_rework_attempt <= REVIEW_REWORK_LIMIT
+            )
             next_status = (
                 (
                     "rework"
-                    if self_heal["category"] == "implementation"
+                    if (
+                        self_heal["category"] == "implementation"
+                        and implementation_rework_allowed
+                    )
                     or self_heal["scheduled"]
                     else "waiting_confirmation"
                 )
@@ -656,6 +668,7 @@ class TaskReviewMixin:
                     reasons,
                     passed_items,
                     failed_criteria,
+                    next_status,
                 )
             self._event(
                 connection,
@@ -667,6 +680,13 @@ class TaskReviewMixin:
                     "reasons": reasons,
                     "next_stage": next_status,
                     "failure_category": detected_category if verdict == "fail" else "",
+                    "review_rework_attempt": review_rework_attempt,
+                    "review_rework_limit": REVIEW_REWORK_LIMIT,
+                    "review_rework_exhausted": bool(
+                        verdict == "fail"
+                        and self_heal["category"] == "implementation"
+                        and not implementation_rework_allowed
+                    ),
                     "self_heal_scheduled": bool(
                         verdict == "fail" and self_heal["scheduled"]
                     ),

@@ -436,6 +436,34 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual("original-dev", retry["resume_thread_id"])
         self.assertEqual("ready", self.service.get_task(queued["id"])["status"])
 
+    def test_code_quality_review_stops_after_three_rework_rounds(self):
+        task = self.task("review-rework-limit")
+        self.deliver(task, "original-dev")
+        with self.service.db.transaction() as connection:
+            connection.execute(
+                "UPDATE tasks SET review_rework_count=3 WHERE id=?", (task["id"],),
+            )
+        review = self.service.claim_next_code_review_task("reviewer")
+        self.service.bind_conversation(
+            task["id"], "code_review", "review-thread", review["run"]["id"],
+        )
+
+        result = self.service.review_code(
+            task["id"], review["run"]["id"], "fail",
+            reasons=["代码职责仍然混杂"], passed_items=[],
+            failed_criteria=["project-rules"],
+        )
+
+        self.assertEqual("waiting_confirmation", result["status"])
+        self.assertFalse(result["auto_dispatch"])
+        self.assertEqual(4, result["review_rework_count"])
+        event = next(
+            item for item in reversed(self.service.list_events("task", task["id"]))
+            if item["event_type"] == "code_reviewed"
+        )
+        self.assertTrue(event["payload"]["review_rework_exhausted"])
+        self.assertEqual(3, event["payload"]["review_rework_limit"])
+
     def test_result_partition_is_strict(self):
         task = self.task("strict")
         self.deliver(task)
@@ -579,6 +607,44 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn(
             snapshot["last_trigger"], {"task_state_changed", "run_state_changed"},
         )
+
+    def test_safe_execution_block_gets_one_bounded_repair(self):
+        task = self.task("safe-block-repair")
+        first = self.service.claim_next_task("worker")
+        self.service.bind_conversation(
+            task["id"], "execution", "development-thread", first["run"]["id"],
+        )
+        failure_location = {
+            "file": "tests/test_a_page.py",
+            "symbols": [],
+        }
+
+        repaired = self.service.report_run_blocked(
+            task["id"], first["run"]["id"], "blocked", "缺少测试用例",
+            "project", [failure_location],
+        )
+
+        self.assertEqual("rework", repaired["status"])
+        self.assertTrue(repaired["auto_dispatch"])
+        self.assertEqual(
+            {"attempt": 1, "attempt_limit": 1, "scheduled": True},
+            {
+                key: repaired["implementation_contract"]["self_heal"][key]
+                for key in ("attempt", "attempt_limit", "scheduled")
+            },
+        )
+        retry = self.service.claim_next_task("worker")
+        self.assertEqual("development-thread", retry["resume_thread_id"])
+        self.service.bind_conversation(
+            task["id"], "rework", "development-thread", retry["run"]["id"],
+        )
+
+        exhausted = self.service.report_run_blocked(
+            task["id"], retry["run"]["id"], "blocked", "仍然缺少测试用例",
+            "project", [failure_location],
+        )
+
+        self.assertEqual("blocked", exhausted["status"])
 
     def test_pending_native_creation_keeps_scheduler_wakeup_unacknowledged(self):
         task = self.task("pending-native-creation")

@@ -511,7 +511,7 @@ TOOLS = [
     },
     {
         "name": "report_run_blocked",
-        "description": "Stop an active implementation run only when it needs user confirmation or cannot continue.",
+        "description": "Stop an active implementation run for attention, or schedule one bounded safely located project/environment repair.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -519,6 +519,17 @@ TOOLS = [
                 "run_id": {"type": "string"},
                 "status": {"type": "string", "enum": ["waiting_confirmation", "blocked"]},
                 "reason": {"type": "string", "minLength": 1},
+                "failure_category": {
+                    "type": "string",
+                    "enum": ["project", "environment", "implementation"],
+                    "description": "Optional safe-repair classification. Project/environment repair also requires exact failure_locations.",
+                },
+                "failure_locations": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "Optional exact files for one bounded project/environment repair before attention.",
+                    "items": TARGET_SCHEMA,
+                },
             },
             "required": ["task_id", "run_id", "status", "reason"],
         },
@@ -611,6 +622,7 @@ TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "submit_task_delivery": lambda arguments: SERVICE.submit_delivery(arguments["run_id"], arguments["delivery_summary"], arguments["verification_result"], arguments["changed_locations"], arguments["acceptance_evidence"], batch_revision=arguments.get("batch_revision"), workspace_path=arguments.get("workspace_path")),
     "report_run_blocked": lambda arguments: SERVICE.report_run_blocked(
         arguments["task_id"], arguments["run_id"], arguments["status"], arguments["reason"],
+        arguments.get("failure_category"), arguments.get("failure_locations"),
     ),
     "review_code": lambda arguments: SERVICE.review_code(arguments["task_id"], arguments["run_id"], arguments["verdict"], arguments.get("reasons"), arguments.get("passed_items"), arguments.get("failed_criteria"), arguments.get("failure_category"), arguments.get("failure_locations")),
     "get_task_details": lambda arguments: SERVICE.task_details(arguments["task_id"]),

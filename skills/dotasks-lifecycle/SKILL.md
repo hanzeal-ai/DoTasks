@@ -31,7 +31,9 @@ description: Run only an explicitly invoked DoTasks requirement decomposition, d
 
 Delivery contract validation errors are recoverable and leave the run active. When `submit_task_delivery` reports submitted and allowed locations or symbols, correct the arguments and retry the same run; never call `report_run_blocked` for a correctable delivery payload mismatch.
 
-If investigation reveals a major scope decision, call `report_run_blocked` with `waiting_confirmation`. If execution cannot continue after recoverable validation issues have been corrected, call it with `blocked` and a concrete reason.
+If investigation reveals a major scope decision, call `report_run_blocked` with `waiting_confirmation`. If execution cannot continue after recoverable validation issues have been corrected, call it with `blocked` and a concrete reason. For a known project or environment problem that has one or more exact safe repair files, also pass `failure_category` and `failure_locations`; the service may schedule one bounded repair. Do not provide repair fields for user decisions, approvals, external access, or an uncertain location.
+
+After any successful `report_run_blocked` callback, perform the **Event-driven native handoff** below so the Controller can fill newly available capacity.
 
 ## Code Review
 
@@ -40,7 +42,7 @@ If investigation reveals a major scope decision, call `report_run_blocked` with 
 3. Judge only code quality, security vulnerabilities, and high-cohesion/low-coupling design. Do not rediscover the DoTasks database, inspect the task goal, acceptance criteria, acceptance plan, implementation plan or delivery summary, run product-level acceptance, or treat missing product behavior as a Review failure. A concrete defect, regression risk, vulnerability, material maintainability problem, mixed responsibility, or unreasonable dependency visible from the change is still a quality failure. Style-only preferences and non-blocking suggestions must not enter `failed_criteria`.
 4. Call `review_code` with `passed_items` and `failed_criteria` that exactly partition the Review quality checks. Every failure reason must identify the exact file and symbol or line, trigger, impact, and smallest repair direction. Do not fail merely because task-goal completion cannot be established. A quality failure returns to bounded `rework`; a pass completes the DoTasks code workflow. After either successful callback, perform the **Event-driven native handoff** below.
 
-A failed review moves to `rework`; it is not an execution failure. An interrupted Code Review remains in `code_review`. Rework resumes the implementation conversation, while interrupted review resumes its independent review conversation.
+A failed review moves to `rework`; it is not an execution failure. After three completed implementation-quality rework rounds, another equivalent failure moves the task to `waiting_confirmation` instead of looping automatically. An interrupted Code Review remains in `code_review`. Rework resumes the implementation conversation, while interrupted review resumes its independent review conversation.
 
 ## Event-driven native handoff
 

@@ -3,7 +3,13 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from taskboard.mcp_server import LOCATION_EVIDENCE_SCHEMA, TOOL_HANDLERS, TOOLS, handle
+from taskboard.mcp_server import (
+    LOCATION_EVIDENCE_SCHEMA,
+    TARGET_SCHEMA,
+    TOOL_HANDLERS,
+    TOOLS,
+    handle,
+)
 
 
 class TaskboardMcpServerTest(unittest.TestCase):
@@ -107,6 +113,12 @@ class TaskboardMcpServerTest(unittest.TestCase):
         intake = tools["finalize_task_intake"]["inputSchema"]["properties"]
         self.assertEqual("object", intake["targets"]["items"]["type"])
         self.assertNotIn("ordered_steps", intake)
+        blocked = tools["report_run_blocked"]["inputSchema"]["properties"]
+        self.assertEqual(
+            ["project", "environment", "implementation"],
+            blocked["failure_category"]["enum"],
+        )
+        self.assertEqual(TARGET_SCHEMA, blocked["failure_locations"]["items"])
 
     def test_schedule_cycle_is_the_only_dispatch_claim_entry(self):
         tool = next(item for item in TOOLS if item["name"] == "claim_schedule_cycle")
