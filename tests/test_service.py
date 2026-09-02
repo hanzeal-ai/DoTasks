@@ -50,32 +50,89 @@ class TaskboardServiceTest(unittest.TestCase):
 
     def test_native_dispatch_is_persisted_and_binds_only_a_real_thread(self):
         task = self.create_ready_task()
-        dispatch = self.service.claim_next_native_dispatch("codex-native-controller", stage="development")
+        dispatch = self.service._claim_next_native_dispatch("codex-native-controller", stage="development")
 
         self.assertEqual((task["id"], "claimed"), (dispatch["entity_id"], dispatch["status"]))
+        self.assertTrue(dispatch["dispatch_attempt_id"])
         self.assertEqual("claimed", self.service.get_task(task["id"])["status"])
         self.assertEqual("awaiting_thread", self.service.get_run(dispatch["run_id"])["status"])
         self.assertEqual(f"[DoTaks] {task['id']} 开发", dispatch["dispatch_title"])
+        self.assertTrue(
+            dispatch["dispatch_prompt"].startswith(
+                "[$dotasks:dotasks-lifecycle]("
+            )
+        )
+        self.assertIn("/skills/dotasks-lifecycle/SKILL.md)", dispatch["dispatch_prompt"])
+        self.assertIn(
+            "DoTasks lifecycle CLI fallback:", dispatch["dispatch_prompt"]
+        )
+        self.assertIn("/scripts/mcp-server`", dispatch["dispatch_prompt"])
         self.assertIn("$dotasks-lifecycle", dispatch["dispatch_prompt"])
+        self.assertLess(
+            dispatch["dispatch_prompt"].index("请完成以下任务："),
+            dispatch["dispatch_prompt"].index("$dotasks-lifecycle"),
+        )
+        self.assertGreater(
+            dispatch["dispatch_prompt"].index("DoTasks lifecycle CLI fallback:"),
+            dispatch["dispatch_prompt"].index("RUN_CONTEXT_JSON="),
+        )
         self.assertEqual(
             dispatch["run_id"],
-            self.service.claim_next_native_dispatch("codex-native-controller", stage="development")["run_id"],
+            self.service._claim_next_native_dispatch("codex-native-controller", stage="development")["run_id"],
         )
         with self.assertRaisesRegex(ValueError, "client_thread_id is required"):
-            self.service.mark_native_dispatch_pending(dispatch["run_id"], "")
+            self.service.mark_native_dispatch_pending(
+                dispatch["run_id"], "",
+                dispatch_attempt_id=dispatch["dispatch_attempt_id"],
+            )
+        with self.assertRaisesRegex(ValueError, "attempt is stale"):
+            self.service.bind_native_dispatch(
+                dispatch["run_id"], "stale-thread",
+                dispatch_attempt_id="stale-attempt",
+            )
 
         pending = self.service.mark_native_dispatch_pending(
             dispatch["run_id"], "client-pending-1", "local", "project-1",
+            dispatch_attempt_id=dispatch["dispatch_attempt_id"],
         )
         self.assertEqual(("pending_thread", "client-pending-1"), (pending["status"], pending["client_thread_id"]))
         self.assertEqual("claimed", self.service.get_task(task["id"])["status"])
         bound = self.service.bind_native_dispatch(
             dispatch["run_id"], "native-thread-1", "local", "project-1",
+            dispatch_attempt_id=dispatch["dispatch_attempt_id"],
         )
         self.assertEqual(("bound", "native-thread-1"), (bound["status"], bound["thread_id"]))
         bound_task = self.service.get_task(task["id"])
         self.assertEqual(("implementing", "native-thread-1"), (bound_task["status"], bound_task["codex_thread_id"]))
         self.assertEqual("running", self.service.get_run(dispatch["run_id"])["status"])
+
+    def test_native_dispatch_binding_rolls_back_every_record_on_failure(self):
+        task = self.create_ready_task()
+        dispatch = self.service._claim_next_native_dispatch(
+            "codex-native-controller", stage="development",
+        )
+        original_event = self.service._event
+
+        def fail_after_binding(connection, entity_type, entity_id, event_type, payload):
+            if event_type == "native_thread_bound":
+                raise RuntimeError("simulated event failure")
+            return original_event(
+                connection, entity_type, entity_id, event_type, payload,
+            )
+
+        with patch.object(self.service, "_event", side_effect=fail_after_binding):
+            with self.assertRaisesRegex(RuntimeError, "simulated event failure"):
+                self.service.bind_native_dispatch(
+                    dispatch["run_id"], "rollback-thread",
+                    dispatch_attempt_id=dispatch["dispatch_attempt_id"],
+                )
+
+        persisted = self.service.get_native_dispatch(dispatch["run_id"])
+        self.assertEqual("claimed", persisted["status"])
+        self.assertEqual("", persisted["thread_id"])
+        self.assertEqual("claimed", self.service.get_task(task["id"])["status"])
+        self.assertEqual("awaiting_thread", self.service.get_run(dispatch["run_id"])["status"])
+        self.assertEqual([], self.service.list_conversations(task["id"]))
 
     def test_native_dispatch_titles_use_entity_id_and_stage_label(self):
         title = self.service._native_dispatch_title
@@ -110,7 +167,7 @@ class TaskboardServiceTest(unittest.TestCase):
 
         def claim(service: TaskboardService) -> dict:
             barrier.wait()
-            return service.claim_next_native_dispatch("codex-native-controller", stage="development")
+            return service._claim_next_native_dispatch("codex-native-controller", stage="development")
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(claim, (self.service, second_service)))
@@ -142,10 +199,10 @@ class TaskboardServiceTest(unittest.TestCase):
         })
         review_task = self.submit_delivery(review_task, "review-delivery-thread")
 
-        review_dispatch = self.service.claim_next_native_dispatch(
+        review_dispatch = self.service._claim_next_native_dispatch(
             "codex-native-controller", stage="code_review"
         )
-        development_dispatch = self.service.claim_next_native_dispatch(
+        development_dispatch = self.service._claim_next_native_dispatch(
             "codex-native-controller", stage="development"
         )
 
@@ -162,22 +219,22 @@ class TaskboardServiceTest(unittest.TestCase):
         )
         self.assertEqual(
             review_dispatch["run_id"],
-            self.service.claim_next_native_dispatch(
+            self.service._claim_next_native_dispatch(
                 "codex-native-controller", stage="code_review"
             )["run_id"],
         )
         self.assertEqual(
             development_dispatch["run_id"],
-            self.service.claim_next_native_dispatch(
+            self.service._claim_next_native_dispatch(
                 "codex-native-controller", stage="development"
             )["run_id"],
         )
         with self.assertRaisesRegex(ValueError, "stage must be"):
-            self.service.claim_next_native_dispatch(
+            self.service._claim_next_native_dispatch(
                 "codex-native-controller", stage="acceptance"
             )
         with self.assertRaisesRegex(ValueError, "stage must be"):
-            self.service.claim_next_native_dispatch(
+            self.service._claim_next_native_dispatch(
                 "codex-native-controller", stage="review"
             )
 
@@ -191,7 +248,7 @@ class TaskboardServiceTest(unittest.TestCase):
 
     def test_database_rejects_two_active_dispatches_for_one_worker(self):
         self.create_ready_task()
-        dispatch = self.service.claim_next_native_dispatch("codex-native-controller", stage="development")
+        dispatch = self.service._claim_next_native_dispatch("codex-native-controller", stage="development")
         with self.assertRaisesRegex(
             sqlite3.IntegrityError,
             "active native dispatch already exists for worker",
@@ -199,24 +256,30 @@ class TaskboardServiceTest(unittest.TestCase):
             connection.execute(
                 """INSERT INTO native_dispatches(
                        run_id, entity_type, entity_id, role, worker_id,
-                       project_path, dispatch_title, dispatch_prompt
-                   ) VALUES(?, 'task', 'TASK-OTHER', 'execution', ?, '', 'duplicate', 'duplicate')""",
+                       project_path, dispatch_title, dispatch_prompt,
+                       dispatch_attempt_id
+                   ) VALUES(?, 'task', 'TASK-OTHER', 'execution', ?, '',
+                            'duplicate', 'duplicate', 'ATTEMPT-DUPLICATE')""",
                 ("RUN-DUPLICATE", dispatch["worker_id"]),
             )
 
     def test_native_retry_prefers_original_thread_and_records_safe_fallback(self):
         task = self.create_ready_task()
-        first = self.service.claim_next_native_dispatch("codex-native-controller", stage="development")
-        self.service.bind_native_dispatch(first["run_id"], "native-thread-1")
+        first = self.service._claim_next_native_dispatch("codex-native-controller", stage="development")
+        self.service.bind_native_dispatch(
+            first["run_id"], "native-thread-1",
+            dispatch_attempt_id=first["dispatch_attempt_id"],
+        )
         self.service.fail_native_dispatch(first["run_id"], "worker ended without callback")
         self.service.transition_task(task["id"], "ready")
 
-        retry = self.service.claim_next_native_dispatch("codex-native-controller", stage="development")
+        retry = self.service._claim_next_native_dispatch("codex-native-controller", stage="development")
         self.assertNotEqual(first["run_id"], retry["run_id"])
         self.assertEqual("native-thread-1", retry["resume_thread_id"])
         replacement = self.service.bind_native_dispatch(
             retry["run_id"], "native-thread-2",
             resume_fallback_reason="native-thread-1 is unavailable",
+            dispatch_attempt_id=retry["dispatch_attempt_id"],
         )
         self.assertEqual("native-thread-1 is unavailable", replacement["resume_fallback_reason"])
         self.assertEqual("native-thread-2", self.service.get_task(task["id"])["codex_thread_id"])
@@ -495,32 +558,24 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertEqual(0, board_requirement["child_task_count"])
         self.assertTrue(board_requirement["auto_dispatch"])
         self.assertEqual([str(self.example_project.resolve())], self.service.board()["projects"])
-        initial = self.service.claim_next_task(
-            "", action="get_requirement", requirement_id=requirement_id,
-        )
+        initial = self.service.get_requirement(requirement_id)
         self.assertEqual("ready", initial["requirement"]["status"])
         self.assertEqual([], initial["tasks"])
 
         first = self.service.claim_next_task("planner", str(self.example_project))
         self.assertEqual("requirement_decomposition", first["kind"])
-        self.service.claim_next_task(
-            "planner", action="fail_decomposition",
-            requirement_id=requirement_id,
-            decomposition_run_id=first["run"]["id"], error="temporary failure",
+        self.service.fail_requirement_decomposition(
+            requirement_id, first["run"]["id"], "temporary failure",
         )
         retry = self.service.claim_next_task("planner", str(self.example_project))
         self.assertEqual(first["requirement"]["id"], retry["requirement"]["id"])
 
         with self.assertRaisesRegex(ValueError, "requires analysis_id"):
-            self.service.claim_next_task(
-                "planner", action="submit_decomposition",
-                requirement_id=requirement_id,
-                decomposition_run_id=retry["run"]["id"],
-                child_tasks=[{"key": "invalid", "title": "不可执行子任务", "goal": "缺少定位契约"}],
+            self.service.submit_requirement_decomposition(
+                requirement_id, retry["run"]["id"],
+                [{"key": "invalid", "title": "不可执行子任务", "goal": "缺少定位契约"}],
             )
-        incomplete = self.service.claim_next_task(
-            "", action="get_requirement", requirement_id=requirement_id,
-        )
+        incomplete = self.service.get_requirement(requirement_id)
         self.assertEqual("decomposing", incomplete["requirement"]["status"])
         self.assertEqual([], incomplete["tasks"])
 
@@ -539,9 +594,6 @@ class TaskboardServiceTest(unittest.TestCase):
                     "files": [file], "symbols": [key],
                 },
                 "targets": [{**target, "mode": "modify", "tasks": [{"symbol": key, "action": goal}]}],
-                "review_checks": [{
-                    "id": f"review-{key}", "description": f"review {key}", "kind": "code",
-                }],
                 "quality_gates": {
                     "code_review": {"required": True, "reason": "code change"},
                 },
@@ -577,25 +629,17 @@ class TaskboardServiceTest(unittest.TestCase):
         with self.assertRaisesRegex(
             ValueError, r"Decomposed task entry.*location_evidence.*evidence\.command",
         ):
-            self.service.claim_next_task(
-                "planner", action="submit_decomposition",
-                requirement_id=requirement_id,
-                decomposition_run_id=retry["run"]["id"], child_tasks=invalid_specs,
+            self.service.submit_requirement_decomposition(
+                requirement_id, retry["run"]["id"], invalid_specs,
             )
-        preflight_failure = self.service.claim_next_task(
-            "", action="get_requirement", requirement_id=requirement_id,
-        )
+        preflight_failure = self.service.get_requirement(requirement_id)
         self.assertEqual([], preflight_failure["tasks"])
 
-        completed = self.service.claim_next_task(
-            "planner", action="submit_decomposition",
-            requirement_id=requirement_id,
-            decomposition_run_id=retry["run"]["id"], child_tasks=child_specs,
+        completed = self.service.submit_requirement_decomposition(
+            requirement_id, retry["run"]["id"], child_specs,
         )
-        repeated = self.service.claim_next_task(
-            "planner", action="submit_decomposition",
-            requirement_id=requirement_id,
-            decomposition_run_id=retry["run"]["id"], child_tasks=child_specs,
+        repeated = self.service.submit_requirement_decomposition(
+            requirement_id, retry["run"]["id"], child_specs,
         )
         self.assertEqual("decomposed", completed["requirement"]["status"])
         self.assertEqual(2, len(completed["tasks"]))
@@ -620,6 +664,10 @@ class TaskboardServiceTest(unittest.TestCase):
             self.assertTrue(item["location_context"]["targets"])
             self.assertTrue(item["implementation_contract"]["targets"][0]["tasks"])
             self.assertTrue(all(plan["file"] for plan in item["acceptance_plan"]))
+            self.assertEqual(
+                ["code-quality", "security-vulnerabilities", "cohesion-coupling"],
+                [check["id"] for check in item["review_contract"]["checks"]],
+            )
             self.assertTrue(item["auto_dispatch"])
         self.assertEqual(1, len(completed["relations"]))
         self.assertEqual("depends_on", completed["relations"][0]["relation_type"])
@@ -641,12 +689,8 @@ class TaskboardServiceTest(unittest.TestCase):
         for attempt in range(1, 4):
             claim = self.service.claim_next_task("planner", str(self.example_project))
             self.assertEqual(attempt, claim["requirement"]["decomposition_attempts"])
-            result = self.service.claim_next_task(
-                "planner",
-                action="fail_decomposition",
-                requirement_id=requirement_id,
-                decomposition_run_id=claim["run"]["id"],
-                error="persistent failure",
+            result = self.service.fail_requirement_decomposition(
+                requirement_id, claim["run"]["id"], "persistent failure",
             )
             expected_status = "failed" if attempt == 3 else "ready"
             self.assertEqual(expected_status, result["requirement"]["status"])
@@ -656,49 +700,59 @@ class TaskboardServiceTest(unittest.TestCase):
             self.service.claim_next_task("planner", str(self.example_project))
         )
 
+    def test_requirement_state_changes_create_scheduler_wakeups(self):
+        intake = self.service.finalize_task_intake({
+            "intake_kind": "requirement",
+            "title": "调度唤醒需求",
+            "original_content": "验证需求状态流转触发调度。",
+            "project": str(self.example_project),
+            "goal": "触发持久化调度检测",
+            "modules": ["planning"],
+            "scope": ["调度"],
+            "out_of_scope": [],
+            "acceptance_criteria": ["状态变化后调度器收到唤醒"],
+        })
+        with self.service.db.transaction() as connection:
+            connection.execute(
+                "UPDATE scheduler_state SET pending=0, handled_generation=generation WHERE id=1"
+            )
+
+        claim = self.service.claim_next_task("planner", str(self.example_project))
+        self.assertTrue(self.service.scheduler_snapshot()["pending"])
+        with self.service.db.transaction() as connection:
+            connection.execute(
+                "UPDATE scheduler_state SET pending=0, handled_generation=generation WHERE id=1"
+            )
+        self.service.fail_requirement_decomposition(
+            intake["requirement_id"], claim["run"]["id"], "temporary failure",
+        )
+        self.assertTrue(self.service.scheduler_snapshot()["pending"])
+
     def test_schema_upgrade_preserves_tasks_and_adds_requirement_tracking(self):
         task = self.create_ready_task()
         db_path = self.service.db.path
         with sqlite3.connect(db_path) as connection:
+            connection.execute("CREATE TABLE acceptance_check_runs(id INTEGER)")
+            connection.execute("CREATE TABLE acceptance_results(id INTEGER)")
+            connection.execute("CREATE TABLE batch_steer_events(id INTEGER)")
+            connection.execute(
+                "INSERT OR REPLACE INTO system_settings(key, value) VALUES('workspace_projects', '[]')"
+            )
             connection.execute("PRAGMA user_version=12")
         upgraded = Database(db_path)
         with upgraded.connection() as connection:
             self.assertIsNotNone(connection.execute("SELECT 1 FROM tasks WHERE id=?", (task["id"],)).fetchone())
             tables = {row["name"] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             task_columns = {row["name"] for row in connection.execute("PRAGMA table_info(tasks)")}
+            retired_setting = connection.execute(
+                "SELECT 1 FROM system_settings WHERE key='workspace_projects'"
+            ).fetchone()
         self.assertIn("requirement_decomposition_runs", tables)
         self.assertIn("requirement_task_key", task_columns)
-
-    def test_schema_upgrade_returns_retired_acceptance_task_to_code_review(self):
-        task = self.submit_delivery(self.create_ready_task(), "migration-delivery-thread")
-        with self.service.db.transaction() as connection:
-            connection.execute("DROP TRIGGER validate_task_update")
-            connection.execute(
-                "UPDATE task_runs SET status='completed' WHERE id=?",
-                (task["primary_run_id"],),
-            )
-            connection.execute(
-                """UPDATE tasks SET status='acceptance',
-                   active_run_id=NULL, assigned_to=NULL WHERE id=?""",
-                (task["id"],),
-            )
-        with sqlite3.connect(self.service.db.path) as connection:
-            connection.execute("PRAGMA user_version=16")
-            connection.commit()
-
-        upgraded = Database(self.service.db.path)
-        with upgraded.connection() as connection:
-            migrated_task = connection.execute(
-                "SELECT status, active_run_id, auto_dispatch FROM tasks WHERE id=?",
-                (task["id"],),
-            ).fetchone()
-            primary_run = connection.execute(
-                "SELECT status FROM task_runs WHERE id=?",
-                (task["primary_run_id"],),
-            ).fetchone()
-
-        self.assertEqual(("code_review", None, 1), tuple(migrated_task))
-        self.assertEqual("waiting_review", primary_run["status"])
+        self.assertTrue({
+            "acceptance_check_runs", "acceptance_results", "batch_steer_events",
+        }.isdisjoint(tables))
+        self.assertIsNone(retired_setting)
 
     def test_task_ids_use_type_specific_prefixes_and_board_preserves_ids(self):
         task = self.create_ready_task()
@@ -973,9 +1027,28 @@ class TaskboardServiceTest(unittest.TestCase):
 
         claimed = self.service.claim_next_task("test-worker", task["project"])
 
-        self.assertTrue(claimed["dispatch_prompt"].startswith("$dotasks-lifecycle\n\n"))
-        self.assertIn(task["id"], claimed["dispatch_prompt"])
-        self.assertIn(claimed["run"]["id"], claimed["dispatch_prompt"])
+        prompt = claimed["dispatch_prompt"]
+        self.assertTrue(prompt.startswith("请完成以下任务：\n\n"))
+        self.assertIn(f"标题：{task['title']}", prompt)
+        self.assertIn(f"目标：{task['goal']}", prompt)
+        self.assertIn("验收标准：", prompt)
+        self.assertLess(prompt.index("请完成以下任务："), prompt.index("$dotasks-lifecycle"))
+        self.assertLess(prompt.index("$dotasks-lifecycle"), prompt.index("RUN_CONTEXT_JSON="))
+        self.assertIn(task["id"], prompt)
+        self.assertIn(claimed["run"]["id"], prompt)
+        self.assertIn("完成：调用 submit_task_delivery", prompt)
+        self.assertIn("无法继续：调用 report_run_blocked", prompt)
+        self.assertNotIn("以 RUN_CONTEXT_JSON 为唯一任务输入", prompt)
+        self.assertNotIn("static_review/manual_runtime", prompt)
+        run_context = json.loads(prompt.split("RUN_CONTEXT_JSON=", 1)[1].split("\n\n", 1)[0])
+        self.assertEqual(
+            {"execution_environment", "targets", "verify"}, set(run_context)
+        )
+        self.assertEqual(
+            {"file", "mode", "symbols"}, set(run_context["targets"][0])
+        )
+        self.assertNotIn("tasks", run_context["targets"][0])
+        self.assertNotIn("reason", run_context["targets"][0])
 
     def test_location_requires_existing_absolute_project_directory(self):
         payload = {"title": "路径校验", "goal": "拒绝模糊路径", "modules": []}
@@ -1303,13 +1376,21 @@ class TaskboardServiceTest(unittest.TestCase):
             [{"file": "src/B.ts", "symbols": ["B"], "reason": "B"}],
         )
 
-        batch = self.service.claim_native_dispatch_batch(
-            "codex-native-controller", first["project"], stage="development"
+        cycle = self.service.claim_schedule_cycle(
+            "codex-native-controller", first["project"], force=True,
         )
+        batch = cycle["development"]
         dispatches = batch["dispatches"]
 
         self.assertEqual(2, batch["capacity"])
         self.assertEqual(2, len(dispatches))
+        self.assertEqual(
+            {
+                "codex-native-controller:development",
+                "codex-native-controller:slot-2:development",
+            },
+            {dispatch["worker_id"] for dispatch in dispatches},
+        )
         self.assertEqual({"worktree"}, {
             dispatch["execution_environment"] for dispatch in dispatches
         })
@@ -1477,7 +1558,7 @@ class TaskboardServiceTest(unittest.TestCase):
         self.service.bind_conversation(
             task["id"], "code_review", "parallel-review", review["run"]["id"]
         )
-        checks = ["focused-review", "A updated"]
+        checks = ["focused-review"]
         completed = self.service.review_code(
             task["id"], review["run"]["id"], "pass",
             passed_items=checks, failed_criteria=[],
@@ -1575,7 +1656,7 @@ class TaskboardServiceTest(unittest.TestCase):
             )
             completed = self.service.review_code(
                 task["id"], review["run"]["id"], "pass",
-                passed_items=["focused-review", f"{name} updated"],
+                passed_items=["focused-review"],
                 failed_criteria=[],
             )
             self.assertEqual("done", completed["status"])
@@ -1636,7 +1717,7 @@ class TaskboardServiceTest(unittest.TestCase):
 
         completed = self.service.review_code(
             task["id"], review["run"]["id"], "pass",
-            passed_items=["focused-review", "A updated"], failed_criteria=[],
+            passed_items=["focused-review"], failed_criteria=[],
         )
         delivery_run = self.service.get_run(claim["run"]["id"])
 
@@ -1781,15 +1862,34 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertTrue(resumed["dispatcher_enabled"])
         self.assertEqual("ready", reloaded.get_task(task["id"])["status"])
 
-    def test_interrupted_execution_is_failed_and_not_auto_requeued(self):
+    def test_pausing_dispatcher_preserves_tasks_and_active_runs(self):
+        task = self.create_ready_task()
+        claim = self.service.claim_next_task("worker", task["project"])
+        self.service.bind_conversation(
+            task["id"], "execution", "active-thread", claim["run"]["id"]
+        )
+
+        paused = self.service.pause_dispatcher()
+
+        self.assertEqual({"dispatcher_enabled": False}, paused)
+        self.assertFalse(self.service.dispatcher_enabled())
+        self.assertEqual("implementing", self.service.get_task(task["id"])["status"])
+        self.assertEqual("running", self.service.get_run(claim["run"]["id"])["status"])
+        reloaded = TaskboardService(self.temp.name)
+        self.assertFalse(reloaded.dispatcher_enabled())
+        self.assertEqual("implementing", reloaded.get_task(task["id"])["status"])
+
+    def test_interrupted_execution_is_auto_requeued_and_resumes_thread(self):
         task = self.create_ready_task()
         claimed = self.service.claim_next_task("worker", task["project"])
         run = claimed["run"]
         self.service.bind_conversation(task["id"], "execution", "failed-thread", run["id"])
         result = self.service.interrupt_unsubmitted_run(run["id"], "process exited")
-        self.assertEqual("failed", result["task"]["status"])
+        self.assertEqual("ready", result["task"]["status"])
         self.assertEqual("interrupted", result["run"]["status"])
-        self.assertIsNone(self.service.claim_next_task("worker-2", task["project"]))
+        retried = self.service.claim_next_task("worker-2", task["project"])
+        self.assertEqual(task["id"], retried["task"]["id"])
+        self.assertEqual("failed-thread", retried["resume_thread_id"])
 
     def test_multiple_rework_tasks_do_not_deadlock_each_other(self):
         first = self.create_located_task({
@@ -1806,7 +1906,7 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertIsNotNone(claimed)
         self.assertIsNone(self.service.claim_next_task("worker-2", first["project"]))
 
-    def test_explicitly_requeued_retry_is_prioritized(self):
+    def test_auto_requeued_retry_is_prioritized(self):
         first = self.create_ready_task()
         second = self.create_located_task({
             "title": "其他任务", "project": str(self.example_project), "goal": "修改其他文件", "scope": ["other"],
@@ -1815,7 +1915,6 @@ class TaskboardServiceTest(unittest.TestCase):
         claimed = self.service.claim_next_task("worker", first["project"])
         self.service.bind_conversation(first["id"], "execution", "failed-thread", claimed["run"]["id"])
         self.service.interrupt_unsubmitted_run(claimed["run"]["id"], "process exited")
-        self.service.transition_task(first["id"], "ready")
         retried = self.service.claim_next_task("worker-3", first["project"])
         self.assertEqual(first["id"], retried["task"]["id"])
         self.assertEqual("failed-thread", retried["resume_thread_id"])
@@ -2152,7 +2251,7 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertEqual("interrupted", conversation["status"])
         self.assertEqual(["same-thread", "same-thread"], [run["conversation_thread_id"] for run in self.service.list_runs(task["id"])])
 
-    def test_unrelated_failed_task_does_not_block_project_queue(self):
+    def test_auto_recovered_task_is_prioritized_before_project_queue(self):
         blocker = self.create_ready_task()
         waiting = self.create_located_task({
             "title": "等待项目解锁", "project": str(self.example_project), "goal": "修改其他位置", "scope": ["other"],
@@ -2164,7 +2263,7 @@ class TaskboardServiceTest(unittest.TestCase):
         visible = self.service.get_task(waiting["id"])["project_blockers"]
         self.assertEqual([], visible)
         resumed_queue = self.service.claim_next_task("worker-2", waiting["project"])
-        self.assertEqual(waiting["id"], resumed_queue["task"]["id"])
+        self.assertEqual(blocker["id"], resumed_queue["task"]["id"])
 
     def test_location_report_becomes_stale_when_workspace_changes(self):
         project = Path(self.temp.name) / "location-project"

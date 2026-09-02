@@ -47,7 +47,7 @@ class TaskBatchMixin:
             connection.execute(
                 """UPDATE execution_batches
                    SET owner_run_id=?, state='development', admission_open=?,
-                       thread_id='', active_turn_id='', sealed_at=NULL,
+                       sealed_at=NULL,
                        updated_at=CURRENT_TIMESTAMP WHERE id=?""",
                 (run_id, admission_open, batch_id),
             )
@@ -138,11 +138,6 @@ class TaskBatchMixin:
                assigned_to='execution-batch', updated_at=CURRENT_TIMESTAMP WHERE id=?""",
             (task_id,),
         )
-        connection.execute(
-            """INSERT INTO batch_steer_events(batch_id, task_id, revision)
-               VALUES(?, ?, ?)""",
-            (batch["id"], task_id, revision),
-        )
         self._event(
             connection,
             "task",
@@ -205,7 +200,7 @@ class TaskBatchMixin:
         )
         connection.execute(
             """UPDATE execution_batches SET owner_run_id=?, state=?, admission_open=0,
-               active_turn_id='', updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+               updated_at=CURRENT_TIMESTAMP WHERE id=?""",
             (run_id, state, batch_id),
         )
 
@@ -276,7 +271,10 @@ class TaskBatchMixin:
         for task in tasks:
             task_contexts.append({
                 key: task.get(key)
-                for key in ("id", "title", "goal", "scope", "out_of_scope")
+                for key in (
+                    "id", "title", "goal", "scope", "out_of_scope",
+                    "acceptance_criteria",
+                )
                 if task.get(key) not in (None, "", [], {})
             })
             targets.extend((task.get("location_context") or {}).get("targets") or [])
@@ -300,40 +298,25 @@ class TaskBatchMixin:
         if not batch:
             return context, list(context.get("review_checks") or [])
         tasks = self._batch_member_tasks(batch_id)
-        targets: list[dict[str, Any]] = []
         checks: list[str] = []
-        acceptance: list[dict[str, Any]] = []
-        acceptance_criteria: list[str] = []
         task_contexts = []
         for task in tasks:
             task_contexts.append({
                 key: task.get(key)
-                for key in ("id", "title", "goal", "scope", "out_of_scope", "acceptance_criteria")
+                for key in ("id", "title")
                 if task.get(key) not in (None, "", [], {})
             })
-            implementation = task.get("implementation_contract") or {}
-            targets.extend(implementation.get("targets") or [])
             checks.extend(
                 batch_item_label(task["id"], _review_check_label(item))
                 for item in (task.get("review_contract") or {}).get("checks") or []
                 if _review_check_label(item)
             )
-            task_acceptance_labels: list[str] = []
-            for item in task.get("acceptance_plan") or []:
-                label = batch_item_label(task["id"], item.get("criterion") or "")
-                task_acceptance_labels.append(label)
-                acceptance_criteria.append(label)
-                acceptance.append({**item, "task_id": task["id"], "criterion": label})
-            checks.extend(task_acceptance_labels)
         checks = list(dict.fromkeys(checks))
         return ({
             **context,
             "batch": self._batch_metadata(batch),
             "tasks": task_contexts,
-            "implementation": {"targets": self._merge_targets(targets)},
             "review_checks": checks,
-            "acceptance_criteria": acceptance_criteria,
-            "acceptance": acceptance,
         }, checks)
 
     def _batch_review_items(self, task_id: str) -> list[str]:
@@ -344,12 +327,9 @@ class TaskBatchMixin:
             batch_item_label(task["id"], item)
             for task in self._batch_member_tasks(batch["id"])
             for item in [
-                *[
-                    _review_check_label(check)
-                    for check in (task.get("review_contract") or {}).get("checks") or []
-                    if _review_check_label(check)
-                ],
-                *[str(value).strip() for value in task.get("acceptance_criteria") or [] if str(value).strip()],
+                _review_check_label(check)
+                for check in (task.get("review_contract") or {}).get("checks") or []
+                if _review_check_label(check)
             ]
         ]))
 
@@ -495,74 +475,7 @@ class TaskBatchMixin:
                 completed_task_ids.append(task["id"])
         connection.execute(
             """UPDATE execution_batches SET state=?, admission_open=?, owner_run_id=NULL,
-               active_turn_id='', updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+               updated_at=CURRENT_TIMESTAMP WHERE id=?""",
             (batch_state, int(verdict == "fail"), batch["id"]),
         )
         return completed_task_ids
-
-    def bind_batch_turn(
-        self, run_id: str, thread_id: str, turn_id: str, prompt_revision: int
-    ) -> None:
-        batch = self._batch_for_run(run_id)
-        if not batch:
-            return
-        with self.db.transaction() as connection:
-            connection.execute(
-                """UPDATE execution_batches SET thread_id=?, active_turn_id=?,
-                   updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                (thread_id, turn_id, batch["id"]),
-            )
-            connection.execute(
-                """UPDATE batch_steer_events SET status='sent', updated_at=CURRENT_TIMESTAMP
-                   WHERE batch_id=? AND status='pending' AND revision<=?""",
-                (batch["id"], int(prompt_revision)),
-            )
-
-    def pending_batch_steers(self) -> list[dict[str, Any]]:
-        with self.db.connection() as connection:
-            rows = connection.execute(
-                """SELECT event.*, batch.thread_id, batch.active_turn_id
-                   FROM batch_steer_events event
-                   JOIN execution_batches batch ON batch.id=event.batch_id
-                   WHERE event.status='pending' AND batch.state='development'
-                     AND batch.thread_id!='' AND batch.active_turn_id!=''
-                   ORDER BY event.created_at, event.id"""
-            ).fetchall()
-        result = []
-        for row in rows:
-            item = dict(row)
-            task = self.get_task(item["task_id"])
-            item["input"] = {
-                "batch_id": item["batch_id"],
-                "batch_revision": int(item["revision"]),
-                "task": {
-                    key: task.get(key)
-                    for key in ("id", "title", "goal")
-                    if task.get(key) not in (None, "", [], {})
-                },
-                "constraints": {
-                    key: task.get(key)
-                    for key in ("scope", "out_of_scope")
-                    if task.get(key) not in (None, "", [], {})
-                },
-                "targets": (task.get("implementation_contract") or {}).get("targets") or [],
-                "verify": group_verification_checks(task.get("acceptance_plan") or []),
-            }
-            result.append(item)
-        return result
-
-    def mark_batch_steer_sent(self, event_id: int) -> None:
-        with self.db.transaction() as connection:
-            connection.execute(
-                """UPDATE batch_steer_events SET status='sent', attempts=attempts+1,
-                   last_error='', updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                (event_id,),
-            )
-
-    def mark_batch_steer_pending(self, event_id: int, error: str) -> None:
-        with self.db.transaction() as connection:
-            connection.execute(
-                """UPDATE batch_steer_events SET attempts=attempts+1, last_error=?,
-                   updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                (str(error or "")[:2000], event_id),
-            )

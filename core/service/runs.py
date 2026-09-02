@@ -7,6 +7,7 @@ from typing import Any
 from .domain import (
     ACTIVE_RUN_STATUSES,
     CONVERSATION_ROLES,
+    EXECUTION_RECOVERY_LIMIT,
     REVIEW_INTERRUPT_LIMIT,
     REVIEW_RETRY_DELAYS_SECONDS,
     REVIEW_STAGE_BY_RUN_TYPE,
@@ -43,10 +44,68 @@ def effective_token_total(
 class TaskRunMixin:
     """Run leases, recovery, Token accounting, and conversation bindings."""
 
+    def _recover_execution_task(
+        self,
+        connection: Any,
+        *,
+        task_id: str,
+        run_type: str,
+        recovery_count: int,
+        reason: str,
+    ) -> str:
+        """Resume the canonical development thread twice, then require attention."""
+        attempt = int(recovery_count or 0) + 1
+        if attempt <= EXECUTION_RECOVERY_LIMIT:
+            target = "rework" if run_type == "rework" else "ready"
+            connection.execute(
+                """UPDATE tasks SET status=?, active_run_id=NULL, assigned_to=NULL,
+                   retry_required=1, retry_run_type=?, auto_dispatch=1,
+                   execution_recovery_count=?, last_recovery_reason=?,
+                   last_failure_reason=?, last_failure_at=CURRENT_TIMESTAMP,
+                   updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                (target, run_type, attempt, reason, reason, task_id),
+            )
+            self._event(
+                connection,
+                "task",
+                task_id,
+                "execution_auto_requeued",
+                {
+                    "reason": reason,
+                    "run_type": run_type,
+                    "attempt": attempt,
+                    "attempt_limit": EXECUTION_RECOVERY_LIMIT,
+                    "next_status": target,
+                },
+            )
+            return target
+        connection.execute(
+            """UPDATE tasks SET status='failed', active_run_id=NULL, assigned_to=NULL,
+               retry_required=1, retry_run_type=?, auto_dispatch=0,
+               execution_recovery_count=?, last_recovery_reason=?,
+               last_failure_reason=?, last_failure_at=CURRENT_TIMESTAMP,
+               updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+            (run_type, attempt, reason, reason, task_id),
+        )
+        self._event(
+            connection,
+            "task",
+            task_id,
+            "execution_recovery_exhausted",
+            {
+                "reason": reason,
+                "run_type": run_type,
+                "attempt": attempt,
+                "attempt_limit": EXECUTION_RECOVERY_LIMIT,
+            },
+        )
+        return "failed"
+
     def recover_expired_runs(self) -> int:
         with self.db.transaction() as connection:
             rows = connection.execute(
-                """SELECT r.id, r.task_id, r.run_type, t.status, t.review_interrupt_count
+                """SELECT r.id, r.task_id, r.run_type, t.status, t.review_interrupt_count,
+                          t.execution_recovery_count
                    FROM task_runs r JOIN tasks t ON t.id=r.task_id
                    WHERE r.status IN ('awaiting_thread','running') AND r.lease_expires_at < CURRENT_TIMESTAMP"""
             ).fetchall()
@@ -71,12 +130,13 @@ class TaskRunMixin:
                            WHERE id=? AND active_run_id=?""",
                         (review_stage, interrupt_count, f"+{delay} seconds", int(interrupt_count < REVIEW_INTERRUPT_LIMIT), row["task_id"], row["id"]),
                     )
-                elif row["status"] in {"claimed", "investigating", "implementing"}:
-                    connection.execute(
-                        """UPDATE tasks SET status='failed', active_run_id=NULL, assigned_to=NULL,
-                           last_failure_reason='执行会话租约已过期', last_failure_at=CURRENT_TIMESTAMP,
-                           retry_required=1, retry_run_type=?, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                        (row["run_type"], row["task_id"]),
+                elif row["status"] in {"claimed", "investigating", "implementing", "rework"}:
+                    self._recover_execution_task(
+                        connection,
+                        task_id=row["task_id"],
+                        run_type=row["run_type"],
+                        recovery_count=row["execution_recovery_count"],
+                        reason="执行会话租约已过期",
                     )
                 elif row["status"] in {"blocked", "waiting_confirmation"}:
                     connection.execute(
@@ -94,7 +154,12 @@ class TaskRunMixin:
         self.flush_integration_outbox()
         return recovered
 
-    def interrupt_unsubmitted_run(self, run_id: str, reason: str) -> dict[str, Any]:
+    def interrupt_unsubmitted_run(
+        self,
+        run_id: str,
+        reason: str,
+        review_retry_immediately: bool = False,
+    ) -> dict[str, Any]:
         run = self.get_run(run_id)
         if run["status"] not in ACTIVE_RUN_STATUSES:
             return {"run": run, "task": self.get_task(run["task_id"]), "changed": False}
@@ -119,10 +184,19 @@ class TaskRunMixin:
                 delay = REVIEW_RETRY_DELAYS_SECONDS[min(interrupt_count - 1, len(REVIEW_RETRY_DELAYS_SECONDS) - 1)]
                 connection.execute(
                     """UPDATE tasks SET status=?, active_run_id=NULL, assigned_to=NULL,
-                       review_interrupt_count=?, review_retry_after=datetime('now', ?),
+                       review_interrupt_count=?,
+                       review_retry_after=CASE WHEN ? THEN NULL ELSE datetime('now', ?) END,
                        auto_dispatch=?, updated_at=CURRENT_TIMESTAMP
                        WHERE id=? AND active_run_id=?""",
-                    (review_stage, interrupt_count, f"+{delay} seconds", int(interrupt_count < REVIEW_INTERRUPT_LIMIT), task["id"], run_id),
+                    (
+                        review_stage,
+                        interrupt_count,
+                        int(review_retry_immediately),
+                        f"+{delay} seconds",
+                        int(interrupt_count < REVIEW_INTERRUPT_LIMIT),
+                        task["id"],
+                        run_id,
+                    ),
                 )
                 self._event(connection, "run", run_id, "review_interrupted", {"reason": reason, "stage": review_stage})
             elif task["status"] in {"blocked", "waiting_confirmation"}:
@@ -134,13 +208,20 @@ class TaskRunMixin:
                 )
                 self._event(connection, "run", run_id, "execution_stopped", {"reason": reason, "task_status": task["status"]})
             else:
-                connection.execute(
-                    """UPDATE tasks SET status='failed', active_run_id=NULL, assigned_to=NULL,
-                       last_failure_reason=?, last_failure_at=CURRENT_TIMESTAMP,
-                       retry_required=1, retry_run_type=?, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                    (reason, run["run_type"], task["id"]),
+                next_status = self._recover_execution_task(
+                    connection,
+                    task_id=task["id"],
+                    run_type=run["run_type"],
+                    recovery_count=task.get("execution_recovery_count", 0),
+                    reason=reason,
                 )
-                self._event(connection, "run", run_id, "execution_failed", {"reason": reason})
+                self._event(
+                    connection,
+                    "run",
+                    run_id,
+                    "execution_requeued" if next_status != "failed" else "execution_failed",
+                    {"reason": reason, "next_status": next_status},
+                )
             self._queue_obsidian_sync(connection, "task", task["id"])
         self.flush_integration_outbox()
         return {"run": self.get_run(run_id), "task": self.get_task(task["id"]), "changed": True}
@@ -289,7 +370,10 @@ class TaskRunMixin:
                 })
         return self.get_run(run_id)
 
-    def bind_conversation(self, task_id: str, role: str, thread_id: str, run_id: str | None = None, title: str = "") -> dict[str, Any]:
+    def _bind_conversation_in_connection(
+        self, connection: Any, task_id: str, role: str, thread_id: str,
+        run_id: str | None = None, title: str = "",
+    ) -> None:
         if role not in CONVERSATION_ROLES:
             raise ValueError(f"Invalid conversation role: {role}")
         thread_id = str(thread_id or "").strip()
@@ -299,11 +383,21 @@ class TaskRunMixin:
             raise ValueError(f"run_id is required for role {role}")
         if role == "source" and run_id:
             raise ValueError(f"role {role} cannot be bound to a task run")
-        task = self.get_task(task_id)
+        task_row = connection.execute(
+            "SELECT * FROM tasks WHERE id=?", (task_id,),
+        ).fetchone()
+        if not task_row:
+            raise KeyError(f"Task not found: {task_id}")
+        task = decode_row(task_row)
         if role == "code_review" and task.get("codex_thread_id") and thread_id == task.get("codex_thread_id"):
             raise ValueError("Review must use a conversation independent from the execution thread")
         if run_id:
-            run = self.get_run(run_id)
+            run_row = connection.execute(
+                "SELECT * FROM task_runs WHERE id=?", (run_id,),
+            ).fetchone()
+            if not run_row:
+                raise KeyError(f"Run not found: {run_id}")
+            run = decode_row(run_row, RUN_JSON_FIELDS)
             if run["task_id"] != task_id:
                 raise ValueError("Run does not belong to task")
             expected_role = run["run_type"]
@@ -317,52 +411,60 @@ class TaskRunMixin:
                 allowed_task_statuses.add("claimed")
             if task["status"] not in allowed_task_statuses:
                 raise ValueError(f"Task must be {expected_task_status} before binding role {role}")
-        with self.db.transaction() as connection:
-            existing = connection.execute(
-                "SELECT task_id, role, thread_id FROM task_run_conversations WHERE run_id=?",
+        existing = connection.execute(
+            "SELECT task_id, role, thread_id FROM task_run_conversations WHERE run_id=?",
+            (run_id,),
+        ).fetchone() if run_id else None
+        if existing and (existing["task_id"] != task_id or existing["thread_id"] != thread_id):
+            raise ValueError("Run is already bound to a different conversation")
+        canonical = connection.execute(
+            "SELECT id FROM task_conversations WHERE task_id=? AND thread_id=? AND role!='source' ORDER BY created_at LIMIT 1",
+            (task_id, thread_id),
+        ).fetchone()
+        if canonical:
+            connection.execute(
+                """UPDATE task_conversations SET run_id=?, role=?, title=?, status='active',
+                   updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                (run_id, role, title, canonical["id"]),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO task_conversations(task_id, run_id, role, thread_id, title) VALUES(?, ?, ?, ?, ?)",
+                (task_id, run_id, role, thread_id, title),
+            )
+        if run_id:
+            connection.execute(
+                """INSERT INTO task_run_conversations(run_id, task_id, role, thread_id, title)
+                   VALUES(?, ?, ?, ?, ?)
+                   ON CONFLICT(run_id) DO UPDATE SET role=excluded.role, thread_id=excluded.thread_id, title=excluded.title,
+                   status='active', updated_at=CURRENT_TIMESTAMP""",
+                (run_id, task_id, role, thread_id, title),
+            )
+            connection.execute(
+                """UPDATE task_runs SET status='running', started_at=COALESCE(started_at, CURRENT_TIMESTAMP),
+                   updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='awaiting_thread'""",
                 (run_id,),
-            ).fetchone() if run_id else None
-            if existing and (existing["task_id"] != task_id or existing["thread_id"] != thread_id):
-                raise ValueError("Run is already bound to a different conversation")
-            canonical = connection.execute(
-                "SELECT id FROM task_conversations WHERE task_id=? AND thread_id=? AND role!='source' ORDER BY created_at LIMIT 1",
-                (task_id, thread_id),
-            ).fetchone()
-            if canonical:
-                connection.execute(
-                    """UPDATE task_conversations SET run_id=?, role=?, title=?, status='active',
-                       updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                    (run_id, role, title, canonical["id"]),
-                )
-            else:
-                connection.execute(
-                    "INSERT INTO task_conversations(task_id, run_id, role, thread_id, title) VALUES(?, ?, ?, ?, ?)",
-                    (task_id, run_id, role, thread_id, title),
-                )
-            if run_id:
-                connection.execute(
-                    """INSERT INTO task_run_conversations(run_id, task_id, role, thread_id, title)
-                       VALUES(?, ?, ?, ?, ?)
-                       ON CONFLICT(run_id) DO UPDATE SET role=excluded.role, thread_id=excluded.thread_id, title=excluded.title,
-                       status='active', updated_at=CURRENT_TIMESTAMP""",
-                    (run_id, task_id, role, thread_id, title),
-                )
-                connection.execute(
-                    """UPDATE task_runs SET status='running', started_at=COALESCE(started_at, CURRENT_TIMESTAMP),
-                       updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='awaiting_thread'""",
-                    (run_id,),
-                )
-            if role in {"execution", "rework", "bugfix"}:
-                cursor = connection.execute(
-                    """UPDATE tasks SET status='implementing',
-                       codex_thread_id=COALESCE(codex_thread_id, ?),
-                       updated_at=CURRENT_TIMESTAMP
-                       WHERE id=? AND active_run_id=? AND status IN ('claimed','implementing')""",
-                    (thread_id, task_id, run_id),
-                )
-                if cursor.rowcount != 1:
-                    raise ValueError("Task changed before the native execution thread was bound")
-            self._event(connection, "task", task_id, "conversation_bound", {"role": role, "thread_id": thread_id, "run_id": run_id})
+            )
+        if role in {"execution", "rework", "bugfix"}:
+            cursor = connection.execute(
+                """UPDATE tasks SET status='implementing',
+                   codex_thread_id=COALESCE(codex_thread_id, ?),
+                   updated_at=CURRENT_TIMESTAMP
+                   WHERE id=? AND active_run_id=? AND status IN ('claimed','implementing')""",
+                (thread_id, task_id, run_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Task changed before the native execution thread was bound")
+        self._event(connection, "task", task_id, "conversation_bound", {"role": role, "thread_id": thread_id, "run_id": run_id})
+
+    def bind_conversation(
+        self, task_id: str, role: str, thread_id: str,
+        run_id: str | None = None, title: str = "",
+    ) -> dict[str, Any]:
+        with self.db.transaction() as connection:
+            self._bind_conversation_in_connection(
+                connection, task_id, role, thread_id, run_id, title,
+            )
         return self.task_details(task_id)
 
     def update_conversation_summary(self, task_id: str, thread_id: str, summary: str, status: str = "completed") -> dict[str, Any]:
@@ -408,26 +510,3 @@ class TaskRunMixin:
                 item["run_ids"] = [item["run_id"]]
                 result.append(item)
         return result
-
-    def conversation_metadata(self, thread_ids: list[str]) -> dict[str, dict[str, Any]]:
-        """Return Taskboard ownership metadata for a bounded set of Codex threads."""
-        values = list(dict.fromkeys(str(value or "").strip() for value in thread_ids))
-        values = [value for value in values if value]
-        if not values:
-            return {}
-        placeholders = ",".join("?" for _ in values)
-        with self.db.connection() as connection:
-            rows = connection.execute(
-                f"""SELECT conversation.thread_id, conversation.task_id, conversation.role,
-                            task.project, conversation.updated_at
-                       FROM task_conversations conversation
-                       JOIN tasks task ON task.id=conversation.task_id
-                      WHERE conversation.thread_id IN ({placeholders})
-                      ORDER BY conversation.updated_at DESC""",
-                tuple(values),
-            ).fetchall()
-        metadata: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            item = dict(row)
-            metadata.setdefault(item["thread_id"], item)
-        return metadata

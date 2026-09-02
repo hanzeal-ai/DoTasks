@@ -286,14 +286,6 @@ class TaskboardHandler(BaseHTTPRequestHandler):
                         payload.get("agent_id", ""),
                     ),
                 )
-            elif parsed.path == "/api/native-dispatches/claim":
-                result = self.service.claim_next_native_dispatch(
-                    payload["worker_id"],
-                    payload.get("project"),
-                    payload.get("lease_seconds", 1800),
-                    payload["stage"],
-                )
-                self._json(HTTPStatus.OK, result)
             elif parsed.path == "/api/conversations/bind":
                 self._json(
                     HTTPStatus.CREATED,
@@ -308,9 +300,7 @@ class TaskboardHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/dispatcher/pause":
                 self._json(
                     HTTPStatus.OK,
-                    self.service.pause_all_tasks(
-                        payload.get("reason", "用户从任务看板暂停")
-                    ),
+                    self.service.pause_dispatcher(),
                 )
             elif parsed.path == "/api/dispatcher/resume":
                 result = (
@@ -330,15 +320,6 @@ class TaskboardHandler(BaseHTTPRequestHandler):
                         payload["status"],
                         payload.get("reason", ""),
                         **updates,
-                    ),
-                )
-            elif match := re.fullmatch(
-                r"/api/tasks/([^/]+)/acceptance-checks", parsed.path
-            ):
-                self._json(
-                    HTTPStatus.OK,
-                    self.service.run_acceptance_checks(
-                        match.group(1), payload["run_id"]
                     ),
                 )
             elif match := re.fullmatch(r"/api/runs/([^/]+)/delivery", parsed.path):

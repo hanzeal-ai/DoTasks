@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import uuid
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Iterator
 
 
@@ -11,6 +13,7 @@ class NativeDispatchMixin:
 
     _ACTIVE_NATIVE_DISPATCH_STATUSES = ("claimed", "pending_thread", "bound")
     _NATIVE_DISPATCH_STAGES = ("development", "code_review")
+    _MISSING_LIFECYCLE_CALLBACK_REASON = "原生 Codex 任务已结束但未提交生命周期回调"
 
     @contextmanager
     def _native_dispatch_worker_lock(self, worker_id: str) -> Iterator[None]:
@@ -41,11 +44,48 @@ class NativeDispatchMixin:
         return f"[DoTaks] {entity_id} {role_label}"
 
     @staticmethod
-    def _native_dispatch_prompt(claim: dict[str, Any]) -> str:
+    def _lifecycle_skill_attachment() -> str:
+        skill_path = (
+            Path(__file__).resolve().parents[2]
+            / "skills"
+            / "dotasks-lifecycle"
+            / "SKILL.md"
+        )
+        target = str(skill_path)
+        if " " in target:
+            target = f"<{target}>"
+        return f"[$dotasks:dotasks-lifecycle]({target})"
+
+    @staticmethod
+    def _lifecycle_cli_fallback() -> str:
+        cli_path = Path(__file__).resolve().parents[2] / "scripts" / "mcp-server"
+        return f"DoTasks lifecycle CLI fallback: `{cli_path}`"
+
+    @classmethod
+    def _attach_lifecycle_skill(cls, prompt: str) -> str:
+        lines = prompt.strip().splitlines()
+        if lines and lines[0].startswith("[$dotasks:dotasks-lifecycle]("):
+            lines = lines[1:]
+        lines = [
+            line for line in lines
+            if not line.startswith("DoTasks lifecycle CLI fallback:")
+        ]
+        while lines and not lines[0].strip():
+            lines = lines[1:]
+        while lines and not lines[-1].strip():
+            lines = lines[:-1]
+        body = "\n".join(lines).strip()
+        return (
+            f"{cls._lifecycle_skill_attachment()}\n\n"
+            f"{body}\n\n{cls._lifecycle_cli_fallback()}"
+        )
+
+    @classmethod
+    def _native_dispatch_prompt(cls, claim: dict[str, Any]) -> str:
         run = claim.get("run") or {}
         if claim.get("kind") == "requirement_decomposition":
             requirement = claim.get("requirement") or {}
-            return (
+            prompt = (
                 "$dotasks-lifecycle\n\n"
                 "这是 DoTasks 已领取的需求拆解运行，不是新任务 intake。不要编辑代码，也不要创建新的需求。\n"
                 f"需求 ID：{requirement.get('id')}\n"
@@ -53,13 +93,20 @@ class NativeDispatchMixin:
                 "调用 get_requirement 获取完整内容，将需求拆成可独立执行、具备明确依赖且状态为 ready 的子任务。"
                 "完成后调用 submit_requirement_decomposition；失败时调用 report_requirement_decomposition_failed。"
             )
+            return cls._attach_lifecycle_skill(prompt)
         prompt = str(claim.get("dispatch_prompt") or "").strip()
         if "$dotasks-lifecycle" not in prompt:
             prompt = "$dotasks-lifecycle\n\n" + prompt
-        return prompt
+        return cls._attach_lifecycle_skill(prompt)
 
     def _decode_native_dispatch(self, row: Any) -> dict[str, Any]:
         item = dict(row)
+        item["dispatch_attempt_id"] = str(item.get("dispatch_attempt_id") or "")
+        if not item["dispatch_attempt_id"]:
+            raise RuntimeError("Native dispatch is missing dispatch_attempt_id")
+        item["dispatch_prompt"] = self._attach_lifecycle_skill(
+            str(item.get("dispatch_prompt") or "")
+        )
         item["resume_required"] = bool(item.get("resume_thread_id"))
         item["can_create_fallback"] = item["status"] in {"claimed", "pending_thread"}
         return item
@@ -102,7 +149,7 @@ class NativeDispatchMixin:
             raise KeyError(f"Native dispatch not found: {run_id}")
         return self._refresh_native_dispatch(row)
 
-    def claim_next_native_dispatch(
+    def _claim_next_native_dispatch(
         self, worker_id: str, project: str | None = None, lease_seconds: int = 1800,
         stage: str = "",
     ) -> dict[str, Any] | None:
@@ -120,7 +167,7 @@ class NativeDispatchMixin:
                 lane_worker_id, project, lease_seconds, stage,
             )
 
-    def claim_native_dispatch_batch(
+    def _claim_native_dispatch_batch(
         self, worker_id: str, project: str | None = None,
         lease_seconds: int = 1800, stage: str = "",
     ) -> dict[str, Any]:
@@ -135,8 +182,11 @@ class NativeDispatchMixin:
         )
         dispatches: list[dict[str, Any]] = []
         for slot in range(1, capacity + 1):
-            dispatch = self.claim_next_native_dispatch(
-                f"{worker_id}:slot-{slot}", project, lease_seconds, stage,
+            # Keep slot 1 on the historical lane worker ID so an upgraded
+            # Controller recovers an already active single-slot dispatch.
+            slot_worker_id = worker_id if slot == 1 else f"{worker_id}:slot-{slot}"
+            dispatch = self._claim_next_native_dispatch(
+                slot_worker_id, project, lease_seconds, stage,
             )
             if dispatch:
                 dispatches.append(dispatch)
@@ -177,13 +227,14 @@ class NativeDispatchMixin:
             title = self._native_dispatch_title(claim)
             prompt = self._native_dispatch_prompt(claim)
             with self.db.transaction() as connection:
+                dispatch_attempt_id = uuid.uuid4().hex
                 connection.execute(
                     """INSERT INTO native_dispatches(
                            run_id, entity_type, entity_id, role, worker_id, project_path,
                            dispatch_title, dispatch_prompt, resume_thread_id,
                            execution_environment, parallel_fallback_reason,
-                           base_revision, base_ref
-                       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           base_revision, base_ref, dispatch_attempt_id
+                       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         run["id"], entity_type, entity["id"], run.get("run_type") or "",
                         worker_id, str(entity.get("project") or ""), title, prompt,
@@ -192,23 +243,35 @@ class NativeDispatchMixin:
                         str((run.get("context_snapshot") or {}).get("parallel_fallback_reason") or ""),
                         str(run.get("base_revision") or ""),
                         str(run.get("base_ref") or ""),
+                        dispatch_attempt_id,
                     ),
                 )
             return self.get_native_dispatch(run["id"])
 
     def mark_native_dispatch_pending(
         self, run_id: str, client_thread_id: str, host_id: str = "",
-        codex_project_id: str = "",
+        codex_project_id: str = "", *, dispatch_attempt_id: str,
     ) -> dict[str, Any]:
         client_thread_id = str(client_thread_id or "").strip()
         if not client_thread_id:
             raise ValueError("client_thread_id is required")
         with self.db.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM native_dispatches WHERE run_id=?", (run_id,),
+            ).fetchone()
+            if not row:
+                raise KeyError(f"Native dispatch not found: {run_id}")
+            dispatch = self._decode_native_dispatch(row)
+            self._validate_dispatch_attempt(dispatch, dispatch_attempt_id)
             cursor = connection.execute(
                 """UPDATE native_dispatches SET status='pending_thread', client_thread_id=?,
                    host_id=?, codex_project_id=?, updated_at=CURRENT_TIMESTAMP
-                   WHERE run_id=? AND status IN ('claimed','pending_thread')""",
-                (client_thread_id, str(host_id or ""), str(codex_project_id or ""), run_id),
+                   WHERE run_id=? AND dispatch_attempt_id=?
+                     AND status IN ('claimed','pending_thread')""",
+                (
+                    client_thread_id, str(host_id or ""),
+                    str(codex_project_id or ""), run_id, dispatch_attempt_id,
+                ),
             )
             if cursor.rowcount != 1:
                 raise ValueError("Native dispatch cannot be marked pending")
@@ -216,41 +279,64 @@ class NativeDispatchMixin:
 
     def bind_native_dispatch(
         self, run_id: str, thread_id: str, host_id: str = "",
-        codex_project_id: str = "", resume_fallback_reason: str = "",
+        codex_project_id: str = "", *, resume_fallback_reason: str = "",
+        dispatch_attempt_id: str,
     ) -> dict[str, Any]:
-        dispatch = self.get_native_dispatch(run_id)
         thread_id = str(thread_id or "").strip()
         if not thread_id:
             raise ValueError("thread_id is required")
-        if dispatch["status"] not in {"claimed", "pending_thread", "bound"}:
-            raise ValueError("Native dispatch is no longer active")
-        if dispatch["thread_id"] and dispatch["thread_id"] != thread_id:
-            raise ValueError("Native dispatch is already bound to a different thread")
         fallback_reason = str(resume_fallback_reason or "").strip()
-        if dispatch["entity_type"] == "task":
-            self.bind_conversation(
-                dispatch["entity_id"], dispatch["role"], thread_id, run_id,
-                dispatch["dispatch_title"],
-            )
-            if fallback_reason and dispatch["role"] in {"execution", "rework", "bugfix"}:
-                with self.db.transaction() as connection:
+        with self.db.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM native_dispatches WHERE run_id=?", (run_id,),
+            ).fetchone()
+            if not row:
+                raise KeyError(f"Native dispatch not found: {run_id}")
+            dispatch = self._decode_native_dispatch(row)
+            self._validate_dispatch_attempt(dispatch, dispatch_attempt_id)
+            if dispatch["status"] not in {"claimed", "pending_thread", "bound"}:
+                raise ValueError("Native dispatch is no longer active")
+            if dispatch["thread_id"] and dispatch["thread_id"] != thread_id:
+                raise ValueError("Native dispatch is already bound to a different thread")
+            if dispatch["entity_type"] == "task":
+                self._bind_conversation_in_connection(
+                    connection, dispatch["entity_id"], dispatch["role"],
+                    thread_id, run_id, dispatch["dispatch_title"],
+                )
+                if fallback_reason and dispatch["role"] in {"execution", "rework", "bugfix"}:
                     connection.execute(
                         "UPDATE tasks SET codex_thread_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
                         (thread_id, dispatch["entity_id"]),
                     )
-        with self.db.transaction() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """UPDATE native_dispatches SET status='bound', thread_id=?, host_id=?,
                    codex_project_id=?, resume_fallback_reason=?, updated_at=CURRENT_TIMESTAMP
-                   WHERE run_id=?""",
-                (thread_id, str(host_id or ""), str(codex_project_id or ""), fallback_reason, run_id),
+                   WHERE run_id=? AND dispatch_attempt_id=?
+                     AND status IN ('claimed','pending_thread','bound')""",
+                (
+                    thread_id, str(host_id or ""), str(codex_project_id or ""),
+                    fallback_reason, run_id, dispatch_attempt_id,
+                ),
             )
+            if cursor.rowcount != 1:
+                raise ValueError("Native dispatch changed before binding")
             self._event(
                 connection, dispatch["entity_type"], dispatch["entity_id"],
                 "native_thread_bound",
                 {"run_id": run_id, "thread_id": thread_id, "role": dispatch["role"], "resume_fallback_reason": fallback_reason},
             )
         return self.get_native_dispatch(run_id)
+
+    @staticmethod
+    def _validate_dispatch_attempt(
+        dispatch: dict[str, Any], dispatch_attempt_id: str
+    ) -> None:
+        supplied = str(dispatch_attempt_id or "").strip()
+        expected = str(dispatch.get("dispatch_attempt_id") or "").strip()
+        if not supplied:
+            raise ValueError("dispatch_attempt_id is required")
+        if supplied != expected:
+            raise ValueError("Native dispatch attempt is stale")
 
     def renew_native_dispatch(self, run_id: str, lease_seconds: int = 1800) -> dict[str, Any]:
         dispatch = self.get_native_dispatch(run_id)
@@ -263,9 +349,8 @@ class NativeDispatchMixin:
                 raise KeyError(f"Run not found: {run_id}")
             self.renew_run_lease(run_id, run["lease_token"], lease_seconds)
         else:
-            self.claim_next_task(
-                "", action="renew_decomposition", requirement_id=dispatch["entity_id"],
-                decomposition_run_id=run_id, lease_seconds=lease_seconds,
+            self.renew_requirement_decomposition(
+                dispatch["entity_id"], run_id, lease_seconds,
             )
         return self.get_native_dispatch(run_id)
 
@@ -275,12 +360,17 @@ class NativeDispatchMixin:
         if dispatch["status"] in {"completed", "failed"}:
             return dispatch
         if dispatch["entity_type"] == "task":
-            self.interrupt_unsubmitted_run(run_id, reason)
+            self.interrupt_unsubmitted_run(
+                run_id,
+                reason,
+                review_retry_immediately=(
+                    dispatch["role"] == "code_review"
+                    and reason == self._MISSING_LIFECYCLE_CALLBACK_REASON
+                ),
+            )
         else:
-            self.claim_next_task(
-                "native-controller", action="fail_decomposition",
-                requirement_id=dispatch["entity_id"], decomposition_run_id=run_id,
-                error=reason,
+            self.fail_requirement_decomposition(
+                dispatch["entity_id"], run_id, reason,
             )
         with self.db.transaction() as connection:
             connection.execute(

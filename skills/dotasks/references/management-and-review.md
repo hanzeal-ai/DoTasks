@@ -5,7 +5,7 @@ Read this reference only for explicit dispatch, review, rework, traceability, re
 ## Dispatch and execution
 
 - Do not implement a queued task in the intake or dispatcher conversation.
-- `$dotasks-controller` calls `claim_next_dispatch` with independent `code_review` and `development` stages. Each lane has one active dispatch, different lanes may run concurrently, and all claims still preserve dependency, project-serialization, and target-lock gates. Requirement decomposition shares the development lane.
+- `$dotasks-controller` calls `claim_schedule_cycle` as the only scheduling entry. One cycle fills the independent `code_review` and `development` lanes: Code Review has one slot and development uses the configured parallel slot count. All claims preserve dependency, project-exclusive, target-lock and isolated-Worktree gates. Requirement decomposition shares a development slot.
 - A new or resumed native worker task must use the persisted `$dotasks-lifecycle` prompt and be bound with `bind_native_dispatch` only after a real thread ID exists. Never bind the controller conversation or a `clientThreadId`.
 - Execution starts from saved targets, location evidence, acceptance plan and `RUN_CONTEXT_JSON`. Current code is authoritative; expand location only when a saved target is missing or contradicted.
 - Only `submit_task_delivery` moves implementation into code review. It requires exact in-lock changed locations and criterion-level evidence. Store a compact conversation summary after delivery.
@@ -14,8 +14,8 @@ Read this reference only for explicit dispatch, review, rework, traceability, re
 ## Review and rework
 
 - Prepare review location from actual changed symbols and their direct callers/tests. Reuse the ordered location strategy from the main skill: CodeGraph, then GitNexus, then bounded direct source matching. A missing graph index does not block review location.
-- Code Review reads the implementation and review contracts plus actual diff, runs the saved automated acceptance plan with `run_acceptance_checks`, and does not edit. Only `review_code` may pass this combined stage.
-- `review_code` must partition the exact combined set of review checks and acceptance criteria. Never describe warnings, blocked checks, or unrun checks as passing.
+- Code Review obtains the complete change only with existing Git commands against the saved workspace, including Git handling for untracked additions. It never reads a patch artifact, assembles file contents, or implements its own diff. It then uses all relevant already-available project tools and may inspect only direct code dependencies needed to judge code quality, security vulnerabilities, and high cohesion/low coupling; it never installs tools, writes ad-hoc scanners, inspects task goals or acceptance criteria, runs the acceptance plan, or edits code. Only concrete blocking quality findings may fail, and only `review_code` may pass this stage.
+- `review_code` must partition the exact set of Review quality checks. Existing human acceptance remains responsible for task completion.
 - Failed Code Review returns to rework; passing completes the task. Interrupted review remains review; it is not an execution failure. Genuinely non-code tasks skip this stage and complete from fully passing delivery evidence.
 - Repeated equivalent failures and interruptions respect persisted backoff and operator pause state. Never bypass a paused task or disabled dispatcher.
 
@@ -27,4 +27,6 @@ Read this reference only for explicit dispatch, review, rework, traceability, re
 ## Board management
 
 - `open_taskboard` returns the local URL and startup command. The default URL is `http://127.0.0.1:8765`.
-- Resuming the dispatcher does not resume paused tasks automatically. Reserve task status `failed` for execution failure, not review rejection or interruption.
+- Pausing the dispatcher only disables new claims. It never changes task status and never interrupts an active native worker.
+- For an explicit DoTasks request to resume scheduling, call `set_dispatcher_enabled` with `enabled=true`, then follow `$dotasks-controller` manual mode so the current event-driven turn immediately sweeps Code Review and every development slot. A dashboard-only toggle persists the switch but cannot wake Codex without an active Agent turn.
+- Resuming the dispatcher does not resume individually paused tasks automatically. Reserve task status `failed` for execution failure, not review rejection or interruption.

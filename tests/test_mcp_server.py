@@ -23,7 +23,7 @@ class TaskboardMcpServerTest(unittest.TestCase):
         self.assertNotIn("create_confirmed_task", names)
         self.assertIn("report_location_status", names)
         self.assertNotIn("report_codegraph_status", names)
-        self.assertIn("run_acceptance_checks", names)
+        self.assertNotIn("run_acceptance_checks", names)
         self.assertIn("report_run_blocked", names)
         self.assertIn("detect_task_change", names)
         self.assertIn("prepare_task_change_confirmation", names)
@@ -32,9 +32,12 @@ class TaskboardMcpServerTest(unittest.TestCase):
         self.assertIn("submit_requirement_decomposition", names)
         self.assertIn("report_requirement_decomposition_failed", names)
         self.assertTrue({
-            "claim_next_dispatch", "claim_dispatch_batch", "mark_dispatch_pending", "bind_native_dispatch",
+            "set_dispatcher_enabled", "mark_dispatch_pending", "bind_native_dispatch",
             "renew_dispatch_lease", "get_dispatch_status", "report_dispatch_failed",
+            "claim_schedule_cycle", "complete_schedule_cycle",
         }.issubset(names))
+        self.assertNotIn("claim_next_dispatch", names)
+        self.assertNotIn("claim_dispatch_batch", names)
         self.assertNotIn("create_requirement", names)
         self.assertNotIn("update_requirement", names)
         self.assertNotIn("create_task", names)
@@ -105,40 +108,61 @@ class TaskboardMcpServerTest(unittest.TestCase):
         self.assertEqual("object", intake["targets"]["items"]["type"])
         self.assertNotIn("ordered_steps", intake)
 
-    def test_native_dispatch_schema_exposes_independent_stage_lanes(self):
-        tool = next(item for item in TOOLS if item["name"] == "claim_next_dispatch")
-        stage = tool["inputSchema"]["properties"]["stage"]
-
-        self.assertEqual(
-            ["development", "code_review"], stage["enum"]
-        )
-        self.assertIn("independent", tool["description"])
+    def test_schedule_cycle_is_the_only_dispatch_claim_entry(self):
+        tool = next(item for item in TOOLS if item["name"] == "claim_schedule_cycle")
+        self.assertIn("every available development slot", tool["description"])
 
         with patch(
-            "taskboard.mcp_server.SERVICE.claim_next_native_dispatch",
-            return_value=None,
+            "taskboard.mcp_server.SERVICE.claim_schedule_cycle",
+            return_value={"status": "idle", "code_review": {}, "development": {}},
         ) as claim:
             handle({
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "tools/call",
                 "params": {
-                    "name": "claim_next_dispatch",
+                    "name": "claim_schedule_cycle",
                     "arguments": {
                         "worker_id": "codex-native-controller",
-                        "stage": "development",
                     },
                 },
             })
         claim.assert_called_once_with(
-            "codex-native-controller", None, 1800, "development"
+            "codex-native-controller", None, 1800, force=False
         )
 
-        batch_tool = next(item for item in TOOLS if item["name"] == "claim_dispatch_batch")
-        self.assertEqual(
-            ["development", "code_review"],
-            batch_tool["inputSchema"]["properties"]["stage"]["enum"],
+        dispatcher_tool = next(
+            item for item in TOOLS if item["name"] == "set_dispatcher_enabled"
         )
+        self.assertEqual(
+            ["enabled"], dispatcher_tool["inputSchema"]["required"]
+        )
+        self.assertIn(
+            "dispatch_attempt_id",
+            next(item for item in TOOLS if item["name"] == "bind_native_dispatch")[
+                "inputSchema"
+            ]["properties"],
+        )
+        self.assertIn(
+            "dispatch_attempt_id",
+            next(item for item in TOOLS if item["name"] == "bind_native_dispatch")[
+                "inputSchema"
+            ]["required"],
+        )
+        with patch(
+            "taskboard.mcp_server.SERVICE.set_dispatcher_enabled",
+            return_value={"enabled": False},
+        ) as set_enabled:
+            handle({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "set_dispatcher_enabled",
+                    "arguments": {"enabled": False},
+                },
+            })
+        set_enabled.assert_called_once_with(False)
 
     def test_finalize_intake_schema_contains_each_authored_fact_once(self):
         tool = next(item for item in TOOLS if item["name"] == "finalize_task_intake")
@@ -151,7 +175,9 @@ class TaskboardMcpServerTest(unittest.TestCase):
         self.assertNotIn("ordered_steps", task_branch)
         self.assertIn("tasks", properties["targets"]["items"]["properties"])
         self.assertIn("mode", properties["targets"]["items"]["properties"])
-        self.assertIn("review_checks", task_branch)
+        self.assertNotIn("review_checks", task_branch)
+        self.assertIn("review_checks", properties)
+        self.assertIn("default", properties["review_checks"]["description"])
         self.assertIn("quality_gates", task_branch)
         self.assertIn("acceptance_plan", task_branch)
         gates = properties["quality_gates"]
@@ -164,6 +190,13 @@ class TaskboardMcpServerTest(unittest.TestCase):
         self.assertIn("acceptance_criteria", properties)
         self.assertNotIn("implementation_contract", properties)
         self.assertNotIn("review_contract", properties)
+
+        location_tool = next(
+            item for item in TOOLS if item["name"] == "complete_location_analysis"
+        )
+        location_review = location_tool["inputSchema"]["properties"]["review_contract"]
+        self.assertNotIn("checks", location_review["required"])
+        self.assertIn("default", location_review["properties"]["checks"]["description"])
 
     def test_requirement_and_task_intake_results_have_explicit_kinds(self):
         requirement = {
@@ -192,8 +225,9 @@ class TaskboardMcpServerTest(unittest.TestCase):
         required = set(task_items["required"])
         self.assertTrue({
             "analysis_id", "location_evidence", "targets",
-            "review_checks", "acceptance_plan",
+            "acceptance_plan",
         }.issubset(required))
+        self.assertNotIn("review_checks", required)
         self.assertEqual(1, task_items["properties"]["targets"]["minItems"])
         self.assertNotIn("ordered_steps", required)
         self.assertIn("tasks", task_items["properties"]["targets"]["items"]["properties"])
@@ -216,6 +250,61 @@ class TaskboardMcpServerTest(unittest.TestCase):
         self.assertEqual("RUN-1", response["structuredContent"]["run_id"])
         self.assertLess(len(response["content"][0]["text"]), 300)
         self.assertNotIn("\n", response["content"][0]["text"])
+
+    def test_dispatch_results_preserve_controller_contract(self):
+        dispatch = {
+            "run_id": "RUN-1",
+            "entity_type": "task",
+            "entity_id": "TASK-1",
+            "role": "execution",
+            "status": "claimed",
+            "worker_id": "codex-native-controller:development",
+            "project_path": "/tmp/project",
+            "dispatch_title": "[DoTasks] TASK-1 开发",
+            "dispatch_prompt": "$dotasks-lifecycle\nrun context",
+            "execution_environment": "worktree",
+            "base_revision": "abc123",
+            "base_ref": "refs/heads/codex/dotasks-run-run-1",
+            "resume_thread_id": "",
+            "private_internal_field": "must not leak",
+        }
+        with patch.dict(
+            TOOL_HANDLERS,
+            {
+                "claim_schedule_cycle": lambda _arguments: {
+                    "status": "claimed",
+                    "worker_id": "codex-native-controller",
+                    "cycle_generation": 3,
+                    "scheduler": {"pending": True},
+                    "code_review": {"stage": "code_review", "capacity": 1, "dispatches": []},
+                    "development": {"stage": "development", "capacity": 2, "dispatches": [dispatch]},
+                },
+                "set_dispatcher_enabled": lambda arguments: {
+                    "enabled": arguments["enabled"]
+                },
+            },
+            clear=False,
+        ):
+            cycle = handle({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "claim_schedule_cycle", "arguments": {}},
+            })["result"]["structuredContent"]
+            dispatcher = handle({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {
+                    "name": "set_dispatcher_enabled",
+                    "arguments": {"enabled": True},
+                },
+            })["result"]["structuredContent"]
+
+        compact = cycle["development"]["dispatches"][0]
+        self.assertEqual("RUN-1", compact["run_id"])
+        self.assertEqual("$dotasks-lifecycle\nrun context", compact["dispatch_prompt"])
+        self.assertEqual("worktree", compact["execution_environment"])
+        self.assertNotIn("private_internal_field", compact)
+        self.assertEqual(2, cycle["development"]["capacity"])
+        self.assertEqual("refs/heads/codex/dotasks-run-run-1", compact["base_ref"])
+        self.assertEqual({"enabled": True}, dispatcher)
 
 
 if __name__ == "__main__":

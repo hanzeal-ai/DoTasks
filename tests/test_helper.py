@@ -120,6 +120,30 @@ class MacosHelperTest(unittest.TestCase):
             self.assertIn('VENDOR_DIR="$PROJECT_DIR/vendor"', script)
             self.assertIn(f'exec "$PYTHON_BIN" -B -m {module}', script)
 
+    def test_mcp_server_supports_one_shot_lifecycle_tool_fallback(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="DoTasksCliFallback") as temporary:
+            environment = os.environ.copy()
+            environment.update({
+                "DOTASKS_HOME": temporary,
+                "DOTASKS_PYTHON_BIN": sys.executable,
+            })
+            result = subprocess.run(
+                [
+                    "/bin/sh",
+                    str(ROOT / "scripts" / "mcp-server"),
+                    "--call-tool",
+                    "set_dispatcher_enabled",
+                ],
+                cwd=ROOT,
+                env=environment,
+                input='{"enabled":true}',
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertTrue(json.loads(result.stdout)["enabled"])
+
     def test_mcp_server_does_not_enable_a_helper_project_guard(self) -> None:
         with tempfile.TemporaryDirectory(prefix="TaskboardMcpGuard") as temporary:
             home = Path(temporary)

@@ -130,7 +130,6 @@ class TaskQueryMixin:
             "conversations": self.list_conversations(task_id),
             "relations": self.task_relations(task_id),
             "reviews": self.list_reviews(task_id),
-            "acceptance_checks": self.list_acceptance_checks(task_id),
             "revisions": self.list_task_revisions(task_id),
             "events": self.list_events("task", task_id) + self.list_events("run", task_id=task_id),
             "execution_batch": self.execution_batch(task_id),

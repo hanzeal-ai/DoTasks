@@ -15,10 +15,12 @@ from .batching import TaskBatchMixin
 from .changes import TaskChangeMixin
 from .planning import TaskPlanningMixin
 from .queries import TaskQueryMixin
+from .requirements import TaskRequirementMixin
 from .reporting import TaskReportingMixin
 from .review import TaskReviewMixin
 from .runs import TaskRunMixin
 from .native_dispatch import NativeDispatchMixin
+from .scheduling import TaskSchedulingMixin
 from .integration import TaskIntegrationMixin
 from .settings import TaskSettingsMixin
 
@@ -30,9 +32,11 @@ class TaskboardService(
     TaskQueryMixin,
     TaskBatchMixin,
     TaskIntegrationMixin,
+    TaskRequirementMixin,
     TaskLifecycleMixin,
     TaskRunMixin,
     NativeDispatchMixin,
+    TaskSchedulingMixin,
     TaskReviewMixin,
     TaskReportingMixin,
 ):
@@ -105,7 +109,16 @@ class TaskboardService(
                 ("1" if enabled else "0",),
             )
             self._event(connection, "system", "dispatcher", "dispatcher_state_changed", {"enabled": enabled})
+            if enabled:
+                self._request_schedule(
+                    connection, "dispatcher_resumed", "system", "dispatcher"
+                )
         return {"enabled": enabled}
+
+    def pause_dispatcher(self) -> dict[str, Any]:
+        """Stop new dispatch claims without changing task or active-run state."""
+        self.set_dispatcher_enabled(False)
+        return {"dispatcher_enabled": False}
 
     def pause_all_tasks(self, reason: str = "用户暂停") -> dict[str, Any]:
         self.set_dispatcher_enabled(False)
@@ -162,7 +175,10 @@ class TaskboardService(
                 self._queue_obsidian_sync(connection, "task", task["id"])
         self.set_dispatcher_enabled(True)
         self.flush_integration_outbox()
-        return {"dispatcher_enabled": True, "resumed_tasks": len(tasks)}
+        return {
+            "dispatcher_enabled": True,
+            "resumed_tasks": len(tasks),
+        }
 
     def resume_task(self, task_id: str) -> dict[str, Any]:
         task = self.get_task(task_id)

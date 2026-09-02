@@ -15,7 +15,7 @@
 - 每个任务关联需求确认、实现、返工和验证等 Codex 会话；默认由同一验证会话连续完成 Code Review 与验收；
 - 独立实现/验收运行、交付摘要和验证结果；
 - 执行、Code Review、验收、返工和重试均保留独立运行记录；会话可复用，但运行审计不会合并；
-- 每个运行在首次调度时冻结版本化上下文和直接工具契约；开发 Agent 只看到任务目标、约束、`targets[].mode/tasks[]` 和验证命令，不接收依赖、历史、定位证据或调度状态；Code Review Agent 只看到任务目标、约束、检查项和可信 Git Diff 范围；
+- 每个运行在首次调度时冻结版本化上下文和直接工具契约；开发 Agent 以自然语言任务说明作为唯一需求来源，只从 `targets[].file/mode/symbols` 获取修改位置锁，并接收验证命令，不接收内部定位动作、依赖、历史、定位证据或调度状态；Code Review Agent 只看到任务目标、约束、检查项和可信 Git Diff 范围；
 - 交付时缓存受限 Git Diff；Code Review 根据服务端基线和真实改动文件自行读取 Git Diff，自动化验收命令由服务端按“交付 + 标准 + 命令 + 工作区指纹”执行和缓存，必需检查未通过时禁止完成任务；
 - 实现提交必须记录实际改动文件/符号和逐条验收证据，并与领取时保存的真实 Git 工作区差异一致；验收前对实际改动执行第二次受限的 Obsidian/代码定位；
 - 完成后自动生成受模块和项目约束的经验记录；
@@ -37,13 +37,13 @@ Codex Skill 充当编排器，本地服务作为任务系统记录：
 1. Skill 先确认需求边界，判断应修订现有任务、创建单个新任务，还是拆成多个可独立交付和验收的任务；
 2. 每个任务通过 `prepare_task_location` 建立一次受限定位计划，按 CodeGraph、GitNexus、直接源码匹配选择首个可用方式，并保存精确的 `{file, mode, symbols, tasks}` 执行目标和验收方式；
 3. `finalize_task_intake` 是唯一任务创建入口：接收一次性定位分析包，由服务端根据精确文件/符号/动作查询项目历史图谱，形成 `depends_tasks`、`conflicts_tasks`、`history_tasks` 和 `history_edges` 后原子创建任务；
-4. 显式 DoTasks intake 创建 `auto_dispatch=true` 的 ready 实体后，当前会话立即以 Controller kickoff 模式领取并创建或恢复一个原生工作任务；每个生命周期会话完成阶段回调后执行一次事件驱动 handoff，为下一阶段或下一项工作创建原生任务；
+4. 显式 DoTasks intake 创建 `auto_dispatch=true` 的 ready 实体后，当前会话立即以 Controller kickoff 模式消费一次持久化调度唤醒；每次任务或 Run 状态流转都会再次写入唤醒，Controller 按 Review 优先、返工优先和开发并发容量创建或恢复原生工作任务；
 5. 执行会话实现并用 `submit_task_delivery` 提交真实改动清单及逐条验收证据；
 6. 代码类任务由独立验证会话完成 Code Review：服务端先执行确定性检查，Review Agent 只根据目标、约束和真实 Git Diff 判断正确性、安全、权限边界、回归与无关修改；不通过则恢复原开发会话返工，通过后直接完成；
 7. 文档、调研、文案、规划和无运行时影响的元数据任务不创建 Code Review 会话；开发交付的逐条证据全部通过后直接完成；
 8. 完成任务通过页面右上角“完成任务”入口查看；执行失败、待确认、阻塞、暂停，以及自动 Code Review 熔断后的任务显示在看板末列“待处理”，等待人工重试、确认、解除阻塞或恢复调度。
 
-交付时，上报位置必须命中任务建立阶段保存的目标锁，并覆盖领取后产生的真实 Git 工作区差异。执行或返工会话结束但没有提交交付时进入执行失败；Code Review 会话中断则保留在待审查。看板的暂停按钮会中断活动运行、保存任务原状态并持久关闭调度；恢复调度不会隐式恢复暂停任务，任务可逐个恢复。失败任务会暂时锁住项目，明确重试时优先恢复原执行会话，避免其他任务读取半成品改动。
+交付时，上报位置必须命中任务建立阶段保存的目标锁，并覆盖领取后产生的真实 Git 工作区差异。执行或返工会话异常结束但没有提交交付时，服务最多自动恢复两次并优先续接原开发会话；仍未成功则关闭自动调度并进入“待处理”。Code Review 会话中断则保留在待审查并按独立熔断上限重试。看板的暂停按钮只持久关闭新的调度领取，不中断活动运行，也不改变任何任务状态；恢复调度会先消费 Review/返工等已有唤醒并在并发未满时补齐开发任务，已有的单任务暂停仍需逐个恢复。
 
 看板详情显示任务关联的原生 Codex 任务 ID 和运行轮次；完整执行过程在 Codex App 原生任务中查看。
 
@@ -90,9 +90,9 @@ npm --prefix web run dev
 npm --prefix web run build
 ```
 
-新建运行数据库默认关闭调度。需要执行队列时，先在看板中点击“恢复调度”。之后显式 DoTasks intake 会在创建 `auto_dispatch=true` 的 ready 实体后立即执行一次 Controller kickoff；Controller 只调度，不直接修改代码，工作任务通过 `$dotasks-lifecycle` 完成当前阶段并将结果回调 MCP。
+新建运行数据库默认关闭调度。需要执行队列时，先在看板中点击“恢复调度”。恢复操作及之后每个任务/Run 状态流转都会写入 `scheduler_state` 持久化唤醒；显式 DoTasks intake 会立即执行一次 Controller kickoff。Controller 只调度，不直接修改代码，工作任务通过 `$dotasks-lifecycle` 完成当前阶段并将结果回调 MCP。
 
-调度不使用 scheduled task 或 recurring heartbeat。Intake Agent 在创建任务后立即调用 Codex App 原生 `create_thread`；生命周期 Agent 在成功提交拆解、交付或合并后的 Code Review 结果后执行一次 handoff，按 `development`、`code_review` 两个独立阶段领取并创建下一批原生任务。设置页可开启并行开发并配置 1–8 个开发槽位（默认关闭、默认并发数 2）；安全并行只用于目标文件互不重叠、无显式依赖且没有项目级排他目标的任务，每个任务从固定的 DoTasks 集成分支 Revision 创建独立 Codex Worktree。同文件任务、迁移/Schema、依赖清单和锁文件保持串行；原工作区的未托管改动只阻塞目标文件与其重叠的任务，不影响其他任务并行。Review 通过后先串行提交到集成分支，再在不覆盖用户改动的前提下同步回原工作区；冲突时只延迟同步。任务领取时保持 `claimed`，只有真实 `threadId` 成功绑定后才进入 `implementing`。MCP 是客户端拉取协议，因此当没有任何 DoTasks Agent turn 活跃时，本地服务不会主动唤醒 Codex App；遗留的 `pending_thread` 或后来由外部状态变为可执行的任务，需要下一次显式 DoTasks 或手动 Controller 调用恢复，不能退回定时轮询。
+Intake Agent 在创建任务后立即调用 Codex App 原生 `create_thread`，以完整派发 Prompt 作为新任务的首条消息；每个成功创建的任务都会显示在 Codex App 左侧任务栏并独立执行。生命周期 Agent 在成功提交拆解、交付、阻塞或 Code Review 结果后执行一次 handoff，通过全局租约消费调度代次：先恢复 Review，再按返工优先顺序填满 `development` 槽位，并在绑定导致新状态变化时继续消费有限轮次。每个派发都有独立 `dispatch_attempt_id`，过期回调不能绑定到新的派发尝试。只有续接已记录的开发、返工或 Review 任务时才调用 `send_message_to_thread`。设置页可开启并行开发并配置 1–8 个开发槽位（默认关闭、默认并发数 2）；安全并行只用于目标文件互不重叠、无显式依赖且没有项目级排他目标的任务，每个任务从固定的 DoTasks 集成分支 Revision 创建独立 Codex Worktree。同文件任务、迁移/Schema、依赖清单和锁文件保持串行；原工作区的未托管改动只阻塞目标文件与其重叠的任务，不影响其他任务并行。Review 通过后先串行提交到集成分支，再在不覆盖用户改动的前提下同步回原工作区；冲突时只延迟同步。任务领取时保持 `claimed`，只有真实 `threadId` 成功绑定后才进入 `implementing`。MCP 是客户端拉取协议，因此没有活跃 Agent turn 时，本地服务只能持久记录唤醒，不能自行调用 Codex App；下一次显式 DoTasks、手动 Controller，或用户明确授权的唯一全局 Controller heartbeat 会恢复遗留工作。禁止为单个任务创建定时器。
 
 指定端口：
 
@@ -172,6 +172,14 @@ http://127.0.0.1:8765
 
 开发时仍可直接运行 `./scripts/start`。插件 MCP 与打包态 HTTP 服务使用同一个 `DOTASKS_HOME` 数据目录和项目路径基础校验，不依赖 Helper 应用环境或逐项目授权状态。
 
+源码修改完成后统一执行一次全量更新，避免源码、已安装插件缓存和 Helper 运行时版本不一致：
+
+```bash
+./scripts/full-update
+```
+
+该命令依次运行完整测试、构建并安装 Helper、重启 HTTP 服务、更新插件 cachebuster、重新安装 personal marketplace 插件，并校验源码、插件缓存与打包运行时一致。更新完成后使用新的 Codex 任务加载最新 Skill 和 MCP 工具。
+
 默认构建使用 ad-hoc 签名和 hardened runtime；如有长期稳定的 macOS 代码签名证书，可通过 `DOTASKS_CODESIGN_IDENTITY` 指定签名身份后重新安装。
 
 ## Workflow
@@ -182,9 +190,9 @@ http://127.0.0.1:8765
 development -> code_review -> done
 ```
 
-执行模型只接收任务目标、范围、`targets[].tasks[]`、验证命令和可选目标片段；相同类型、命令与超时的验证项会合并为一个命令组，命令只需运行一次，组内仍保留逐条验收标准与预期结果。任务依赖与历史路径只用于调度，不进入开发 Agent 上下文。工作区基线、缓存身份和工具契约完整保存在服务端，不注入模型。执行阶段只暴露 `report_run_blocked`、`submit_task_delivery` 两个工具。代码类任务的 Code Review 只接收任务目标、审查项和可信 Git Diff 范围，并暴露 `run_acceptance_checks`、`review_code`；非代码类任务跳过该阶段。
+执行模型把任务标题、目标、范围和验收标准作为原生 Codex 会话的首要自然语言输入；结构化上下文只保留修改目标、验证命令、执行环境和可选批次，随后给出完成与阻塞的状态上报入口。工作区基线、调度降级原因、缓存身份和工具参数细节保存在服务端或生命周期 Skill 中，不重复注入开发 Prompt。相同类型、命令与超时的验证项会合并为一个命令组，命令只需运行一次，组内仍保留逐条验收标准与预期结果。执行阶段只暴露 `report_run_blocked`、`submit_task_delivery` 两个工具。代码类任务的 Code Review 只接收审查项和可信 Git Diff 范围，并只通过 `review_code` 提交结果；Diff 只能由现成 Git 命令获取，随后使用当前环境及项目已经配置的相关源码导航、lint、类型检查、静态分析、安全扫描和聚焦测试工具，不安装工具或编写临时扫描器。默认只检查代码质量、安全漏洞和高内聚低耦合，不检查任务目标或验收标准；非阻断风格建议不能触发返工。任务完成度继续由现有人工验收负责，不新增状态阶段。非代码类任务跳过 Code Review。若原生任务未加载 DoTasks MCP 工具，派发提示会提供同一本地服务的一次性 CLI 回退入口；执行异常最多自动恢复两次，Review 异常遵循独立中断上限，状态流转都会产生新的持久化调度唤醒。
 
-`review_code` 必须精确覆盖代码审查项和验收标准：失败恢复原开发会话；通过时，Worktree 交付先在项目级集成锁内校验完整补丁和当前工作区指纹，串行应用成功后才进入 `done`。若项目工作区被 DoTasks 之外的操作改变，集成停止并保留可重试的 Review Run。是否属于代码任务由 intake 的 `quality_gates.code_review` 决定；可执行源码、测试、脚本、运行时配置、Schema/迁移、构建发布文件、依赖和共享契约均属于代码类。任务使用 `token_used` 保留原始统计，使用 `effective_token_used` 控制 `token_budget`；新建任务预算及并行配置可在页面右上角“设置”中调整，已创建任务的 Token 预算不随配置变化。默认近似公式为“非缓存输入 + 缓存输入 × 0.1 + 输出”，缓存权重可通过 `DOTASKS_CACHED_TOKEN_WEIGHT` 调整。有效 Token 达到预算时，活动运行会进入 `waiting_confirmation` 并关闭自动调度，避免无上限消耗。`depends_on` 只等待并新建线程，`continues_from` 和 `defect_of` 等待后复用前置开发线程。通用状态迁移不能绕过 Code Review 门禁。
+`review_code` 必须精确覆盖代码质量审查项，不包含验收标准：质量失败恢复原开发会话；通过时，Worktree 交付先在项目级集成锁内校验完整补丁和当前工作区指纹，串行应用成功后才进入 `done`。若项目工作区被 DoTasks 之外的操作改变，集成停止并保留可重试的 Review Run。是否属于代码任务由 intake 的 `quality_gates.code_review` 决定；可执行源码、测试、脚本、运行时配置、Schema/迁移、构建发布文件、依赖和共享契约均属于代码类。任务使用 `token_used` 保留原始统计，使用 `effective_token_used` 控制 `token_budget`；新建任务预算及并行配置可在页面右上角“设置”中调整，已创建任务的 Token 预算不随配置变化。默认近似公式为“非缓存输入 + 缓存输入 × 0.1 + 输出”，缓存权重可通过 `DOTASKS_CACHED_TOKEN_WEIGHT` 调整。有效 Token 达到预算时，活动运行会进入 `waiting_confirmation` 并关闭自动调度，避免无上限消耗。`depends_on` 只等待并新建线程，`continues_from` 和 `defect_of` 等待后复用前置开发线程。通用状态迁移不能绕过 Code Review 门禁。
 
 ## 测试
 
@@ -225,7 +233,6 @@ GET    /api/tasks/{id}/details
 POST   /api/tasks/{id}/transition
 POST   /api/tasks/{id}/relations
 GET    /api/tasks/{id}/context
-POST   /api/native-dispatches/claim
 POST   /api/conversations/bind
 POST   /api/runs/{id}/delivery
 ```

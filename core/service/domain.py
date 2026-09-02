@@ -27,8 +27,6 @@ __all__ = [
     "decode_row",
     "search_tokens",
     "specific_modules",
-    "decode_row",
-    "search_tokens",
 ]
 
 
@@ -77,6 +75,7 @@ ACTIVE_TASK_STATUSES = {
     "blocked",
 }
 REVIEW_INTERRUPT_LIMIT = 3
+EXECUTION_RECOVERY_LIMIT = 2
 REVIEW_RETRY_DELAYS_SECONDS = (30, 120, 600)
 REVIEW_STAGE_BY_RUN_TYPE = {
     "code_review": "code_review",

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from taskboard.project_guard import ProjectWorkspaceGuard
+from ..workflow import default_code_review_checks
 from .domain import (
     GENERIC_MATCH_TERMS,
     JSON_FIELDS,
@@ -29,7 +30,7 @@ class TaskPlanningMixin:
             raise ValueError("dependency_analysis must be an object")
         unknown = set(value) - {
             "decision", "depends_tasks", "conflicts_tasks", "history_tasks",
-            "history_edges", "continues_from_task_id",
+            "history_edges", "continues_from_task_id", "relation_evidence",
         }
         if unknown:
             raise ValueError(
@@ -50,6 +51,77 @@ class TaskPlanningMixin:
         history = task_ids("history_tasks")
         decision = str(value.get("decision") or "").strip()
         continues_from = str(value.get("continues_from_task_id") or "").strip()
+        raw_relation_evidence = value.get("relation_evidence") or []
+        if not isinstance(raw_relation_evidence, list) or any(
+            not isinstance(item, dict) for item in raw_relation_evidence
+        ):
+            raise ValueError("dependency_analysis.relation_evidence must be an array of objects")
+        relation_evidence: list[dict[str, Any]] = []
+        allowed_relation_kinds = {
+            "depends_on": {"artifact_dependency"},
+            "continues_from": {"thread_continuation"},
+            "conflicts_with": {"target_overlap"},
+        }
+        for item in raw_relation_evidence:
+            unknown = set(item) - {
+                "task_id", "relation_type", "confidence", "kind", "reason",
+                "source", "files", "symbols",
+            }
+            if unknown:
+                raise ValueError(
+                    f"Unknown relation evidence fields: {', '.join(sorted(unknown))}"
+                )
+            task_id = str(item.get("task_id") or "").strip()
+            relation_type = str(item.get("relation_type") or "").strip()
+            confidence = str(item.get("confidence") or "").strip().lower()
+            kind = str(item.get("kind") or "").strip()
+            reason = str(item.get("reason") or "").strip()
+            source = str(item.get("source") or "").strip()
+            files = list(dict.fromkeys(
+                str(path).strip() for path in (item.get("files") or [])
+                if str(path).strip()
+            ))
+            symbols = list(dict.fromkeys(
+                str(symbol).strip() for symbol in (item.get("symbols") or [])
+                if str(symbol).strip()
+            ))
+            if not task_id.startswith(("TASK-", "BUG-")):
+                raise ValueError("Relation evidence task_id is invalid")
+            if relation_type not in allowed_relation_kinds:
+                raise ValueError("Relation evidence relation_type is invalid")
+            if confidence not in {"high", "medium", "low"}:
+                raise ValueError("Relation evidence confidence is invalid")
+            if kind not in allowed_relation_kinds[relation_type]:
+                raise ValueError("Relation evidence kind does not prove its relation type")
+            if not reason or not source or not (files or symbols):
+                raise ValueError(
+                    "Relation evidence requires reason, source and exact files or symbols"
+                )
+            normalized_evidence = {
+                "task_id": task_id,
+                "relation_type": relation_type,
+                "confidence": confidence,
+                "kind": kind,
+                "reason": reason,
+                "source": source,
+                "files": files,
+                "symbols": symbols,
+            }
+            if normalized_evidence not in relation_evidence:
+                relation_evidence.append(normalized_evidence)
+            if confidence == "high":
+                if relation_type == "depends_on" and task_id not in depends:
+                    depends.append(task_id)
+                elif relation_type == "conflicts_with" and task_id not in conflicts:
+                    conflicts.append(task_id)
+                elif relation_type == "continues_from":
+                    if continues_from and continues_from != task_id:
+                        raise ValueError("Only one high-confidence continuation is allowed")
+                    continues_from = task_id
+        if continues_from:
+            decision = "continues_from"
+        elif depends:
+            decision = "depends_on"
         if decision not in {"independent", "depends_on", "continues_from"}:
             raise ValueError(
                 "dependency_analysis.decision must be independent, depends_on or continues_from"
@@ -90,10 +162,101 @@ class TaskPlanningMixin:
             "conflicts_tasks": conflicts,
             "history_tasks": history,
             "history_edges": history_edges,
+            "relation_evidence": relation_evidence,
         }
         if continues_from:
             normalized["continues_from_task_id"] = continues_from
         return normalized
+
+    def _validate_high_confidence_relation_evidence(
+        self,
+        connection: Any,
+        project: str,
+        location_analysis: dict[str, Any],
+        evidence: dict[str, Any],
+    ) -> None:
+        related_task_id = evidence["task_id"]
+        related = connection.execute(
+            "SELECT project, codex_thread_id FROM tasks WHERE id=?",
+            (related_task_id,),
+        ).fetchone()
+        if not related:
+            raise ValueError(f"Related task not found: {related_task_id}")
+        if self._normalize_project(related["project"]) != project:
+            raise ValueError("High-confidence relation evidence cannot cross projects")
+
+        source = evidence["source"]
+        location_evidence = location_analysis.get("location_evidence") or {}
+        connected_tool = str(location_evidence.get("tool") or "").strip()
+        obsidian_evidence = json.dumps(
+            location_analysis.get("obsidian_evidence") or {}, ensure_ascii=False,
+        )
+        if source != connected_tool and not (
+            source == "obsidian" and related_task_id in obsidian_evidence
+        ):
+            raise ValueError(
+                "High-confidence relation evidence must come from the connected "
+                "location evidence or a matching Obsidian candidate"
+            )
+
+        current_targets = location_analysis.get("targets") or []
+        current_files = {
+            self._normalize_target_file(item.get("file"))
+            for item in current_targets if isinstance(item, dict) and item.get("file")
+        }
+        current_symbols = {
+            str(symbol).strip()
+            for item in current_targets if isinstance(item, dict)
+            for symbol in (item.get("symbols") or []) if str(symbol).strip()
+        }
+        connected_files = {
+            self._normalize_target_file(path)
+            for path in (location_evidence.get("files") or []) if str(path).strip()
+        }
+        connected_symbols = {
+            str(symbol).strip()
+            for symbol in (location_evidence.get("symbols") or []) if str(symbol).strip()
+        }
+        evidence_files = {
+            self._normalize_target_file(path)
+            for path in evidence.get("files") or []
+        }
+        evidence_symbols = set(evidence.get("symbols") or [])
+        if source != "obsidian" and not (
+            evidence_files & (current_files | connected_files)
+            or evidence_symbols & (current_symbols | connected_symbols)
+        ):
+            raise ValueError(
+                "Relation evidence does not match the connected location result"
+            )
+
+        related_targets = connection.execute(
+            "SELECT file, symbol FROM task_targets WHERE task_id=?",
+            (related_task_id,),
+        ).fetchall()
+        related_files = {str(item["file"] or "") for item in related_targets}
+        related_symbols = {
+            str(item["symbol"] or "") for item in related_targets if item["symbol"]
+        }
+        relation_type = evidence["relation_type"]
+        if relation_type == "conflicts_with":
+            overlap = current_files & related_files
+            if not overlap or not evidence_files & overlap:
+                raise ValueError(
+                    "High-confidence target overlap must match both tasks' locked files"
+                )
+        elif not (
+            evidence_files & related_files or evidence_symbols & related_symbols
+        ):
+            raise ValueError(
+                "High-confidence relation evidence does not match the related task targets"
+            )
+        if relation_type == "continues_from" and not str(
+            related["codex_thread_id"] or ""
+        ).strip():
+            raise ValueError(
+                "Thread continuation requires a related task with a native thread"
+            )
 
     @staticmethod
     def _normalize_quality_gates(gates: Any) -> dict[str, dict[str, Any]]:
@@ -197,9 +360,9 @@ class TaskPlanningMixin:
         unknown = set(contract) - {"checks", "quality_gates"}
         if unknown:
             raise ValueError(f"Unknown review_contract fields: {', '.join(sorted(unknown))}")
-        raw_checks = contract.get("checks")
-        if not isinstance(raw_checks, list) or not raw_checks:
-            raise ValueError("review_contract.checks must be a non-empty array")
+        raw_checks = contract.get("checks") or default_code_review_checks()
+        if not isinstance(raw_checks, list):
+            raise ValueError("review_contract.checks must be an array")
         checks: list[dict[str, str]] = []
         seen: set[str] = set()
         for raw in raw_checks:
@@ -468,6 +631,15 @@ class TaskPlanningMixin:
             dependency_analysis = self._normalize_dependency_analysis(
                 dependency_analysis
             )
+            evidence_by_relation = {
+                (item["task_id"], item["relation_type"]): item
+                for item in dependency_analysis.get("relation_evidence") or []
+                if item.get("confidence") == "high"
+            }
+            for evidence_item in evidence_by_relation.values():
+                self._validate_high_confidence_relation_evidence(
+                    connection, project, location_analysis, evidence_item,
+                )
             declared_relations = payload.get("relations", []) or []
             if not isinstance(declared_relations, list):
                 raise ValueError("relations must be an array")
@@ -495,6 +667,11 @@ class TaskPlanningMixin:
                     declared_relations.append({
                         "target_task_id": target_task_id,
                         "relation_type": relation_type,
+                        **(
+                            {"description": evidence_by_relation[(target_task_id, relation_type)]["reason"]}
+                            if (target_task_id, relation_type) in evidence_by_relation
+                            else {}
+                        ),
                     })
             declared_scheduling = {
                 (
@@ -668,7 +845,7 @@ class TaskPlanningMixin:
     @staticmethod
     def _target_conflicts(connection: Any, task_id: str, locking_only: bool = False) -> list[dict[str, Any]]:
         status_filter = (
-            "AND other.status IN ('claimed','investigating','implementing','waiting_confirmation','review','failed','blocked')"
+            "AND other.status IN ('claimed','investigating','implementing','waiting_confirmation','code_review','failed','blocked')"
             if locking_only else "AND other.status NOT IN ('done','cancelled')"
         )
         rows = connection.execute(
@@ -1090,9 +1267,9 @@ class TaskPlanningMixin:
             raise ValueError("Every target requires non-empty tasks")
         if not isinstance(acceptance_plan, list) or not acceptance_plan:
             raise ValueError("acceptance_plan must be a non-empty array")
-        review_checks = payload.get("review_checks")
-        if not isinstance(review_checks, list) or not review_checks:
-            raise ValueError("review_checks must be a non-empty array")
+        review_checks = payload.get("review_checks") or default_code_review_checks()
+        if not isinstance(review_checks, list):
+            raise ValueError("review_checks must be an array")
 
         self.report_location_status(
             project, True, "connected",

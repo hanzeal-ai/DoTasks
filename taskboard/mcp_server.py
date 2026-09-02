@@ -63,6 +63,21 @@ DEPENDENCY_ANALYSIS_SCHEMA = {
         "conflicts_tasks": {"type": "array", "items": {"type": "string"}},
         "history_tasks": {"type": "array", "items": {"type": "string"}},
         "continues_from_task_id": {"type": "string"},
+        "relation_evidence": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "relation_type": {"type": "string", "enum": ["depends_on", "continues_from", "conflicts_with"]},
+                "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                "kind": {"type": "string", "enum": ["artifact_dependency", "thread_continuation", "target_overlap"]},
+                "reason": {"type": "string", "minLength": 1},
+                "source": {"type": "string", "minLength": 1},
+                "files": {"type": "array", "items": {"type": "string"}},
+                "symbols": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["task_id", "relation_type", "confidence", "kind", "reason", "source", "files", "symbols"],
+            "additionalProperties": False,
+        }},
         "history_edges": {"type": "array", "items": {
             "type": "object",
             "properties": {
@@ -213,11 +228,12 @@ TOOLS = [
                 }, "required": ["targets"], "additionalProperties": False},
                 "review_contract": {
                     "type": "object",
-                    "description": "Combined Code Review contract; code/static checks and acceptance_plan are verified in one stage. Non-code tasks set quality_gates.code_review.required=false.",
+                    "description": "Code-quality-only Review contract. Task goals and acceptance_plan remain outside Code Review and are handled by the existing human acceptance process. Non-code tasks set quality_gates.code_review.required=false.",
                     "properties": {
                         "checks": {
                             "type": "array",
                             "minItems": 1,
+                            "description": "Optional explicit code-quality checks; omit to use the default quality/security/cohesion checks.",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -231,7 +247,7 @@ TOOLS = [
                         },
                         "quality_gates": QUALITY_GATES_SCHEMA,
                     },
-                    "required": ["checks", "quality_gates"],
+                    "required": ["quality_gates"],
                     "additionalProperties": False,
                 },
                 "acceptance_plan": {"type": "array", "items": {"type": "object", "properties": {
@@ -275,7 +291,7 @@ TOOLS = [
                 "location_evidence": LOCATION_EVIDENCE_SCHEMA,
                 "targets": {"type": "array", "minItems": 1, "items": TARGET_SCHEMA},
                 "visual_references": {"type": "array", "description": "All requirement screenshots and visual references; each source path is copied immediately into DoTasks-managed storage.", "items": {"type": "object", "properties": {"path": {"type": "string", "minLength": 1}, "purpose": {"type": "string"}}, "required": ["path"]}},
-                "review_checks": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"id": {"type": "string", "minLength": 1}, "description": {"type": "string", "minLength": 1}, "kind": {"type": "string", "enum": ["code", "static"]}}, "required": ["id", "description", "kind"]}},
+                "review_checks": {"type": "array", "minItems": 1, "description": "Optional explicit code-quality checks. Omit to use the defaults: code quality, security vulnerabilities, and high cohesion/low coupling. Never copy task acceptance criteria here.", "items": {"type": "object", "properties": {"id": {"type": "string", "minLength": 1}, "description": {"type": "string", "minLength": 1}, "kind": {"type": "string", "enum": ["code", "static"]}}, "required": ["id", "description", "kind"]}},
                 "quality_gates": QUALITY_GATES_SCHEMA,
                 "acceptance_plan": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
                     "criterion": {"type": "string"}, "file": {"type": "string"}, "symbol": {"type": "string"},
@@ -297,7 +313,7 @@ TOOLS = [
                 {"properties": {"intake_kind": {"const": "task"}}, "required": [
                     "intake_kind",
                     "analysis_id", "scope", "out_of_scope", "location_evidence",
-                    "targets", "review_checks", "quality_gates",
+                    "targets", "quality_gates",
                     "acceptance_plan"
                 ]}
             ],
@@ -322,13 +338,13 @@ TOOLS = [
                     "analysis_id": {"type": "string", "minLength": 1},
                     "location_evidence": LOCATION_EVIDENCE_SCHEMA,
                     "targets": {"type": "array", "minItems": 1, "items": TARGET_SCHEMA},
-                    "review_checks": {"type": "array", "minItems": 1},
+                    "review_checks": {"type": "array", "minItems": 1, "description": "Optional explicit code-quality checks; omit to use the default quality/security/cohesion checks."},
                     "quality_gates": QUALITY_GATES_SCHEMA,
                     "acceptance_plan": {"type": "array", "minItems": 1, "items": {"type": "object"}},
                     "depends_on": {"type": "array", "items": {"type": "string"}},
                 }, "required": [
                     "key", "title", "goal", "analysis_id", "location_evidence",
-                    "targets", "review_checks", "quality_gates",
+                    "targets", "quality_gates",
                     "acceptance_plan",
                 ],
             }},
@@ -402,34 +418,38 @@ TOOLS = [
         },
     },
     {
-        "name": "claim_next_dispatch",
-        "description": "Claim or recover one persisted native-Codex dispatch from the independent development or code_review lane.",
+        "name": "set_dispatcher_enabled",
+        "description": "Enable or disable new DoTasks dispatch claims without changing task states or interrupting active runs.",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "worker_id": {"type": "string", "minLength": 1},
-                "project": {"type": "string"},
-                "lease_seconds": {"type": "integer", "minimum": 300, "maximum": 7200},
-                "stage": {
-                    "type": "string",
-                    "enum": ["development", "code_review"],
-                },
-            },
-            "required": ["worker_id", "stage"],
+            "properties": {"enabled": {"type": "boolean"}},
+            "required": ["enabled"],
         },
     },
     {
-        "name": "claim_dispatch_batch",
-        "description": "Recover or fill every configured native-Codex dispatch slot for the development or code_review lane.",
+        "name": "claim_schedule_cycle",
+        "description": "Lease one durable scheduling wakeup, recover the code_review lane, and fill every available development slot in one cycle.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "worker_id": {"type": "string", "minLength": 1},
                 "project": {"type": "string"},
                 "lease_seconds": {"type": "integer", "minimum": 300, "maximum": 7200},
-                "stage": {"type": "string", "enum": ["development", "code_review"]},
+                "force": {"type": "boolean"},
             },
-            "required": ["worker_id", "stage"],
+            "required": ["worker_id"],
+        },
+    },
+    {
+        "name": "complete_schedule_cycle",
+        "description": "Acknowledge the processed scheduler generation and release the global Controller lease. A newer state change remains pending.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "worker_id": {"type": "string", "minLength": 1},
+                "generation": {"type": "integer", "minimum": 0},
+            },
+            "required": ["worker_id", "generation"],
         },
     },
     {
@@ -438,7 +458,8 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {
             "run_id": {"type": "string"}, "client_thread_id": {"type": "string"},
             "host_id": {"type": "string"}, "codex_project_id": {"type": "string"},
-        }, "required": ["run_id", "client_thread_id"]},
+            "dispatch_attempt_id": {"type": "string"},
+        }, "required": ["run_id", "client_thread_id", "dispatch_attempt_id"]},
     },
     {
         "name": "bind_native_dispatch",
@@ -447,7 +468,8 @@ TOOLS = [
             "run_id": {"type": "string"}, "thread_id": {"type": "string"},
             "host_id": {"type": "string"}, "codex_project_id": {"type": "string"},
             "resume_fallback_reason": {"type": "string"},
-        }, "required": ["run_id", "thread_id"]},
+            "dispatch_attempt_id": {"type": "string"},
+        }, "required": ["run_id", "thread_id", "dispatch_attempt_id"]},
     },
     {
         "name": "renew_dispatch_lease",
@@ -503,21 +525,8 @@ TOOLS = [
     },
     {
         "name": "review_code",
-        "description": "Complete combined Code Review; project/environment failures schedule bounded self-healing rework.",
+        "description": "Complete code-quality-only Review. Judge code quality, security vulnerabilities, and cohesion/coupling; do not judge task goals or acceptance criteria. Only concrete blocking quality findings may fail, with exact actionable evidence.",
         "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}, "run_id": {"type": "string"}, "verdict": {"type": "string", "enum": ["pass", "fail"]}, "reasons": {"type": "array", "items": {"type": "string"}}, "passed_items": {"type": "array", "items": {"type": "string"}}, "failed_criteria": {"type": "array", "items": {"type": "string"}}, "failure_category": {"type": "string", "enum": ["project", "environment", "implementation"]}, "failure_locations": {"type": "array", "minItems": 1, "description": "Required for project/environment failures. Each item identifies an exact project file to create or modify during bounded self-healing rework.", "items": TARGET_SCHEMA}}, "required": ["task_id", "run_id", "verdict"]},
-    },
-    {
-        "name": "run_acceptance_checks",
-        "description": "Execute automated checks, classify project/environment failures, try a bounded self-heal, and persist results; passed checks are reused only for the same delivery and workspace fingerprint unless force=true.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string"},
-                "run_id": {"type": "string"},
-                "force": {"type": "boolean", "default": False},
-            },
-            "required": ["task_id", "run_id"],
-        },
     },
     {
         "name": "get_task_details",
@@ -562,34 +571,35 @@ TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "report_location_status": _report_location,
     "complete_location_analysis": _complete_location,
     "finalize_task_intake": SERVICE.finalize_task_intake,
-    "get_requirement": lambda arguments: SERVICE.claim_next_task(
-        "", action="get_requirement", requirement_id=arguments["requirement_id"],
+    "get_requirement": lambda arguments: SERVICE.get_requirement(
+        arguments["requirement_id"],
     ),
-    "submit_requirement_decomposition": lambda arguments: SERVICE.claim_next_task(
-        "requirement-decomposer", action="submit_decomposition",
-        requirement_id=arguments["requirement_id"],
-        decomposition_run_id=arguments["run_id"], child_tasks=arguments["tasks"],
+    "submit_requirement_decomposition": lambda arguments: SERVICE.submit_requirement_decomposition(
+        arguments["requirement_id"], arguments["run_id"], arguments["tasks"],
     ),
-    "report_requirement_decomposition_failed": lambda arguments: SERVICE.claim_next_task(
-        "requirement-decomposer", action="fail_decomposition",
-        requirement_id=arguments["requirement_id"],
-        decomposition_run_id=arguments["run_id"], error=arguments["error"],
+    "report_requirement_decomposition_failed": lambda arguments: SERVICE.fail_requirement_decomposition(
+        arguments["requirement_id"], arguments["run_id"], arguments["error"],
     ),
-    "claim_next_dispatch": lambda arguments: SERVICE.claim_next_native_dispatch(
+    "set_dispatcher_enabled": lambda arguments: SERVICE.set_dispatcher_enabled(
+        arguments["enabled"]
+    ),
+    "claim_schedule_cycle": lambda arguments: SERVICE.claim_schedule_cycle(
         arguments["worker_id"], arguments.get("project"),
-        arguments.get("lease_seconds", 1800), arguments["stage"],
+        arguments.get("lease_seconds", 1800), force=bool(arguments.get("force", False)),
     ),
-    "claim_dispatch_batch": lambda arguments: SERVICE.claim_native_dispatch_batch(
-        arguments["worker_id"], arguments.get("project"),
-        arguments.get("lease_seconds", 1800), arguments["stage"],
+    "complete_schedule_cycle": lambda arguments: SERVICE.complete_schedule_cycle(
+        arguments["worker_id"], arguments["generation"],
     ),
     "mark_dispatch_pending": lambda arguments: SERVICE.mark_native_dispatch_pending(
         arguments["run_id"], arguments["client_thread_id"], arguments.get("host_id", ""),
         arguments.get("codex_project_id", ""),
+        dispatch_attempt_id=arguments["dispatch_attempt_id"],
     ),
     "bind_native_dispatch": lambda arguments: SERVICE.bind_native_dispatch(
         arguments["run_id"], arguments["thread_id"], arguments.get("host_id", ""),
-        arguments.get("codex_project_id", ""), arguments.get("resume_fallback_reason", ""),
+        arguments.get("codex_project_id", ""),
+        resume_fallback_reason=arguments.get("resume_fallback_reason", ""),
+        dispatch_attempt_id=arguments["dispatch_attempt_id"],
     ),
     "renew_dispatch_lease": lambda arguments: SERVICE.renew_native_dispatch(
         arguments["run_id"], arguments.get("lease_seconds", 1800),
@@ -601,9 +611,6 @@ TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "submit_task_delivery": lambda arguments: SERVICE.submit_delivery(arguments["run_id"], arguments["delivery_summary"], arguments["verification_result"], arguments["changed_locations"], arguments["acceptance_evidence"], batch_revision=arguments.get("batch_revision"), workspace_path=arguments.get("workspace_path")),
     "report_run_blocked": lambda arguments: SERVICE.report_run_blocked(
         arguments["task_id"], arguments["run_id"], arguments["status"], arguments["reason"],
-    ),
-    "run_acceptance_checks": lambda arguments: SERVICE.run_acceptance_checks(
-        arguments["task_id"], arguments["run_id"], bool(arguments.get("force", False)),
     ),
     "review_code": lambda arguments: SERVICE.review_code(arguments["task_id"], arguments["run_id"], arguments["verdict"], arguments.get("reasons"), arguments.get("passed_items"), arguments.get("failed_criteria"), arguments.get("failure_category"), arguments.get("failure_locations")),
     "get_task_details": lambda arguments: SERVICE.task_details(arguments["task_id"]),
@@ -634,6 +641,30 @@ def _task_ack(result: Any) -> dict[str, Any]:
     }
 
 
+DISPATCH_RESULT_TOOLS = frozenset({
+    "mark_dispatch_pending",
+    "bind_native_dispatch",
+    "renew_dispatch_lease",
+    "get_dispatch_status",
+    "report_dispatch_failed",
+})
+
+
+def _dispatch_result(result: Any) -> Any:
+    if not isinstance(result, dict):
+        return result
+    fields = (
+        "run_id", "entity_type", "entity_id", "role", "status", "worker_id",
+        "project_path", "dispatch_title", "dispatch_prompt", "resume_thread_id",
+        "client_thread_id", "thread_id", "host_id", "codex_project_id",
+        "resume_fallback_reason", "error", "execution_environment",
+        "parallel_fallback_reason", "base_revision", "base_ref",
+        "dispatch_attempt_id",
+        "resume_required", "can_create_fallback",
+    )
+    return {field: result.get(field) for field in fields}
+
+
 def _compact_lifecycle_result(name: str, result: Any) -> Any:
     """Return only the fields needed for the model's next decision."""
     if not isinstance(result, dict):
@@ -641,35 +672,33 @@ def _compact_lifecycle_result(name: str, result: Any) -> Any:
     if name in {
         "report_location_status", "complete_location_analysis",
         "finalize_task_intake", "submit_requirement_decomposition",
+        "set_dispatcher_enabled", "complete_schedule_cycle",
     }:
         return result
-    if name == "run_acceptance_checks":
-        checks = []
-        for item in result.get("checks", []):
-            checks.append({
-                "criterion": item.get("criterion"),
-                "status": item.get("status"),
-                "exit_code": item.get("exit_code"),
-                "duration_ms": item.get("duration_ms"),
-                "cache_hit": bool(item.get("cache_hit")),
-                "failure_category": item.get("failure_category"),
-                "repair_attempted": bool(item.get("repair_attempted")),
-                "repair_status": item.get("repair_status"),
-                "repair_output": str(item.get("repair_output") or "")[-1000:],
-                "initial_status": item.get("initial_status"),
-                "output": str(item.get("output") or "")[-2000:],
-            })
+    if name in DISPATCH_RESULT_TOOLS:
+        return _dispatch_result(result)
+    if name == "claim_schedule_cycle":
         return {
-            "ok": True,
-            "task_id": result.get("task_id"),
-            "run_id": result.get("run_id"),
-            "delivery_run_id": result.get("delivery_run_id"),
-            "workspace_fingerprint": result.get("workspace_fingerprint"),
-            "cache_hits": result.get("cache_hits", 0),
-            "self_heal_attempts": result.get("self_heal_attempts", 0),
-            "self_healed": result.get("self_healed", 0),
-            "all_required_passed": bool(result.get("all_required_passed")),
-            "checks": checks,
+            "status": result.get("status"),
+            "worker_id": result.get("worker_id"),
+            "cycle_generation": result.get("cycle_generation"),
+            "scheduler": result.get("scheduler"),
+            "code_review": {
+                "stage": (result.get("code_review") or {}).get("stage"),
+                "capacity": (result.get("code_review") or {}).get("capacity"),
+                "dispatches": [
+                    _dispatch_result(dispatch)
+                    for dispatch in (result.get("code_review") or {}).get("dispatches", [])
+                ],
+            },
+            "development": {
+                "stage": (result.get("development") or {}).get("stage"),
+                "capacity": (result.get("development") or {}).get("capacity"),
+                "dispatches": [
+                    _dispatch_result(dispatch)
+                    for dispatch in (result.get("development") or {}).get("dispatches", [])
+                ],
+            },
         }
     compact = _task_ack(result)
     if name == "submit_task_delivery":
@@ -727,7 +756,43 @@ def handle(message: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _call_tool_from_cli(arguments: list[str]) -> int:
+    """Call one lifecycle tool when the Codex MCP registry failed to load."""
+    if len(arguments) != 2 or arguments[0] != "--call-tool":
+        sys.stderr.write("usage: mcp-server --call-tool TOOL_NAME\n")
+        return 2
+    raw_arguments = sys.stdin.read().strip() or "{}"
+    try:
+        tool_arguments = json.loads(raw_arguments)
+    except json.JSONDecodeError as exc:
+        sys.stderr.write(f"Invalid tool arguments JSON: {exc}\n")
+        return 2
+    if not isinstance(tool_arguments, dict):
+        sys.stderr.write("Tool arguments must be a JSON object\n")
+        return 2
+    response = handle({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": arguments[1], "arguments": tool_arguments},
+    })
+    result = (response or {}).get("result") or {}
+    if (response or {}).get("error") or result.get("isError"):
+        error = (response or {}).get("error")
+        if not error:
+            content = result.get("content") or []
+            error = content[0].get("text") if content else "DoTasks tool call failed"
+        sys.stderr.write(f"{error}\n")
+        return 1
+    sys.stdout.write(
+        json.dumps(result.get("structuredContent"), ensure_ascii=False) + "\n"
+    )
+    return 0
+
+
 def main() -> None:
+    if len(sys.argv) > 1:
+        raise SystemExit(_call_tool_from_cli(sys.argv[1:]))
     for line in sys.stdin:
         if not line.strip():
             continue

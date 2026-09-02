@@ -287,7 +287,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(existing["id"], result["dependency_analysis"]["candidates"][0]["task_id"])
         self.assertEqual("prepared", self.service.get_location_analysis(prepared["analysis_id"])["status"])
 
-    def test_combined_code_review_self_heals_environment_before_verdict(self):
+    def test_manual_acceptance_checks_do_not_define_code_review_verdict(self):
         task = self.task(
             "review-environment-self-heal",
             located_acceptance_plan=[{
@@ -311,20 +311,20 @@ class WorkflowTest(unittest.TestCase):
             task["id"], "code_review", "review-thread", review["run"]["id"]
         )
 
-        checks = self.service.run_acceptance_checks(
-            task["id"], review["run"]["id"]
-        )
+        review_context = model_run_context(review["run"]["context_snapshot"])
         result = self.service.review_code(
             task["id"],
             review["run"]["id"],
             "pass",
-            passed_items=["project-rules", "功能可用"],
+            passed_items=["project-rules"],
         )
 
-        self.assertEqual((1, 1), (
-            checks["self_heal_attempts"], checks["self_healed"]
-        ))
-        self.assertEqual("healed", checks["checks"][0]["repair_status"])
+        self.assertNotIn("acceptance_plan", review_context)
+        self.assertNotIn("acceptance_criteria", review_context["task"])
+        self.assertEqual(
+            ["review_code"],
+            review["run"]["context_snapshot"]["tool_contract"]["allowed_completion_tools"],
+        )
         self.assertEqual("done", result["status"])
 
     def test_missing_tests_schedule_bounded_self_healing_rework(self):
@@ -340,7 +340,7 @@ class WorkflowTest(unittest.TestCase):
             review["run"]["id"],
             "fail",
             reasons=["缺少测试用例"],
-            passed_items=["功能可用"],
+            passed_items=[],
             failed_criteria=["project-rules"],
             failure_locations=[{"file": "tests/test_a_page.py", "symbols": []}],
         )
@@ -396,7 +396,7 @@ class WorkflowTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exact failure_location file"):
             self.service.review_code(
                 task["id"], review["run"]["id"], "fail",
-                reasons=["缺少测试用例"], passed_items=["功能可用"],
+                reasons=["缺少测试用例"], passed_items=[],
                 failed_criteria=["project-rules"], failure_category="project",
             )
 
@@ -415,19 +415,26 @@ class WorkflowTest(unittest.TestCase):
         self.assertIsNone(task["execution_batch"])
         self.assertIsNone(self.service.claim_next_task("worker"))
 
-    def test_combined_review_failure_reworks_without_creating_acceptance_bug(self):
+    def test_code_quality_review_failure_reworks_without_creating_acceptance_bug(self):
         task = self.task("combined-review-fail")
         self.deliver(task, "original-dev")
         review = self.service.claim_next_code_review_task("reviewer")
         self.service.bind_conversation(task["id"], "code_review", "review-thread", review["run"]["id"])
         result = self.service.review_code(
-            task["id"], review["run"]["id"], "fail", reasons=["按钮不可用"],
-            passed_items=["project-rules"], failed_criteria=["功能可用"],
+            task["id"], review["run"]["id"], "fail", reasons=["代码职责混杂"],
+            passed_items=[], failed_criteria=["project-rules"],
         )
         self.assertEqual("rework", result["status"])
         self.assertFalse(any(item["type"] == "bug" for item in self.service.list_tasks()))
+        queued = self.task("ordinary-ready-after-rework", auto_dispatch=False)
+        with self.service.db.transaction() as connection:
+            connection.execute(
+                "UPDATE tasks SET auto_dispatch=1 WHERE id=?", (queued["id"],),
+            )
         retry = self.service.claim_next_task("worker")
+        self.assertEqual(task["id"], retry["task"]["id"])
         self.assertEqual("original-dev", retry["resume_thread_id"])
+        self.assertEqual("ready", self.service.get_task(queued["id"])["status"])
 
     def test_result_partition_is_strict(self):
         task = self.task("strict")
@@ -437,8 +444,8 @@ class WorkflowTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.service.review_code(
                 task["id"], review["run"]["id"], "pass",
-                passed_items=["project-rules", "功能可用"],
-                failed_criteria=["功能可用"],
+                passed_items=["project-rules"],
+                failed_criteria=["project-rules"],
             )
 
     def test_depends_on_waits_and_continues_from_resumes(self):
@@ -455,7 +462,7 @@ class WorkflowTest(unittest.TestCase):
         self.service.bind_conversation(first["id"], "code_review", "first-review", first_review["run"]["id"])
         self.service.review_code(
             first["id"], first_review["run"]["id"], "pass",
-            passed_items=["project-rules", "功能可用"],
+            passed_items=["project-rules"],
         )
         claim = self.service.claim_next_task("worker")
         self.assertEqual("", claim["resume_thread_id"])
@@ -466,6 +473,7 @@ class WorkflowTest(unittest.TestCase):
         self.service.add_relation(third["id"], first["id"], "continues_from")
         claim = self.service.claim_next_task("worker")
         self.assertEqual("first-thread", claim["resume_thread_id"])
+
         self.service.bind_conversation(third["id"], "execution", "first-thread", claim["run"]["id"])
         path = self.project / "src" / "APage.tsx"
         path.write_text(path.read_text(encoding="utf-8") + "// continued task\n", encoding="utf-8")
@@ -478,25 +486,145 @@ class WorkflowTest(unittest.TestCase):
         self.service.bind_conversation(third["id"], "code_review", "third-review", third_review["run"]["id"])
         completed = self.service.review_code(
             third["id"], third_review["run"]["id"], "pass",
-            passed_items=["project-rules", "功能可用"],
+            passed_items=["project-rules"],
         )
         self.assertEqual("done", completed["status"])
 
-    def test_execution_failure_requires_explicit_retry_and_resumes_thread(self):
+    def test_high_confidence_relation_evidence_creates_dependency(self):
+        first = self.task("relation-provider", auto_dispatch=False)
+        second = self.task(
+            "relation-consumer",
+            dependency_analysis={
+                "decision": "independent",
+                "relation_evidence": [{
+                    "task_id": first["id"],
+                    "relation_type": "depends_on",
+                    "confidence": "high",
+                    "kind": "artifact_dependency",
+                    "reason": "消费前置任务新增的 APage 接口",
+                    "source": "codegraph_explore",
+                    "files": ["src/APage.tsx"],
+                    "symbols": ["APage"],
+                }],
+            },
+        )
+        analysis = second["dependency_analysis"]
+        self.assertEqual("depends_on", analysis["decision"])
+        self.assertEqual([first["id"]], analysis["depends_tasks"])
+        relation = next(
+            item for item in self.service.task_relations(second["id"])
+            if item["relation_type"] == "depends_on"
+        )
+        self.assertEqual("消费前置任务新增的 APage 接口", relation["description"])
+
+    def test_execution_failure_auto_requeues_and_resumes_thread(self):
         task = self.task("execution-failure")
         claim = self.service.claim_next_task("worker")
         self.service.bind_conversation(task["id"], "execution", "failed-dev-thread", claim["run"]["id"])
         failed = self.service.interrupt_unsubmitted_run(claim["run"]["id"], "开发进程异常退出")
-        self.assertEqual("failed", failed["task"]["status"])
+        self.assertEqual("ready", failed["task"]["status"])
         self.assertEqual("interrupted", failed["run"]["status"])
         self.assertTrue(failed["task"]["retry_required"])
-        self.assertIsNone(self.service.claim_next_task("other-worker"))
-        self.service.transition_task(task["id"], "ready")
-        retry = self.service.claim_next_task("worker")
+        self.assertEqual(1, failed["task"]["execution_recovery_count"])
+        retry = self.service.claim_next_task("other-worker")
         self.assertEqual("execution", retry["run"]["run_type"])
         self.assertEqual("failed-dev-thread", retry["resume_thread_id"])
 
-    def test_expired_execution_is_failed_and_waits_for_explicit_retry(self):
+    def test_scheduler_cycle_respects_pause_and_acknowledges_generation(self):
+        task = self.task("scheduler-cycle")
+        self.service.set_dispatcher_enabled(False)
+        paused = self.service.claim_schedule_cycle(
+            "codex-native-controller", force=True
+        )
+        self.assertEqual("paused", paused["status"])
+
+        self.service.set_dispatcher_enabled(True)
+        cycle = self.service.claim_schedule_cycle(
+            "codex-native-controller", force=False
+        )
+        self.assertEqual("claimed", cycle["status"])
+        busy = self.service.claim_schedule_cycle(
+            "codex-native-controller", force=True
+        )
+        self.assertEqual("busy", busy["status"])
+        dispatches = cycle["development"]["dispatches"]
+        self.assertEqual([task["id"]], [item["entity_id"] for item in dispatches])
+        with self.assertRaisesRegex(ValueError, "generation is invalid"):
+            self.service.complete_schedule_cycle(
+                "codex-native-controller", cycle["cycle_generation"] + 100
+            )
+        completed = self.service.complete_schedule_cycle(
+            "codex-native-controller", cycle["cycle_generation"]
+        )
+        self.assertFalse(completed["pending"])
+
+    def test_attention_transition_creates_a_durable_scheduler_wakeup(self):
+        task = self.task("attention-wakeup")
+        cycle = self.service.claim_schedule_cycle(
+            "codex-native-controller", force=True
+        )
+        dispatch = cycle["development"]["dispatches"][0]
+        self.service.bind_native_dispatch(
+            dispatch["run_id"], "attention-dev-thread",
+            dispatch_attempt_id=dispatch["dispatch_attempt_id"],
+        )
+        self.service.complete_schedule_cycle(
+            "codex-native-controller", cycle["cycle_generation"]
+        )
+        self.service.report_run_blocked(
+            task["id"], dispatch["run_id"], "blocked", "等待外部权限"
+        )
+        snapshot = self.service.scheduler_snapshot()
+        self.assertTrue(snapshot["pending"])
+        self.assertIn(
+            snapshot["last_trigger"], {"task_state_changed", "run_state_changed"},
+        )
+
+    def test_pending_native_creation_keeps_scheduler_wakeup_unacknowledged(self):
+        task = self.task("pending-native-creation")
+        cycle = self.service.claim_schedule_cycle(
+            "codex-native-controller", force=True,
+        )
+        dispatch = cycle["development"]["dispatches"][0]
+        self.service.mark_native_dispatch_pending(
+            dispatch["run_id"], "pending-client-thread",
+            dispatch_attempt_id=dispatch["dispatch_attempt_id"],
+        )
+
+        completed = self.service.complete_schedule_cycle(
+            "codex-native-controller", cycle["cycle_generation"],
+        )
+        self.assertTrue(completed["pending"])
+        resumed = self.service.claim_schedule_cycle(
+            "codex-native-controller", force=False,
+        )
+        pending = resumed["development"]["dispatches"]
+        self.assertEqual([task["id"]], [item["entity_id"] for item in pending])
+        self.assertEqual("pending_thread", pending[0]["status"])
+
+    def test_false_high_confidence_relation_evidence_is_rejected(self):
+        first = self.task("relation-evidence-provider", auto_dispatch=False)
+        with self.assertRaisesRegex(
+            ValueError, "does not match the connected location result",
+        ):
+            self.task(
+                "relation-evidence-consumer",
+                dependency_analysis={
+                    "decision": "independent",
+                    "relation_evidence": [{
+                        "task_id": first["id"],
+                        "relation_type": "depends_on",
+                        "confidence": "high",
+                        "kind": "artifact_dependency",
+                        "reason": "伪造的不相干调用关系",
+                        "source": "codegraph_explore",
+                        "files": ["src/Unrelated.ts"],
+                        "symbols": ["Unrelated"],
+                    }],
+                },
+            )
+
+    def test_expired_execution_auto_requeues_and_resumes_thread(self):
         task = self.task("execution-timeout")
         claim = self.service.claim_next_task("worker")
         self.service.bind_conversation(task["id"], "execution", "timeout-dev-thread", claim["run"]["id"])
@@ -507,10 +635,28 @@ class WorkflowTest(unittest.TestCase):
             )
         self.assertEqual(1, self.service.recover_expired_runs())
         expired = self.service.get_task(task["id"])
-        self.assertEqual("failed", expired["status"])
+        self.assertEqual("ready", expired["status"])
         self.assertTrue(expired["retry_required"])
         self.assertEqual("expired", self.service.get_run(claim["run"]["id"])["status"])
-        self.assertIsNone(self.service.claim_next_task("other-worker"))
+        retry = self.service.claim_next_task("other-worker")
+        self.assertEqual("timeout-dev-thread", retry["resume_thread_id"])
+
+    def test_execution_recovery_exhaustion_moves_to_attention(self):
+        task = self.task("execution-recovery-limit")
+        for attempt in range(1, 4):
+            claim = self.service.claim_next_task(f"worker-{attempt}")
+            self.service.bind_conversation(
+                task["id"], "execution", "recovery-dev-thread", claim["run"]["id"]
+            )
+            result = self.service.interrupt_unsubmitted_run(
+                claim["run"]["id"], f"开发进程第 {attempt} 次异常退出"
+            )
+            if attempt < 3:
+                self.assertEqual("ready", result["task"]["status"])
+            else:
+                self.assertEqual("failed", result["task"]["status"])
+                self.assertFalse(result["task"]["auto_dispatch"])
+        self.assertIsNone(self.service.claim_next_task("worker-4"))
 
     def test_generic_transition_and_done_gate_are_blocked(self):
         task = self.task("gates")
@@ -520,21 +666,21 @@ class WorkflowTest(unittest.TestCase):
             with self.service.db.transaction() as connection:
                 connection.execute("UPDATE tasks SET status='done' WHERE id=?", (task["id"],))
 
-    def test_bug_combined_review_failure_reworks_same_bug(self):
+    def test_bug_code_quality_review_failure_reworks_same_bug(self):
         bug = self.task("nested-bug", type="bug")
         self.deliver(bug, "original-dev")
         review = self.service.claim_next_code_review_task("reviewer")
         self.service.bind_conversation(bug["id"], "code_review", "bug-review", review["run"]["id"])
         self.service.review_code(
             bug["id"], review["run"]["id"], "fail", reasons=["仍失败"],
-            passed_items=["project-rules"], failed_criteria=["功能可用"],
+            passed_items=[], failed_criteria=["project-rules"],
         )
         self.assertEqual(1, sum(item["type"] == "bug" for item in self.service.list_tasks()))
         rework = self.service.claim_next_task("worker")
         self.assertEqual("rework", rework["run"]["run_type"])
         self.assertEqual("original-dev", rework["resume_thread_id"])
         self.assertIn("仍失败", rework["dispatch_prompt"])
-        self.assertIn("功能可用", rework["dispatch_prompt"])
+        self.assertIn("project-rules", rework["dispatch_prompt"])
 
     def test_contracts_and_dependency_relations_are_complete_and_consistent(self):
         base = {
@@ -555,8 +701,20 @@ class WorkflowTest(unittest.TestCase):
             }))
 
         analysis = self.analysis("empty-checks")
-        with self.assertRaises(ValueError):
-            self.service.create_task(dict(base, status="ready", title="empty-checks", location_analysis_id=analysis["id"], review_contract={"checks": [], "quality_gates": self.review_contract(True)["quality_gates"]}))
+        defaulted = self.service.create_task(dict(
+            base,
+            status="ready",
+            title="empty-checks",
+            location_analysis_id=analysis["id"],
+            review_contract={
+                "checks": [],
+                "quality_gates": self.review_contract(True)["quality_gates"],
+            },
+        ))
+        self.assertEqual(
+            ["code-quality", "security-vulnerabilities", "cohesion-coupling"],
+            [item["id"] for item in defaulted["review_contract"]["checks"]],
+        )
 
         prerequisite = self.task("prerequisite")
         analysis = self.analysis("dependency-mismatch")
@@ -591,9 +749,90 @@ class WorkflowTest(unittest.TestCase):
         self.service.bind_conversation(task["id"], "code_review", "expired-code-review", resumed_review["run"]["id"])
         completed = self.service.review_code(
             task["id"], resumed_review["run"]["id"], "pass",
-            passed_items=["project-rules", "功能可用"],
+            passed_items=["project-rules"],
         )
         self.assertEqual("done", completed["status"])
+
+    def test_code_review_prompt_excludes_task_goal_and_acceptance(self):
+        task = self.task("natural-review-prompt")
+        self.deliver(task, "dev-thread")
+
+        review = self.service.claim_next_code_review_task("reviewer")
+
+        prompt = review["dispatch_prompt"]
+        self.assertTrue(prompt.startswith("请审查以下代码变更：\n\n"))
+        self.assertIn(f"标题：{task['title']}", prompt)
+        self.assertNotIn(f"目标：{task['goal']}", prompt)
+        self.assertNotIn("验收标准：", prompt)
+        self.assertNotIn("run_acceptance_checks", prompt)
+        self.assertIn("代码质量、安全漏洞以及高内聚低耦合", prompt)
+        self.assertIn("Diff 必须且只能通过现成 Git 命令获取", prompt)
+        self.assertIn("git -C <workspace_path> diff --no-ext-diff", prompt)
+        self.assertIn("git -C <workspace_path> diff --no-index", prompt)
+        self.assertIn("不得读取交付补丁文件", prompt)
+        self.assertIn("与审查项相关的所有现成工具", prompt)
+        self.assertIn("不得安装新工具、编写临时脚本或自制扫描器", prompt)
+        self.assertIn("变更符号的直接依赖、调用方", prompt)
+        self.assertIn("不得仅因任务目标看起来未完成而判定失败", prompt)
+        self.assertIn("纯格式、命名偏好或非阻断建议不得放入 failed_criteria", prompt)
+        self.assertNotIn("只要本阶段代码质量检查全部通过，也必须给出 pass", prompt)
+        review_context = model_run_context(review["run"]["context_snapshot"])
+        self.assertEqual(
+            {"base_revision", "changed_files", "workspace_path"},
+            set(review_context["diff_scope"]),
+        )
+        self.assertNotIn("artifact_path", review_context["diff_scope"])
+        self.assertNotIn("artifact_sha256", review_context["diff_scope"])
+        self.assertLess(prompt.index("请审查以下代码变更："), prompt.index("$dotasks-lifecycle"))
+        self.assertLess(prompt.index("$dotasks-lifecycle"), prompt.index("RUN_CONTEXT_JSON="))
+
+    def test_missing_review_callback_retries_immediately_and_uses_latest_thread(self):
+        task = self.task("missing-review-callback")
+        self.deliver(task, "dev-thread")
+
+        first = self.service._claim_next_native_dispatch(
+            "codex-native-controller", stage="code_review"
+        )
+        self.service.bind_native_dispatch(
+            first["run_id"], "review-thread-1",
+            dispatch_attempt_id=first["dispatch_attempt_id"],
+        )
+        self.service.fail_native_dispatch(
+            first["run_id"], "原生 Codex 任务已结束但未提交生命周期回调"
+        )
+
+        interrupted = self.service.get_task(task["id"])
+        self.assertIsNone(interrupted["review_retry_after"])
+        second = self.service._claim_next_native_dispatch(
+            "codex-native-controller", stage="code_review"
+        )
+        self.assertEqual("review-thread-1", second["resume_thread_id"])
+        self.service.bind_native_dispatch(
+            second["run_id"], "review-thread-2",
+            resume_fallback_reason="review-thread-1 archived",
+            dispatch_attempt_id=second["dispatch_attempt_id"],
+        )
+        self.service.fail_native_dispatch(
+            second["run_id"], "原生 Codex 任务已结束但未提交生命周期回调"
+        )
+
+        third = self.service._claim_next_native_dispatch(
+            "codex-native-controller", stage="code_review"
+        )
+        self.assertEqual("review-thread-2", third["resume_thread_id"])
+        self.service.bind_native_dispatch(
+            third["run_id"], "review-thread-3",
+            dispatch_attempt_id=third["dispatch_attempt_id"],
+        )
+        self.service.fail_native_dispatch(
+            third["run_id"], "原生 Codex 任务已结束但未提交生命周期回调"
+        )
+        exhausted = self.service.get_task(task["id"])
+        self.assertEqual(3, exhausted["review_interrupt_count"])
+        self.assertFalse(exhausted["auto_dispatch"])
+        self.assertIsNone(self.service._claim_next_native_dispatch(
+            "codex-native-controller", stage="code_review"
+        ))
 
     def test_pause_resume_preserves_code_review_stage(self):
         task = self.task("pause-code-review")
@@ -612,7 +851,7 @@ class WorkflowTest(unittest.TestCase):
         self.service.bind_conversation(task["id"], "code_review", "review-thread", review["run"]["id"])
         completed = self.service.review_code(
             task["id"], review["run"]["id"], "pass",
-            passed_items=["project-rules", "功能可用"],
+            passed_items=["project-rules"],
         )
         self.assertEqual("done", completed["status"])
 

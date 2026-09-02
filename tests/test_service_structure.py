@@ -8,6 +8,7 @@ from core.service.changes import TaskChangeMixin
 from core.service.execution import TaskLifecycleMixin
 from core.service.planning import TaskPlanningMixin
 from core.service.queries import TaskQueryMixin
+from core.service.requirements import TaskRequirementMixin
 from core.service.reporting import TaskReportingMixin
 from core.service.review import TaskReviewMixin
 from core.service.runs import TaskRunMixin
@@ -31,8 +32,11 @@ class TaskboardServiceStructureTest(unittest.TestCase):
             "list_tasks": TaskQueryMixin,
             "transition_task": TaskLifecycleMixin,
             "report_run_blocked": TaskLifecycleMixin,
+            "get_requirement": TaskRequirementMixin,
+            "submit_requirement_decomposition": TaskRequirementMixin,
             "get_run": TaskRunMixin,
             "submit_delivery": TaskReviewMixin,
+            "review_code": TaskReviewMixin,
             "board": TaskReportingMixin,
             "task_settings": TaskSettingsMixin,
         }

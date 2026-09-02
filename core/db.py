@@ -99,6 +99,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   dispatch_failure_count INTEGER NOT NULL DEFAULT 0,
   dispatch_retry_after TEXT,
   last_dispatch_error TEXT NOT NULL DEFAULT '',
+  execution_recovery_count INTEGER NOT NULL DEFAULT 0,
+  last_recovery_reason TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -182,6 +184,7 @@ CREATE TABLE IF NOT EXISTS native_dispatches (
   base_revision TEXT NOT NULL DEFAULT '',
   base_ref TEXT NOT NULL DEFAULT '',
   resume_fallback_reason TEXT NOT NULL DEFAULT '',
+  dispatch_attempt_id TEXT NOT NULL CHECK(trim(dispatch_attempt_id) != ''),
   error TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -200,31 +203,6 @@ CREATE TABLE IF NOT EXISTS token_usage_events (
   reasoning_output_delta INTEGER NOT NULL DEFAULT 0,
   recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(run_id, source_total)
-);
-
-CREATE TABLE IF NOT EXISTS acceptance_check_runs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  review_run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
-  delivery_run_id TEXT NOT NULL REFERENCES task_runs(id),
-  criterion TEXT NOT NULL,
-  command TEXT NOT NULL,
-  status TEXT NOT NULL,
-  exit_code INTEGER,
-  output TEXT NOT NULL DEFAULT '',
-  duration_ms INTEGER NOT NULL DEFAULT 0,
-  workspace_fingerprint TEXT NOT NULL DEFAULT '',
-  cache_hit INTEGER NOT NULL DEFAULT 0,
-  failure_category TEXT NOT NULL DEFAULT '',
-  repair_attempted INTEGER NOT NULL DEFAULT 0,
-  repair_command TEXT NOT NULL DEFAULT '',
-  repair_status TEXT NOT NULL DEFAULT '',
-  repair_output TEXT NOT NULL DEFAULT '',
-  initial_status TEXT NOT NULL DEFAULT '',
-  initial_exit_code INTEGER,
-  initial_output TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  completed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS location_analyses (
@@ -293,8 +271,6 @@ CREATE TABLE IF NOT EXISTS execution_batches (
   max_appended_tasks INTEGER NOT NULL DEFAULT 3 CHECK(max_appended_tasks >= 0),
   appended_count INTEGER NOT NULL DEFAULT 0 CHECK(appended_count >= 0),
   admission_open INTEGER NOT NULL DEFAULT 1 CHECK(admission_open IN (0,1)),
-  thread_id TEXT NOT NULL DEFAULT '',
-  active_turn_id TEXT NOT NULL DEFAULT '',
   delivery_run_id TEXT REFERENCES task_runs(id),
   sealed_at TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -317,19 +293,6 @@ CREATE TABLE IF NOT EXISTS execution_batch_runs (
   run_id TEXT PRIMARY KEY REFERENCES task_runs(id) ON DELETE CASCADE,
   batch_id TEXT NOT NULL REFERENCES execution_batches(id) ON DELETE CASCADE,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS batch_steer_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  batch_id TEXT NOT NULL REFERENCES execution_batches(id) ON DELETE CASCADE,
-  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  revision INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending',
-  attempts INTEGER NOT NULL DEFAULT 0,
-  last_error TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(batch_id, task_id, revision)
 );
 
 CREATE TABLE IF NOT EXISTS task_relations (
@@ -389,22 +352,6 @@ CREATE TABLE IF NOT EXISTS reviews (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS acceptance_results (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
-  delivery_run_id TEXT REFERENCES task_runs(id),
-  round INTEGER NOT NULL,
-  verdict TEXT NOT NULL,
-  reasons TEXT NOT NULL DEFAULT '[]',
-  passed_criteria TEXT NOT NULL DEFAULT '[]',
-  failed_criteria TEXT NOT NULL DEFAULT '[]',
-  failure_locations TEXT NOT NULL DEFAULT '[]',
-  criterion_results TEXT NOT NULL DEFAULT '[]',
-  created_bug_task_id TEXT REFERENCES tasks(id),
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
 CREATE TABLE IF NOT EXISTS experiences (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
@@ -433,6 +380,21 @@ CREATE TABLE IF NOT EXISTS system_settings (
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS scheduler_state (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  generation INTEGER NOT NULL DEFAULT 0,
+  handled_generation INTEGER NOT NULL DEFAULT 0,
+  pending INTEGER NOT NULL DEFAULT 0 CHECK(pending IN (0,1)),
+  last_trigger TEXT NOT NULL DEFAULT '',
+  last_entity_type TEXT NOT NULL DEFAULT '',
+  last_entity_id TEXT NOT NULL DEFAULT '',
+  lease_owner TEXT NOT NULL DEFAULT '',
+  lease_expires_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT OR IGNORE INTO scheduler_state(id) VALUES(1);
 
 CREATE TABLE IF NOT EXISTS project_integration_states (
   project TEXT PRIMARY KEY,
@@ -469,8 +431,6 @@ CREATE INDEX IF NOT EXISTS idx_task_runs_task_type_status ON task_runs(task_id, 
 CREATE INDEX IF NOT EXISTS idx_task_runs_status ON task_runs(status, lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_token_usage_events_recorded ON token_usage_events(recorded_at);
 CREATE INDEX IF NOT EXISTS idx_token_usage_events_task ON token_usage_events(task_id, recorded_at);
-CREATE INDEX IF NOT EXISTS idx_acceptance_checks_review ON acceptance_check_runs(review_run_id, criterion, created_at);
-CREATE INDEX IF NOT EXISTS idx_acceptance_results_task ON acceptance_results(task_id, round, created_at);
 CREATE INDEX IF NOT EXISTS idx_location_analyses_task ON location_analyses(task_id, stage, created_at);
 CREATE INDEX IF NOT EXISTS idx_location_reports_state ON location_reports(state, updated_at);
 CREATE INDEX IF NOT EXISTS idx_task_conversations_task ON task_conversations(task_id, created_at);
@@ -479,7 +439,6 @@ CREATE INDEX IF NOT EXISTS idx_task_run_conversations_thread ON task_run_convers
 CREATE INDEX IF NOT EXISTS idx_execution_batches_project_state ON execution_batches(project, state, admission_open, created_at);
 CREATE INDEX IF NOT EXISTS idx_execution_batch_tasks_task ON execution_batch_tasks(task_id);
 CREATE INDEX IF NOT EXISTS idx_execution_batch_runs_batch ON execution_batch_runs(batch_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_batch_steer_events_pending ON batch_steer_events(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_task_targets_lookup ON task_targets(file, symbol, task_id);
 CREATE INDEX IF NOT EXISTS idx_task_relations_source_type ON task_relations(source_task_id, relation_type, target_task_id);
 CREATE INDEX IF NOT EXISTS idx_task_relations_target_type ON task_relations(target_task_id, relation_type, source_task_id);
@@ -492,7 +451,7 @@ CREATE INDEX IF NOT EXISTS idx_native_dispatches_entity ON native_dispatches(ent
 """
 
 # Schema version changes whenever migration output or validation constraints change.
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 21
 
 
 class Database:
@@ -524,6 +483,7 @@ class Database:
             "context_version",
             "effective_token_used",
             "requirement_id", "requirement_task_key",
+            "execution_recovery_count", "last_recovery_reason",
         }
         task_columns = {row["name"] for row in connection.execute("PRAGMA table_info(tasks)")}
         if not required_task_columns.issubset(task_columns):
@@ -546,19 +506,8 @@ class Database:
             "reasoning_output_delta", "effective_token_delta",
         }.issubset(event_columns):
             return True
-        check_columns = {row["name"] for row in connection.execute("PRAGMA table_info(acceptance_check_runs)")}
-        if not {
-            "workspace_fingerprint", "cache_hit", "failure_category",
-            "repair_attempted", "repair_command", "repair_status", "repair_output",
-            "initial_status", "initial_exit_code", "initial_output",
-        }.issubset(check_columns):
-            return True
-        result_columns = {row["name"] for row in connection.execute("PRAGMA table_info(acceptance_results)")}
-        if "criterion_results" not in result_columns:
-            return True
         required_batch_tables = {
             "execution_batches", "execution_batch_tasks", "execution_batch_runs",
-            "batch_steer_events",
         }
         existing_tables = {
             row["name"] for row in connection.execute(
@@ -573,8 +522,14 @@ class Database:
         }
         if not {
             "execution_environment", "parallel_fallback_reason",
-            "base_revision", "base_ref",
+            "base_revision", "base_ref", "dispatch_attempt_id",
         }.issubset(native_dispatch_columns):
+            return True
+        if connection.execute(
+            "SELECT 1 FROM native_dispatches WHERE trim(dispatch_attempt_id)='' LIMIT 1"
+        ).fetchone():
+            return True
+        if "scheduler_state" not in existing_tables:
             return True
         if "project_integration_states" not in existing_tables:
             return True
@@ -618,8 +573,22 @@ class Database:
             "enforce_native_dispatch_active_worker_update": (
                 "active native dispatch already exists for worker",
             ),
+            "validate_native_dispatch_attempt_insert": (
+                "dispatch_attempt_id is required",
+            ),
+            "validate_native_dispatch_attempt_update": (
+                "dispatch_attempt_id is required",
+            ),
             "track_task_status_started_at": ("status_started_at",),
             "track_run_stage_completed_at": ("stage_completed_at",),
+            "schedule_on_task_insert": ("scheduler_state", "task_created"),
+            "schedule_on_task_update": ("scheduler_state", "task_state_changed"),
+            "schedule_on_run_update": ("scheduler_state", "run_state_changed"),
+            "schedule_on_requirement_insert": ("scheduler_state", "requirement_created"),
+            "schedule_on_requirement_update": ("scheduler_state", "requirement_state_changed"),
+            "schedule_on_decomposition_run_update": (
+                "scheduler_state", "decomposition_run_state_changed",
+            ),
         }
         if any(
             not all(signature in trigger_sql.get(name, "") for signature in expected)
@@ -662,6 +631,14 @@ class Database:
             DROP TRIGGER IF EXISTS validate_run_conversation_update;
             DROP TRIGGER IF EXISTS enforce_native_dispatch_active_worker_insert;
             DROP TRIGGER IF EXISTS enforce_native_dispatch_active_worker_update;
+            DROP TRIGGER IF EXISTS validate_native_dispatch_attempt_insert;
+            DROP TRIGGER IF EXISTS validate_native_dispatch_attempt_update;
+            DROP TRIGGER IF EXISTS schedule_on_task_insert;
+            DROP TRIGGER IF EXISTS schedule_on_task_update;
+            DROP TRIGGER IF EXISTS schedule_on_run_update;
+            DROP TRIGGER IF EXISTS schedule_on_requirement_insert;
+            DROP TRIGGER IF EXISTS schedule_on_requirement_update;
+            DROP TRIGGER IF EXISTS schedule_on_decomposition_run_update;
             """
         )
         columns = {
@@ -696,6 +673,8 @@ class Database:
             "dispatch_failure_count": "INTEGER NOT NULL DEFAULT 0",
             "dispatch_retry_after": "TEXT",
             "last_dispatch_error": "TEXT NOT NULL DEFAULT ''",
+            "execution_recovery_count": "INTEGER NOT NULL DEFAULT 0",
+            "last_recovery_reason": "TEXT NOT NULL DEFAULT ''",
             "status_started_at": "TEXT",
             "context_version": "INTEGER NOT NULL DEFAULT 1",
             "effective_token_used": "INTEGER NOT NULL DEFAULT 0",
@@ -796,11 +775,40 @@ class Database:
             "parallel_fallback_reason": "TEXT NOT NULL DEFAULT ''",
             "base_revision": "TEXT NOT NULL DEFAULT ''",
             "base_ref": "TEXT NOT NULL DEFAULT ''",
+            "dispatch_attempt_id": "TEXT NOT NULL DEFAULT ''",
         }.items():
             if name not in native_dispatch_columns:
                 connection.execute(
                     f"ALTER TABLE native_dispatches ADD COLUMN {name} {definition}"
                 )
+        connection.execute(
+            """UPDATE task_runs SET lease_expires_at=CURRENT_TIMESTAMP
+               WHERE id IN (SELECT run_id FROM native_dispatches
+                            WHERE trim(dispatch_attempt_id)='')"""
+        )
+        connection.execute(
+            "DELETE FROM native_dispatches WHERE trim(dispatch_attempt_id)=''"
+        )
+        connection.execute("DROP TABLE IF EXISTS acceptance_check_runs")
+        connection.execute("DROP TABLE IF EXISTS acceptance_results")
+        connection.execute("DROP TABLE IF EXISTS batch_steer_events")
+        connection.execute(
+            "DELETE FROM system_settings WHERE key IN "
+            "('workspace_projects', 'archived_workspace_projects')"
+        )
+        connection.execute("""CREATE TABLE IF NOT EXISTS scheduler_state (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            generation INTEGER NOT NULL DEFAULT 0,
+            handled_generation INTEGER NOT NULL DEFAULT 0,
+            pending INTEGER NOT NULL DEFAULT 0 CHECK(pending IN (0,1)),
+            last_trigger TEXT NOT NULL DEFAULT '',
+            last_entity_type TEXT NOT NULL DEFAULT '',
+            last_entity_id TEXT NOT NULL DEFAULT '',
+            lease_owner TEXT NOT NULL DEFAULT '',
+            lease_expires_at TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+        connection.execute("INSERT OR IGNORE INTO scheduler_state(id) VALUES(1)")
         connection.execute("""CREATE TABLE IF NOT EXISTS project_integration_states (
             project TEXT PRIMARY KEY,
             integration_ref TEXT NOT NULL DEFAULT '',
@@ -831,29 +839,6 @@ class Database:
         ):
             if name not in event_columns:
                 connection.execute(f"ALTER TABLE token_usage_events ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
-        check_columns = {row["name"] for row in connection.execute("PRAGMA table_info(acceptance_check_runs)").fetchall()}
-        if "workspace_fingerprint" not in check_columns:
-            connection.execute("ALTER TABLE acceptance_check_runs ADD COLUMN workspace_fingerprint TEXT NOT NULL DEFAULT ''")
-        if "cache_hit" not in check_columns:
-            connection.execute("ALTER TABLE acceptance_check_runs ADD COLUMN cache_hit INTEGER NOT NULL DEFAULT 0")
-        for name, definition in {
-            "failure_category": "TEXT NOT NULL DEFAULT ''",
-            "repair_attempted": "INTEGER NOT NULL DEFAULT 0",
-            "repair_command": "TEXT NOT NULL DEFAULT ''",
-            "repair_status": "TEXT NOT NULL DEFAULT ''",
-            "repair_output": "TEXT NOT NULL DEFAULT ''",
-            "initial_status": "TEXT NOT NULL DEFAULT ''",
-            "initial_exit_code": "INTEGER",
-            "initial_output": "TEXT NOT NULL DEFAULT ''",
-        }.items():
-            if name not in check_columns:
-                connection.execute(
-                    f"ALTER TABLE acceptance_check_runs ADD COLUMN {name} {definition}"
-                )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_acceptance_checks_cache "
-            "ON acceptance_check_runs(delivery_run_id, criterion, command, workspace_fingerprint, created_at)"
-        )
         connection.execute(
             """UPDATE task_runs SET started_at=COALESCE((
                    SELECT mapping.created_at FROM task_run_conversations mapping
@@ -865,7 +850,7 @@ class Database:
             """UPDATE task_runs SET stage_completed_at=COALESCE((
                    SELECT MIN(next.created_at) FROM task_runs next
                    WHERE next.delivery_run_id=task_runs.id
-                     AND next.run_type IN ('review','code_review','acceptance')
+                     AND next.run_type='code_review'
                ), completed_at, updated_at)
                WHERE stage_completed_at IS NULL
                  AND status NOT IN ('awaiting_thread','running')"""
@@ -925,86 +910,12 @@ class Database:
         review_columns = {row["name"] for row in connection.execute("PRAGMA table_info(reviews)").fetchall()}
         if "failed_criteria" not in review_columns:
             connection.execute("ALTER TABLE reviews ADD COLUMN failed_criteria TEXT NOT NULL DEFAULT '[]'")
-        connection.execute("""CREATE TABLE IF NOT EXISTS acceptance_results (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-            run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
-            delivery_run_id TEXT REFERENCES task_runs(id),
-            round INTEGER NOT NULL,
-            verdict TEXT NOT NULL,
-            reasons TEXT NOT NULL DEFAULT '[]',
-            passed_criteria TEXT NOT NULL DEFAULT '[]',
-            failed_criteria TEXT NOT NULL DEFAULT '[]',
-            failure_locations TEXT NOT NULL DEFAULT '[]',
-            criterion_results TEXT NOT NULL DEFAULT '[]',
-            created_bug_task_id TEXT REFERENCES tasks(id),
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )""")
-        acceptance_result_columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(acceptance_results)")
-        }
-        if "criterion_results" not in acceptance_result_columns:
-            connection.execute(
-                "ALTER TABLE acceptance_results ADD COLUMN criterion_results TEXT NOT NULL DEFAULT '[]'"
-            )
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_acceptance_results_task ON acceptance_results(task_id, round, created_at)")
-        # Normalize persisted rows to the single Code Review workflow before
-        # installing current validation triggers.
-        connection.execute(
-            """UPDATE task_runs SET status='interrupted', completed_at=CURRENT_TIMESTAMP,
-               updated_at=CURRENT_TIMESTAMP
-               WHERE run_type='acceptance' AND status IN ('awaiting_thread','running')"""
-        )
-        connection.execute(
-            """UPDATE task_runs SET status='waiting_review', completed_at=NULL,
-               updated_at=CURRENT_TIMESTAMP
-               WHERE id IN (
-                 SELECT primary_run_id FROM tasks
-                 WHERE status IN ('review','acceptance')
-                   AND primary_run_id IS NOT NULL
-               )"""
-        )
-        connection.execute(
-            """UPDATE tasks SET status='code_review', active_run_id=NULL,
-               assigned_to=NULL, review_retry_after=NULL, auto_dispatch=1,
-               updated_at=CURRENT_TIMESTAMP
-               WHERE status IN ('review','acceptance')"""
-        )
-        connection.execute(
-            """UPDATE tasks SET status='blocked', blocked_from_status='rework',
-               active_run_id=NULL, assigned_to=NULL, auto_dispatch=0,
-               last_failure_reason=CASE WHEN trim(last_failure_reason)='' THEN
-                 '历史功能验收未通过，请确认后按 Code Review 返工流程继续'
-                 ELSE last_failure_reason END,
-               updated_at=CURRENT_TIMESTAMP
-               WHERE status='acceptance_blocked'"""
-        )
         # Status notifications and their dedicated conversations were removed.
         # Drop retired notification data so upgraded databases match fresh installations.
         connection.execute("DELETE FROM task_conversations WHERE role='notification'")
         connection.execute("DELETE FROM id_counters WHERE prefix='NOTICE'")
         connection.execute("DROP TABLE IF EXISTS notifications")
         connection.execute("DROP TABLE IF EXISTS notification_channels")
-        connection.execute(
-            """UPDATE tasks SET status='blocked', blocked_from_status='completion',
-               last_failure_reason='历史完成中状态缺少最终验收，请人工确认后重新执行',
-               updated_at=CURRENT_TIMESTAMP WHERE status='completion'"""
-        )
-        # Preserve historical pass evidence for audit reads.
-        connection.execute(
-            """INSERT INTO acceptance_results(task_id, run_id, delivery_run_id, round, verdict,
-                   reasons, passed_criteria, failed_criteria, failure_locations)
-               SELECT r.task_id, COALESCE(
-                   (SELECT id FROM task_runs WHERE task_id=r.task_id ORDER BY created_at DESC LIMIT 1),
-                   'MIGRATED-' || r.task_id),
-                   (SELECT id FROM task_runs WHERE task_id=r.task_id ORDER BY created_at DESC LIMIT 1),
-                   r.round, 'pass', r.reasons, r.passed_items, '[]', '[]'
-               FROM reviews r JOIN tasks t ON t.id=r.task_id
-               WHERE t.status='done' AND r.verdict='pass'
-                 AND EXISTS(SELECT 1 FROM task_runs tr WHERE tr.task_id=r.task_id)
-                 AND NOT EXISTS(SELECT 1 FROM acceptance_results a WHERE a.task_id=r.task_id)"""
-        )
         connection.execute(
             """UPDATE tasks SET status='blocked', blocked_from_status='done',
                last_failure_reason='历史完成记录缺少必需的质量门禁记录，请人工确认后重新执行',
@@ -1017,7 +928,7 @@ class Database:
             """UPDATE task_runs SET status='interrupted', completed_at=CURRENT_TIMESTAMP,
                updated_at=CURRENT_TIMESTAMP WHERE status IN ('awaiting_thread','running')
                AND task_id IN (SELECT id FROM tasks WHERE status IN ('done','cancelled')
-                 OR blocked_from_status IN ('done','completion'))"""
+                 OR blocked_from_status='done')"""
         )
         connection.execute(
             """UPDATE tasks SET active_run_id=NULL, assigned_to=NULL
@@ -1037,17 +948,6 @@ class Database:
         )
         connection.execute(
             "INSERT OR IGNORE INTO system_settings(key, value) VALUES('max_parallel_development', '2')"
-        )
-        # Convert an in-place review row back into its delivery role.
-        connection.execute(
-            """UPDATE task_runs SET run_type=CASE
-                     WHEN (SELECT review_rework_count FROM tasks WHERE id=task_runs.task_id)>0 THEN 'rework'
-                     ELSE 'execution' END
-               WHERE run_type='review' AND acceptance_evidence!='[]'
-                 AND id IN (SELECT primary_run_id FROM tasks WHERE primary_run_id IS NOT NULL)"""
-        )
-        connection.execute(
-            "UPDATE task_runs SET run_type='code_review' WHERE run_type IN ('review','acceptance')"
         )
         connection.execute(
             """UPDATE task_runs SET status='waiting_review', completed_at=NULL,
@@ -1133,13 +1033,22 @@ class Database:
             DROP TRIGGER IF EXISTS validate_conversation_update;
             DROP TRIGGER IF EXISTS validate_run_conversation_insert;
             DROP TRIGGER IF EXISTS validate_run_conversation_update;
+            DROP TRIGGER IF EXISTS validate_native_dispatch_attempt_insert;
+            DROP TRIGGER IF EXISTS validate_native_dispatch_attempt_update;
             DROP TRIGGER IF EXISTS track_task_status_started_at;
             DROP TRIGGER IF EXISTS track_run_stage_completed_at;
+            DROP TRIGGER IF EXISTS schedule_on_task_insert;
+            DROP TRIGGER IF EXISTS schedule_on_task_update;
+            DROP TRIGGER IF EXISTS schedule_on_run_update;
+            DROP TRIGGER IF EXISTS schedule_on_requirement_insert;
+            DROP TRIGGER IF EXISTS schedule_on_requirement_update;
+            DROP TRIGGER IF EXISTS schedule_on_decomposition_run_update;
 
             CREATE TRIGGER IF NOT EXISTS validate_task_insert BEFORE INSERT ON tasks
             WHEN NEW.status NOT IN ({task_statuses})
               OR NEW.priority NOT IN ('P0','P1','P2','P3') OR NEW.token_budget<=0 OR NEW.token_used<0 OR NEW.effective_token_used<0
               OR NEW.auto_dispatch NOT IN (0,1) OR NEW.retry_required NOT IN (0,1) OR NEW.dispatch_failure_count<0
+              OR NEW.execution_recovery_count<0
               OR NEW.status IN ('code_review','done')
             BEGIN SELECT RAISE(ABORT, 'invalid task values'); END;
 
@@ -1147,6 +1056,7 @@ class Database:
             WHEN NEW.status NOT IN ({task_statuses})
               OR NEW.priority NOT IN ('P0','P1','P2','P3') OR NEW.token_budget<=0 OR NEW.token_used<0 OR NEW.effective_token_used<0
               OR NEW.auto_dispatch NOT IN (0,1) OR NEW.retry_required NOT IN (0,1) OR NEW.dispatch_failure_count<0
+              OR NEW.execution_recovery_count<0
               OR (NEW.status='code_review' AND NOT EXISTS(
                    SELECT 1 FROM task_runs r WHERE r.task_id=NEW.id
                      AND r.id=NEW.primary_run_id AND (
@@ -1218,6 +1128,20 @@ class Database:
               SELECT RAISE(ABORT, 'active native dispatch already exists for worker');
             END;
 
+            CREATE TRIGGER validate_native_dispatch_attempt_insert
+            BEFORE INSERT ON native_dispatches
+            WHEN trim(NEW.dispatch_attempt_id)=''
+            BEGIN
+              SELECT RAISE(ABORT, 'dispatch_attempt_id is required');
+            END;
+
+            CREATE TRIGGER validate_native_dispatch_attempt_update
+            BEFORE UPDATE OF dispatch_attempt_id ON native_dispatches
+            WHEN trim(NEW.dispatch_attempt_id)=''
+            BEGIN
+              SELECT RAISE(ABORT, 'dispatch_attempt_id is required');
+            END;
+
             CREATE TRIGGER track_task_status_started_at AFTER UPDATE OF status ON tasks
             WHEN OLD.status != NEW.status
             BEGIN
@@ -1231,6 +1155,58 @@ class Database:
             BEGIN
               UPDATE task_runs SET stage_completed_at=COALESCE(stage_completed_at, CURRENT_TIMESTAMP)
               WHERE id=NEW.id;
+            END;
+
+            CREATE TRIGGER schedule_on_task_insert AFTER INSERT ON tasks
+            BEGIN
+              UPDATE scheduler_state SET generation=generation+1, pending=1,
+                last_trigger='task_created', last_entity_type='task',
+                last_entity_id=NEW.id, updated_at=CURRENT_TIMESTAMP WHERE id=1;
+            END;
+
+            CREATE TRIGGER schedule_on_task_update
+            AFTER UPDATE OF status, auto_dispatch, active_run_id ON tasks
+            WHEN OLD.status!=NEW.status
+              OR OLD.auto_dispatch!=NEW.auto_dispatch
+              OR COALESCE(OLD.active_run_id,'')!=COALESCE(NEW.active_run_id,'')
+            BEGIN
+              UPDATE scheduler_state SET generation=generation+1, pending=1,
+                last_trigger='task_state_changed', last_entity_type='task',
+                last_entity_id=NEW.id, updated_at=CURRENT_TIMESTAMP WHERE id=1;
+            END;
+
+            CREATE TRIGGER schedule_on_run_update AFTER UPDATE OF status ON task_runs
+            WHEN OLD.status!=NEW.status
+            BEGIN
+              UPDATE scheduler_state SET generation=generation+1, pending=1,
+                last_trigger='run_state_changed', last_entity_type='run',
+                last_entity_id=NEW.id, updated_at=CURRENT_TIMESTAMP WHERE id=1;
+            END;
+
+            CREATE TRIGGER schedule_on_requirement_insert AFTER INSERT ON requirements
+            BEGIN
+              UPDATE scheduler_state SET generation=generation+1, pending=1,
+                last_trigger='requirement_created', last_entity_type='requirement',
+                last_entity_id=NEW.id, updated_at=CURRENT_TIMESTAMP WHERE id=1;
+            END;
+
+            CREATE TRIGGER schedule_on_requirement_update
+            AFTER UPDATE OF status, auto_dispatch ON requirements
+            WHEN OLD.status!=NEW.status OR OLD.auto_dispatch!=NEW.auto_dispatch
+            BEGIN
+              UPDATE scheduler_state SET generation=generation+1, pending=1,
+                last_trigger='requirement_state_changed', last_entity_type='requirement',
+                last_entity_id=NEW.id, updated_at=CURRENT_TIMESTAMP WHERE id=1;
+            END;
+
+            CREATE TRIGGER schedule_on_decomposition_run_update
+            AFTER UPDATE OF status ON requirement_decomposition_runs
+            WHEN OLD.status!=NEW.status
+            BEGIN
+              UPDATE scheduler_state SET generation=generation+1, pending=1,
+                last_trigger='decomposition_run_state_changed',
+                last_entity_type='requirement_run', last_entity_id=NEW.id,
+                updated_at=CURRENT_TIMESTAMP WHERE id=1;
             END;
             """
         )

@@ -26,4 +26,4 @@ if [ -d "$VENDOR_DIR" ]; then
   export PYTHONPATH
 fi
 
-exec "$PYTHON_BIN" -B -m taskboard.mcp_server
+exec "$PYTHON_BIN" -B -m taskboard.mcp_server "$@"

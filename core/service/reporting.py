@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
 from ..run_context import (
@@ -12,7 +11,7 @@ from ..run_context import (
     lifecycle_tool_schema_version,
     model_run_context,
 )
-from .domain import RELATION_TYPES, search_tokens
+from .domain import RELATION_TYPES
 from ..workflow import task_requires_attention
 
 
@@ -96,29 +95,6 @@ class TaskReportingMixin:
         relations = self.task_relations(source_task_id)
         self.flush_integration_outbox()
         return {"task": task, "relations": relations}
-
-    def suggest_relations(self, task_id: str, limit: int = 8) -> list[dict[str, Any]]:
-        task = self.get_task(task_id)
-        candidates = [item for item in self.list_tasks() if item["id"] != task_id and item.get("project") == task.get("project")]
-        task_modules = {item.lower() for item in task.get("modules", [])}
-        task_terms = search_tokens(f"{task['title']} {task.get('goal', '')}")
-        suggestions = []
-        for candidate in candidates:
-            modules = {item.lower() for item in candidate.get("modules", [])}
-            terms = search_tokens(f"{candidate['title']} {candidate.get('goal', '')}")
-            module_overlap = sorted(task_modules & modules)
-            term_overlap = sorted(task_terms & terms)
-            score = len(module_overlap) * 5 + len(term_overlap)
-            if score == 0:
-                continue
-            active = candidate["status"] not in {"done", "cancelled"}
-            suggestions.append({
-                "task_id": candidate["id"], "title": candidate["title"], "status": candidate["status"],
-                "score": score, "module_overlap": module_overlap, "term_overlap": term_overlap[:5],
-                "recommended_relation": "conflicts_with" if active else "changed_from",
-                "requires_confirmation": True,
-            })
-        return sorted(suggestions, key=lambda item: (-item["score"], item["task_id"]))[:max(1, min(limit, 20))]
 
     def task_relations(self, task_id: str) -> list[dict[str, Any]]:
         with self.db.connection() as connection:
@@ -212,40 +188,18 @@ class TaskReportingMixin:
     def build_code_review_context(
         self, task_id: str, project_path: str | None = None,
     ) -> dict[str, Any]:
-        """Build only the requirement, implementation, and checks needed for code review."""
+        """Build only the diff-quality checks needed for code review."""
         task = self.get_task(task_id)
         if project_path and self._normalize_project(project_path) != task.get("project"):
             raise ValueError("project_path must match the task project")
-        implementation = task.get("implementation_contract") or {}
         review = task.get("review_contract") or {}
-        acceptance = [
-            {
-                key: item.get(key)
-                for key in (
-                    "criterion", "file", "symbol", "method", "command", "expected",
-                    "check_type", "required", "timeout_seconds", "artifact_refs",
-                    "failure_category", "repair_command", "repair_timeout_seconds",
-                )
-                if item.get(key) not in (None, "", [], {})
-            }
-            for item in task.get("acceptance_plan") or []
-            if isinstance(item, dict)
-        ]
         return {
             "task": {
                 key: task.get(key)
-                for key in (
-                    "id", "title", "goal", "scope", "out_of_scope", "acceptance_criteria",
-                )
+                for key in ("id", "title")
                 if task.get(key) not in (None, "", [], {})
             },
-            "implementation": {
-                "targets": implementation.get("targets") or [],
-            },
-            "visual_references": implementation.get("visual_references") or [],
             "review_checks": review.get("checks") or [],
-            "acceptance_criteria": task.get("acceptance_criteria") or [],
-            "acceptance": acceptance,
         }
 
     def get_run_context(
@@ -375,85 +329,6 @@ class TaskReportingMixin:
             })
             cursor += timedelta(days=1)
         return {"periods": totals, "daily": daily}
-
-    def workspace_projects(self) -> list[str]:
-        return self._workspace_path_setting("workspace_projects")
-
-    def archived_workspace_projects(self) -> list[str]:
-        return self._workspace_path_setting("archived_workspace_projects")
-
-    def _workspace_path_setting(self, key: str) -> list[str]:
-        connection = self.db.connect()
-        try:
-            row = connection.execute(
-                "SELECT value FROM system_settings WHERE key=?", (key,)
-            ).fetchone()
-        finally:
-            connection.close()
-        if not row:
-            return []
-        try:
-            values = json.loads(row["value"])
-        except (TypeError, json.JSONDecodeError):
-            return []
-        projects: list[str] = []
-        for value in values if isinstance(values, list) else []:
-            normalized = self._normalize_project(value)
-            if normalized and normalized not in projects:
-                projects.append(normalized)
-        return projects
-
-    def _write_workspace_path_setting(self, key: str, projects: list[str]) -> None:
-        connection = self.db.connect()
-        try:
-            with connection:
-                connection.execute(
-                    """INSERT INTO system_settings(key, value, updated_at)
-                       VALUES(?, ?, CURRENT_TIMESTAMP)
-                       ON CONFLICT(key) DO UPDATE SET
-                         value=excluded.value, updated_at=CURRENT_TIMESTAMP""",
-                    (key, json.dumps(projects, ensure_ascii=False)),
-                )
-        finally:
-            connection.close()
-
-    def _require_normalized_project_path(self, project: str | Path | None) -> str:
-        value = str(project or "").strip()
-        if not value or not Path(value).is_absolute():
-            raise ValueError("project must be a normalized absolute path")
-        normalized = self._normalize_project(value)
-        if value != normalized:
-            raise ValueError("project must be a normalized absolute path")
-        return normalized
-
-    def archive_workspace_project(self, project: str | Path | None) -> dict[str, Any]:
-        normalized = self._require_normalized_project_path(project)
-        projects = self.archived_workspace_projects()
-        changed = normalized not in projects
-        if changed:
-            projects.append(normalized)
-            projects.sort(key=lambda value: (Path(value).name.casefold(), value.casefold()))
-            self._write_workspace_path_setting("archived_workspace_projects", projects)
-        return {"path": normalized, "archived": True, "changed": changed}
-
-    def restore_workspace_project(self, project: str | Path | None) -> dict[str, Any]:
-        normalized = self._require_normalized_project_path(project)
-        projects = self.archived_workspace_projects()
-        changed = normalized in projects
-        if changed:
-            self._write_workspace_path_setting(
-                "archived_workspace_projects", [item for item in projects if item != normalized],
-            )
-        return {"path": normalized, "archived": False, "changed": changed}
-
-    def add_workspace_project(self, project: str | Path | None) -> str:
-        normalized = self._require_project_directory(project)
-        projects = self.workspace_projects()
-        if normalized not in projects:
-            projects.append(normalized)
-            projects.sort(key=lambda value: Path(value).name.casefold())
-            self._write_workspace_path_setting("workspace_projects", projects)
-        return normalized
 
     def latest_event_id(self) -> int:
         connection = self.db.connect()

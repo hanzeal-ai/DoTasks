@@ -7,13 +7,12 @@ from typing import Any
 from taskboard.version import VERSION
 
 
-RUN_CONTEXT_SCHEMA_VERSION = 10
-LIFECYCLE_TOOL_SCHEMA_REVISION = 10
+RUN_CONTEXT_SCHEMA_VERSION = 13
+LIFECYCLE_TOOL_SCHEMA_REVISION = 13
 
 LIFECYCLE_TOOL_NAMES = frozenset({
     "report_run_blocked",
     "submit_task_delivery",
-    "run_acceptance_checks",
     "review_code",
 })
 
@@ -21,7 +20,7 @@ STAGE_COMPLETION_TOOLS = {
     "execution": ("report_run_blocked", "submit_task_delivery"),
     "rework": ("report_run_blocked", "submit_task_delivery"),
     "bugfix": ("report_run_blocked", "submit_task_delivery"),
-    "code_review": ("run_acceptance_checks", "review_code"),
+    "code_review": ("review_code",),
 }
 
 
@@ -144,16 +143,17 @@ def model_run_context(snapshot: dict[str, Any]) -> dict[str, Any]:
             public.pop("visual_references", None)
     elif stage == "code_review":
         task = dict(public.get("task") or {})
-        constraints = {
-            key: task.pop(key)
-            for key in ("scope", "out_of_scope")
-            if task.get(key) not in (None, "", [], {})
-        }
         public = {
             "stage": stage,
-            "task": task,
-            **({"constraints": constraints} if constraints else {}),
-            "diff_scope": dict(public.get("diff_scope") or {}),
+            "task": {
+                key: task.get(key) for key in ("id", "title")
+                if task.get(key) not in (None, "", [], {})
+            },
+            "diff_scope": {
+                key: (public.get("diff_scope") or {}).get(key)
+                for key in ("base_revision", "changed_files", "workspace_path")
+                if (public.get("diff_scope") or {}).get(key) not in (None, "", [], {})
+            },
             "review_checks": list(public.get("review_checks") or []),
         }
         if snapshot.get("batch"):
@@ -161,7 +161,7 @@ def model_run_context(snapshot: dict[str, Any]) -> dict[str, Any]:
         if snapshot.get("tasks"):
             public["tasks"] = [
                 {
-                    key: item.get(key) for key in ("id", "title", "goal")
+                    key: item.get(key) for key in ("id", "title")
                     if item.get(key) not in (None, "", [], {})
                 }
                 for item in snapshot["tasks"] if isinstance(item, dict)
@@ -170,5 +170,38 @@ def model_run_context(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 def prompt_context(snapshot: dict[str, Any]) -> str:
-    """Render compact JSON once in the first turn so agents do not refetch it."""
-    return json.dumps(model_run_context(snapshot), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    """Render only the stage input that the dispatched agent must act on."""
+    public = model_run_context(snapshot)
+    if str(public.get("stage") or "") in {"execution", "rework", "bugfix"}:
+        target_locks = [
+            {
+                "file": target["file"],
+                "mode": str(target.get("mode") or "modify"),
+                "symbols": list(target.get("symbols") or []),
+            }
+            for target in (public.get("targets") or [])
+            if isinstance(target, dict) and target.get("file")
+        ]
+        batch_task_ids = [
+            {"id": item["id"]}
+            for item in (public.get("tasks") or [])
+            if isinstance(item, dict) and item.get("id")
+        ]
+        public["targets"] = target_locks
+        if batch_task_ids:
+            public["tasks"] = batch_task_ids
+        public = {
+            key: public[key]
+            for key in (
+                "execution_environment",
+                "targets",
+                "verify",
+                "visual_references",
+                "batch",
+                "tasks",
+            )
+            if public.get(key) not in (None, "", [], {})
+        }
+    return json.dumps(
+        public, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )

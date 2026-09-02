@@ -4,20 +4,18 @@ import json
 import posixpath
 import subprocess
 import time
-import uuid
-from collections import Counter
 from typing import Any
 
 from ..runtime import project_runtime_environment
 from ..self_healing import (
     SELF_HEAL_ATTEMPT_LIMIT,
     classify_recoverable_failure,
-    infer_environment_repair_command,
+    normalize_self_heal_locations,
 )
 
 
 class TaskReviewMixin:
-    """Delivery validation, automated checks, review decisions, and acceptance records."""
+    """Delivery validation and code-quality review decisions."""
 
     @staticmethod
     def _run_project_command(
@@ -386,6 +384,7 @@ class TaskReviewMixin:
                    effective_token_used=(SELECT COALESCE(SUM(r.effective_token_used), 0) FROM task_runs r WHERE r.task_id=tasks.id),
                    active_run_id=NULL, assigned_to=NULL,
                    primary_run_id=?,
+                   execution_recovery_count=0, last_recovery_reason='',
                    review_interrupt_count=0, review_retry_after=NULL, updated_at=CURRENT_TIMESTAMP
                    WHERE id=? AND active_run_id=? AND status IN ('investigating','implementing','rework')""",
                 (next_stage, delivery_summary.strip(), verification_result.strip(), run_id, task["id"], run_id),
@@ -432,240 +431,255 @@ class TaskReviewMixin:
             "task": updated,
             "run": self.get_run(run_id),
             "next_stage": next_stage,
-            "review_dispatch_required": next_stage in {"review", "code_review"},
+            "review_dispatch_required": next_stage == "code_review",
         }
 
-    def run_acceptance_checks(
-        self, task_id: str, run_id: str, force: bool = False,
+    def review_code(
+        self,
+        task_id: str,
+        run_id: str,
+        verdict: str,
+        reasons: list[str] | None = None,
+        passed_items: list[str] | None = None,
+        failed_criteria: list[str] | None = None,
+        failure_category: str | None = None,
+        failure_locations: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         task = self.get_task(task_id)
         run = self.get_run(run_id)
-        if task["status"] not in {"review", "code_review", "acceptance"} or task.get("active_run_id") != run_id:
-            raise ValueError("Acceptance checks require the active review run")
-        if run["task_id"] != task_id or run["run_type"] not in {"review", "code_review", "acceptance"} or run["status"] != "running":
-            raise ValueError("Acceptance checks require a running review run")
-        context = run.get("context_snapshot") or {}
-        delivery_run_id = str(context.get("delivery_run_id") or run.get("delivery_run_id") or "")
-        if not delivery_run_id or delivery_run_id != task.get("primary_run_id"):
-            raise ValueError("Acceptance checks are not bound to the current delivery")
-        delivery_run = self.get_run(delivery_run_id)
-        execution_workspace = str(
-            delivery_run.get("workspace_path") or task.get("project") or ""
+        batch = self._batch_for_run(run_id)
+        if (
+            task.get("active_run_id") != run_id
+            or task["status"] != "code_review"
+            or run["run_type"] != "code_review"
+            or run["status"] != "running"
+        ):
+            raise ValueError("A running code_review run is required")
+        verdict = str(verdict).lower().strip()
+        if verdict not in {"pass", "fail"}:
+            raise ValueError("verdict must be pass or fail")
+        reasons = [str(x).strip() for x in (reasons or []) if str(x).strip()]
+        def review_result_label(item: Any) -> str:
+            if isinstance(item, dict):
+                return str(
+                    item.get("id")
+                    or item.get("criterion")
+                    or item.get("description")
+                    or ""
+                ).strip()
+            return str(item or "").strip()
+
+        passed_items = [
+            review_result_label(item)
+            for item in (passed_items or [])
+            if review_result_label(item)
+        ]
+        failed_criteria = [
+            review_result_label(item)
+            for item in (failed_criteria or [])
+            if review_result_label(item)
+        ]
+        contract = task.get("review_contract") or {}
+        review_items = (
+            self._batch_review_items(task_id)
+            if batch and int(batch.get("appended_count") or 0) > 0
+            else []
         )
-        plans = [
-            item for item in (context.get("acceptance") or context.get("acceptance_plan") or [])
-            if str(item.get("check_type") or ("automated" if item.get("command") else "static_review")) == "automated"
-        ]
-        workspace = self._workspace_state(execution_workspace)
-        workspace_fingerprint = str(workspace.get("fingerprint") or "") if workspace.get("available") else ""
-        results: list[dict[str, Any]] = []
-        for plan in plans:
-            command = str(plan.get("command") or "").strip()
-            if not command:
-                raise ValueError("Automated acceptance checks require command")
-            criterion = str(plan.get("criterion") or "")
-            cached = None
-            if not force and workspace_fingerprint:
-                with self.db.connection() as connection:
-                    cached = connection.execute(
-                        """SELECT * FROM acceptance_check_runs
-                           WHERE delivery_run_id=? AND criterion=? AND command=?
-                             AND workspace_fingerprint=? AND status='passed'
-                           ORDER BY created_at DESC, id DESC LIMIT 1""",
-                        (delivery_run_id, criterion, command, workspace_fingerprint),
-                    ).fetchone()
-            if cached:
-                cached_item = dict(cached)
-                with self.db.transaction() as connection:
-                    cursor = connection.execute(
-                        """INSERT INTO acceptance_check_runs(
-                               task_id, review_run_id, delivery_run_id, criterion, command,
-                               status, exit_code, output, duration_ms, workspace_fingerprint, cache_hit,
-                               failure_category, repair_attempted, repair_command, repair_status,
-                               repair_output, initial_status, initial_exit_code, initial_output
-                           ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (
-                            task_id, run_id, delivery_run_id, criterion, command,
-                            cached_item["status"], cached_item["exit_code"], cached_item["output"],
-                            workspace_fingerprint,
-                            cached_item.get("failure_category", ""),
-                            0,
-                            cached_item.get("repair_command", ""),
-                            (
-                                "cached_healed"
-                                if cached_item.get("repair_status") in {
-                                    "healed", "cached_healed",
-                                }
-                                else ""
-                            ),
-                            cached_item.get("repair_output", ""),
-                            cached_item.get("initial_status", ""),
-                            cached_item.get("initial_exit_code"),
-                            cached_item.get("initial_output", ""),
-                        ),
-                    )
-                    check_id = cursor.lastrowid
-                    self._event(connection, "run", run_id, "acceptance_check_cache_hit", {
-                        "check_id": check_id, "source_check_id": cached_item["id"],
-                        "criterion": criterion, "workspace_fingerprint": workspace_fingerprint,
-                    })
-                results.append(self.get_acceptance_check(check_id))
-                continue
-            timeout_seconds = max(1, min(int(plan.get("timeout_seconds", 300)), 1800))
-            status, exit_code, output, duration_ms = self._run_project_command(
-                command, execution_workspace, timeout_seconds
-            )
-            initial_status, initial_exit_code, initial_output = status, exit_code, output
-            failure_category = (
-                classify_recoverable_failure(output, command)
-                if status != "passed" else ""
-            )
-            configured_category = str(plan.get("failure_category") or "").strip().lower()
-            if status != "passed" and configured_category in {
-                "project", "environment", "implementation",
-            }:
-                failure_category = configured_category
-            repair_attempted = 0
-            repair_command = ""
-            repair_status = ""
-            repair_output = ""
-            if failure_category == "environment":
-                repair_command = str(plan.get("repair_command") or "").strip()
-                if not repair_command:
-                    repair_command = infer_environment_repair_command(
-                        execution_workspace, output
-                    )
-                with self.db.connection() as connection:
-                    prior_repairs = connection.execute(
-                        """SELECT COUNT(*) value FROM acceptance_check_runs
-                           WHERE delivery_run_id=? AND criterion=? AND command=?
-                             AND repair_attempted=1""",
-                        (delivery_run_id, criterion, command),
-                    ).fetchone()["value"]
-                if repair_command and int(prior_repairs) < SELF_HEAL_ATTEMPT_LIMIT:
-                    repair_attempted = 1
-                    repair_timeout = max(
-                        1,
-                        min(int(plan.get("repair_timeout_seconds", timeout_seconds)), 1800),
-                    )
-                    (
-                        repair_run_status,
-                        repair_exit_code,
-                        repair_output,
-                        repair_duration_ms,
-                    ) = self._run_project_command(
-                        repair_command, execution_workspace, repair_timeout
-                    )
-                    duration_ms += repair_duration_ms
-                    if repair_run_status == "passed":
-                        status, exit_code, output, retry_duration_ms = self._run_project_command(
-                            command, execution_workspace, timeout_seconds
-                        )
-                        duration_ms += retry_duration_ms
-                        repair_status = "healed" if status == "passed" else "retry_failed"
-                    else:
-                        repair_status = "failed"
-                        repair_output = (
-                            f"exit_code={repair_exit_code}\n{repair_output}"
+        if not review_items:
+            for item in contract.get("checks", []) or []:
+                if isinstance(item, dict):
+                    review_items.append(
+                        str(
+                            item.get("id")
+                            or item.get("criterion")
+                            or item.get("description")
+                            or ""
                         ).strip()
-                    refreshed_workspace = self._workspace_state(execution_workspace)
-                    if refreshed_workspace.get("available"):
-                        workspace_fingerprint = str(
-                            refreshed_workspace.get("fingerprint") or ""
-                        )
-            with self.db.transaction() as connection:
-                cursor = connection.execute(
-                    """INSERT INTO acceptance_check_runs(
-                           task_id, review_run_id, delivery_run_id, criterion, command,
-                           status, exit_code, output, duration_ms, workspace_fingerprint, cache_hit,
-                           failure_category, repair_attempted, repair_command, repair_status,
-                           repair_output, initial_status, initial_exit_code, initial_output
-                       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        task_id, run_id, delivery_run_id, criterion, command,
-                        status, exit_code, output[-12000:], duration_ms, workspace_fingerprint,
-                        failure_category, repair_attempted, repair_command, repair_status,
-                        repair_output[-12000:], initial_status, initial_exit_code,
-                        initial_output[-12000:],
-                    ),
+                    )
+                else:
+                    review_items.append(str(item).strip())
+            if not review_items:
+                review_items = [
+                    str(item).strip() for item in (contract.get("rules", []) or [])
+                ]
+            review_items = [item for item in review_items if item]
+        criteria = set(review_items)
+        if len(passed_items) != len(set(passed_items)) or len(failed_criteria) != len(
+            set(failed_criteria)
+        ):
+            raise ValueError("Review result items must not contain duplicates")
+        if set(passed_items) & set(failed_criteria):
+            raise ValueError("Review passed_items and failed_criteria must not overlap")
+        if set(passed_items) | set(failed_criteria) != criteria:
+            raise ValueError(
+                "Review result must exactly cover every confirmed criterion; expected: "
+                + json.dumps(review_items, ensure_ascii=False)
+            )
+        if verdict == "pass":
+            if failed_criteria:
+                raise ValueError("A passing code review cannot contain failed_criteria")
+            if set(passed_items) != criteria:
+                raise ValueError(
+                    "A passing code review must cover every confirmed criterion"
                 )
-                check_id = cursor.lastrowid
-                self._event(connection, "run", run_id, "acceptance_check_completed", {
-                    "check_id": check_id, "criterion": plan.get("criterion"), "status": status,
-                    "exit_code": exit_code, "duration_ms": duration_ms,
-                    "failure_category": failure_category,
-                    "repair_attempted": bool(repair_attempted),
-                    "repair_status": repair_status,
-                })
-            results.append(self.get_acceptance_check(check_id))
-        return {
-            "task_id": task_id,
-            "run_id": run_id,
-            "delivery_run_id": delivery_run_id,
-            "workspace_fingerprint": workspace_fingerprint,
-            "cache_hits": sum(int(item.get("cache_hit") or 0) for item in results),
-            "self_heal_attempts": sum(
-                int(item.get("repair_attempted") or 0) for item in results
-            ),
-            "self_healed": sum(
-                item.get("repair_status") == "healed" for item in results
-            ),
-            "checks": results,
-            "all_required_passed": all(
-                (not bool(plan.get("required", True))) or result["status"] == "passed"
-                for plan, result in zip(plans, results)
-            ),
-        }
-
-    def get_acceptance_check(self, check_id: int) -> dict[str, Any]:
-        with self.db.connection() as connection:
-            row = connection.execute("SELECT * FROM acceptance_check_runs WHERE id=?", (check_id,)).fetchone()
-        if not row:
-            raise KeyError(f"Acceptance check not found: {check_id}")
-        return dict(row)
-
-    def list_acceptance_checks(self, task_id: str, review_run_id: str | None = None) -> list[dict[str, Any]]:
-        with self.db.connection() as connection:
-            if review_run_id:
-                rows = connection.execute(
-                    "SELECT * FROM acceptance_check_runs WHERE task_id=? AND review_run_id=? ORDER BY id",
-                    (task_id, review_run_id),
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    "SELECT * FROM acceptance_check_runs WHERE task_id=? ORDER BY id", (task_id,),
-                ).fetchall()
-        return [dict(row) for row in rows]
-
-    def _assert_required_acceptance_checks_passed(self, run_id: str, acceptance_plan: list[dict[str, Any]]) -> None:
-        required = [
-            item for item in acceptance_plan
-            if bool(item.get("required", True))
-            and str(item.get("check_type") or ("automated" if item.get("command") else "static_review")) == "automated"
-        ]
-        if not required:
-            return
-        with self.db.connection() as connection:
-            rows = connection.execute(
-                "SELECT * FROM acceptance_check_runs WHERE review_run_id=? ORDER BY id DESC", (run_id,),
-            ).fetchall()
-        latest: dict[tuple[str, str], dict[str, Any]] = {}
-        for row in rows:
-            item = dict(row)
-            latest.setdefault((item["criterion"], item["command"]), item)
-        missing = []
-        failed = []
-        for plan in required:
-            key = (str(plan.get("criterion") or ""), str(plan.get("command") or "").strip())
-            result = latest.get(key)
-            if not result:
-                missing.append(key[0])
-            elif result["status"] != "passed":
-                failed.append(f"{key[0]} ({result['status']})")
-        if missing:
-            raise ValueError(f"Required acceptance checks were not run: {', '.join(missing)}")
-        if failed:
-            raise ValueError(f"Required acceptance checks did not pass: {', '.join(failed)}")
+        elif not reasons or not failed_criteria:
+            raise ValueError(
+                "A failed code review requires reasons and failed_criteria"
+            )
+        if verdict == "pass":
+            delivery_run_id = str(run.get("delivery_run_id") or "")
+            try:
+                self._integrate_delivery_artifact(task, delivery_run_id)
+            except Exception as exc:
+                with self.db.transaction() as connection:
+                    connection.execute(
+                        """UPDATE task_runs SET integration_status='failed',
+                           integration_error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                        (str(exc)[:2000], delivery_run_id),
+                    )
+                    self._event(
+                        connection,
+                        "run",
+                        delivery_run_id,
+                        "delivery_integration_failed",
+                        {"task_id": task_id, "error": str(exc)[:2000]},
+                    )
+                raise
+        detected_category = "implementation"
+        self_heal = self._self_heal_plan(task, "implementation", [])
+        if verdict == "fail":
+            detected_category = str(failure_category or "").strip().lower()
+            if detected_category not in {"project", "environment", "implementation"}:
+                detected_category = classify_recoverable_failure(
+                    *reasons, *failed_criteria
+                )
+            if detected_category in {"project", "environment"} and not normalize_self_heal_locations(
+                failure_locations
+            ):
+                raise ValueError(
+                    "Project and environment failures require at least one exact failure_location file"
+                )
+            self_heal = self._self_heal_plan(
+                task,
+                detected_category,
+                reasons,
+                failure_locations,
+            )
+        completed_batch_task_ids: list[str] = []
+        with self.db.transaction() as connection:
+            round_no = connection.execute(
+                "SELECT COALESCE(MAX(round),0)+1 value FROM reviews WHERE task_id=?",
+                (task_id,),
+            ).fetchone()["value"]
+            connection.execute(
+                "INSERT INTO reviews(task_id,round,verdict,reasons,passed_items,failed_criteria) VALUES(?,?,?,?,?,?)",
+                (
+                    task_id,
+                    round_no,
+                    verdict,
+                    json.dumps(reasons, ensure_ascii=False),
+                    json.dumps(passed_items, ensure_ascii=False),
+                    json.dumps(failed_criteria, ensure_ascii=False),
+                ),
+            )
+            connection.execute(
+                "UPDATE task_runs SET status='completed', completed_at=CURRENT_TIMESTAMP WHERE id=?",
+                (run_id,),
+            )
+            connection.execute(
+                """UPDATE task_conversations SET status='completed',
+                   updated_at=CURRENT_TIMESTAMP WHERE run_id=?""",
+                (run_id,),
+            )
+            connection.execute(
+                """UPDATE task_run_conversations SET status='completed',
+                   updated_at=CURRENT_TIMESTAMP WHERE run_id=?""",
+                (run_id,),
+            )
+            connection.execute(
+                "UPDATE task_runs SET status='review_failed', completed_at=CURRENT_TIMESTAMP WHERE id=? AND status='waiting_review'",
+                (run.get("delivery_run_id"),),
+            ) if verdict == "fail" else connection.execute(
+                "UPDATE task_runs SET status='completed', completed_at=CURRENT_TIMESTAMP WHERE id=? AND status='waiting_review'",
+                (run.get("delivery_run_id"),),
+            )
+            next_status = (
+                (
+                    "rework"
+                    if self_heal["category"] == "implementation"
+                    or self_heal["scheduled"]
+                    else "waiting_confirmation"
+                )
+                if verdict == "fail"
+                else "done"
+            )
+            connection.execute(
+                """UPDATE tasks SET status=?, active_run_id=NULL, assigned_to=NULL,
+                   last_review_reasons=?, last_failed_criteria=?,
+                   review_rework_count=review_rework_count+?, implementation_contract=?,
+                   auto_dispatch=? WHERE id=?""",
+                (
+                    next_status,
+                    json.dumps(reasons, ensure_ascii=False),
+                    json.dumps(failed_criteria, ensure_ascii=False),
+                    int(verdict == "fail"),
+                    json.dumps(self_heal["contract"], ensure_ascii=False),
+                    int(next_status != "waiting_confirmation"),
+                    task_id,
+                ),
+            )
+            if verdict == "fail" and self_heal["category"] in {
+                "project", "environment",
+            }:
+                self._persist_self_heal_targets(
+                    connection, task_id, self_heal["locations"]
+                )
+                self._event(
+                    connection,
+                    "task",
+                    task_id,
+                    "self_heal_scheduled" if self_heal["scheduled"] else "self_heal_exhausted",
+                    {
+                        "stage": "code_review",
+                        "failure_category": self_heal["category"],
+                        "attempt": self_heal["attempt"],
+                        "attempt_limit": SELF_HEAL_ATTEMPT_LIMIT,
+                        "locations": self_heal["locations"],
+                    },
+                )
+            if batch:
+                completed_batch_task_ids = self._propagate_batch_review(
+                    connection,
+                    batch,
+                    task_id,
+                    verdict,
+                    reasons,
+                    passed_items,
+                    failed_criteria,
+                )
+            self._event(
+                connection,
+                "task",
+                task_id,
+                "code_reviewed",
+                {
+                    "verdict": verdict,
+                    "reasons": reasons,
+                    "next_stage": next_status,
+                    "failure_category": detected_category if verdict == "fail" else "",
+                    "self_heal_scheduled": bool(
+                        verdict == "fail" and self_heal["scheduled"]
+                    ),
+                },
+            )
+            self._queue_obsidian_sync(connection, "task", task_id)
+        updated = self.get_task(task_id)
+        if updated["status"] == "done":
+            self._create_experience(updated)
+        for completed_task_id in completed_batch_task_ids:
+            self._create_experience(self.get_task(completed_task_id))
+        self.flush_integration_outbox()
+        return updated
 
     def list_reviews(self, task_id: str) -> list[dict[str, Any]]:
         with self.db.connection() as connection:

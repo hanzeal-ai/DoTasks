@@ -2,6 +2,32 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+# Code Review is intentionally independent from task acceptance. These defaults
+# judge only the quality of the delivered code; product/requirement completion
+# remains part of the existing human acceptance process.
+DEFAULT_CODE_REVIEW_CHECKS = (
+    {
+        "id": "code-quality",
+        "description": "检查代码的可读性、可维护性、错误处理、重复和明显缺陷，不判断任务目标是否完成。",
+        "kind": "code",
+    },
+    {
+        "id": "security-vulnerabilities",
+        "description": "检查输入校验、鉴权、数据暴露、注入、敏感信息和资源滥用等安全漏洞。",
+        "kind": "code",
+    },
+    {
+        "id": "cohesion-coupling",
+        "description": "检查职责是否集中、模块边界是否清晰、依赖方向是否合理，避免不必要的耦合和跨层侵入。",
+        "kind": "code",
+    },
+)
+
+
+def default_code_review_checks() -> list[dict[str, str]]:
+    return [dict(check) for check in DEFAULT_CODE_REVIEW_CHECKS]
+
+
 # Canonical task/run vocabulary. Database validation and frontend presentation
 # are derived from these values instead of maintaining separate copies.
 TASK_TRANSITIONS = {

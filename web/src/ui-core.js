@@ -181,7 +181,7 @@ export function selectTaskConversation(task) {
   let status = task.status;
   if (status === "paused") status = task.paused_from_status || status;
   if (status === "blocked") status = task.blocked_from_status || status;
-  const retryRole = ["execution", "rework", "bugfix", "review", "code_review", "acceptance"].includes(task.retry_run_type)
+  const retryRole = ["execution", "rework", "bugfix", "code_review"].includes(task.retry_run_type)
     ? task.retry_run_type
     : "";
   const roles = [retryRole, ...(TASK_CONVERSATION_ROLES[status] || [])].filter(Boolean);

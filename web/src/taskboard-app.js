@@ -303,7 +303,7 @@ async function showTaskDetails(taskId) {
   const conflicts = traceSection("目标冲突", details.task.target_conflicts || [], item => `<article class="trace-item"><div><strong>${escapeHtml(item.task_id)} · ${escapeHtml(item.title)}</strong><span>${escapeHtml(item.status)}</span></div><p>${item.targets.map(target => `${escapeHtml(target.file)}${target.symbol ? `#${escapeHtml(target.symbol)}` : ""}`).join("；")}</p></article>`);
   const projectBlockers = traceSection("项目级阻塞", details.task.project_blockers || [], item => `<article class="trace-item"><div><strong>${escapeHtml(item.task_id)} · ${escapeHtml(item.title)}</strong><span>${escapeHtml(item.blocker_type)}</span></div><p>${escapeHtml(item.last_failure_reason || statusLabels[item.status] || item.status)}</p></article>`);
   const reviews = traceSection("Code Review 记录", details.reviews || [], item => `<article class="trace-item"><div><strong>第 ${item.round} 轮 · ${escapeHtml(item.verdict)}</strong><span>${escapeHtml(item.created_at)}</span></div><p>${escapeHtml((item.reasons || []).join("；") || "Code Review 通过")}</p></article>`);
-  const acceptanceChecks = traceSection("Code Review 自动检查", details.acceptance_checks || [], item => `<article class="trace-item"><div><strong>${escapeHtml(item.criterion)}</strong><span>${escapeHtml(item.status)} · ${item.duration_ms}ms</span></div><code>${escapeHtml(item.command)}</code>${item.output ? `<p>${escapeHtml(item.output)}</p>` : ""}</article>`);
+  const acceptanceChecks = traceSection("历史验收检查", details.acceptance_checks || [], item => `<article class="trace-item"><div><strong>${escapeHtml(item.criterion)}</strong><span>${escapeHtml(item.status)} · ${item.duration_ms}ms</span></div><code>${escapeHtml(item.command)}</code>${item.output ? `<p>${escapeHtml(item.output)}</p>` : ""}</article>`);
   const revisions = traceSection("需求修订", details.revisions || [], item => `<article class="trace-item"><div><strong>v${item.version} · ${escapeHtml(item.after_snapshot?.title || details.task.title)}</strong><span>${escapeHtml(item.created_at)}</span></div><p>${escapeHtml(item.reason || "需求已调整")}</p></article>`);
   const events = traceSection("异常与状态记录", (details.events || []).filter(item => ["execution_failed", "review_interrupted", "review_preparation_failed", "context_build_failed", "lease_expired"].includes(item.event_type) || (item.event_type === "transitioned" && item.payload?.reason)), item => `<article class="trace-item"><div><strong>${escapeHtml(item.event_type)}</strong><span>${escapeHtml(item.created_at)}</span></div><p>${escapeHtml(item.payload?.reason || item.payload?.error || "")}</p></article>`);
   document.querySelector("#task-detail-content").innerHTML = projectBlockers + conflicts + targets + revisions + reviews + acceptanceChecks + events + conversations + runs + relations;
@@ -415,20 +415,6 @@ function renderTokenPanel() {
   document.querySelector("#content").innerHTML = `<section class="token-page"><div class="token-page-content">${viewSwitch}${content}</div></section>`;
 }
 
-function attentionTaskMessage(task) {
-  if (task.last_failure_reason) return task.last_failure_reason;
-  if (attentionAutoDispatchStatuses.has(task.status) && Number(task.auto_dispatch) === 0) {
-    return "自动调度已暂停，需要人工确认后继续当前阶段。";
-  }
-  return ({
-    waiting_confirmation: "任务正在等待用户确认。",
-    failed: "任务执行失败，等待检查或重新执行。",
-    blocked: "任务当前被阻塞，等待解除阻塞条件。",
-    paused: "任务已暂停，等待恢复。",
-    cancelled: "任务已取消。",
-  })[task.status] || "暂无待处理说明。";
-}
-
 function renderCompletedTasks() {
   const tasks = (state.board?.tasks || []).filter(task => task.status === "done");
   document.querySelector("#completed-dialog-count").textContent = String(tasks.length);
@@ -524,7 +510,7 @@ async function handleTaskAction(event) {
     try {
       await api(`/api/dispatcher/${action}`, {method:"POST", body:JSON.stringify({reason:"用户从任务看板暂停"})});
       await load();
-      toast(action === "pause" ? "所有任务与调度已暂停" : "调度已恢复；暂停任务需单独恢复");
+      toast(action === "pause" ? "调度已暂停；现有任务继续运行" : "调度已恢复；等待 Controller 领取任务");
     } catch (error) { toast(error.message); }
     return true;
   }
