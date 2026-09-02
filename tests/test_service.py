@@ -539,6 +539,47 @@ class TaskboardServiceTest(unittest.TestCase):
         self.service.transition_task(task["id"], "ready", auto_dispatch=False)
         self.assertEqual(1, self.service.board()["counts"]["attention"])
 
+    def test_intake_result_requires_immediate_controller_kickoff_when_enabled(self):
+        enabled = self.service.finalize_task_intake({
+            "intake_kind": "requirement",
+            "title": "自动调度需求",
+            "original_content": "创建后立即交给 Controller。",
+            "project": str(self.example_project),
+            "goal": "验证 Intake 到 Controller 的交接契约",
+            "modules": ["planning"],
+            "scope": ["调度交接"],
+            "out_of_scope": [],
+            "acceptance_criteria": ["返回强制 kickoff 指令"],
+        })
+        paused = self.service.finalize_task_intake({
+            "intake_kind": "requirement",
+            "title": "暂停调度需求",
+            "original_content": "仅创建，不自动调度。",
+            "project": str(self.example_project),
+            "goal": "验证关闭自动调度时不要求 kickoff",
+            "modules": ["planning"],
+            "scope": ["调度交接"],
+            "out_of_scope": [],
+            "acceptance_criteria": ["不返回 kickoff 指令"],
+            "auto_dispatch": False,
+        })
+
+        self.assertTrue(enabled["controller_kickoff_required"])
+        self.assertEqual(
+            {
+                "mode": "kickoff",
+                "tool": "claim_schedule_cycle",
+                "arguments": {
+                    "worker_id": "codex-native-controller",
+                    "force": True,
+                    "lease_seconds": 7200,
+                },
+            },
+            enabled["controller_kickoff"],
+        )
+        self.assertFalse(paused["controller_kickoff_required"])
+        self.assertIsNone(paused["controller_kickoff"])
+
     def test_requirement_is_queryable_and_decomposition_is_idempotent(self):
         intake = self.service.finalize_task_intake({
             "intake_kind": "requirement",
@@ -1510,6 +1551,153 @@ class TaskboardServiceTest(unittest.TestCase):
             self.service.claim_next_task("worker-2", str(self.example_project))
         )
 
+    def test_project_exclusive_task_ignores_unrelated_dirty_workspace_file(self):
+        (self.example_project / "migrations").mkdir()
+        migration = self.example_project / "migrations" / "001.sql"
+        migration.write_text("CREATE TABLE example(id INTEGER);\n")
+        notes = self.example_project / "notes.txt"
+        notes.write_text("clean\n")
+        subprocess.run(["git", "init"], cwd=self.example_project, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "dotasks@example.invalid"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "config", "user.name", "DoTasks Test"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "add", "."], cwd=self.example_project, check=True)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=self.example_project, check=True, capture_output=True)
+        notes.write_text("unrelated user change\n")
+        self.service.update_task_settings({
+            "task_token_budget": 60000,
+            "parallel_development_enabled": True,
+            "max_parallel_development": 2,
+            "max_batch_appended_tasks": 0,
+        })
+        task = self.create_located_task({
+            "title": "更新迁移", "project": str(self.example_project),
+            "modules": ["database"], "goal": "更新表结构", "scope": ["migration"],
+            "out_of_scope": [], "acceptance_criteria": ["迁移可执行"],
+        }, [{"file": "migrations/001.sql", "symbols": [], "reason": "schema"}])
+
+        claim = self.service.claim_next_task("worker-1", task["project"])
+
+        self.assertEqual(task["id"], claim["task"]["id"])
+        self.assertEqual("worktree", claim["run"]["execution_environment"])
+
+    def test_project_exclusive_task_reports_dirty_target_file(self):
+        (self.example_project / "migrations").mkdir()
+        migration = self.example_project / "migrations" / "001.sql"
+        migration.write_text("CREATE TABLE example(id INTEGER);\n")
+        subprocess.run(["git", "init"], cwd=self.example_project, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "dotasks@example.invalid"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "config", "user.name", "DoTasks Test"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "add", "."], cwd=self.example_project, check=True)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=self.example_project, check=True, capture_output=True)
+        migration.write_text("CREATE TABLE example(id INTEGER, name TEXT);\n")
+        self.service.update_task_settings({
+            "task_token_budget": 60000,
+            "parallel_development_enabled": True,
+            "max_parallel_development": 2,
+            "max_batch_appended_tasks": 0,
+        })
+        task = self.create_located_task({
+            "title": "更新迁移", "project": str(self.example_project),
+            "modules": ["database"], "goal": "更新表结构", "scope": ["migration"],
+            "out_of_scope": [], "acceptance_criteria": ["迁移可执行"],
+        }, [{"file": "migrations/001.sql", "symbols": [], "reason": "schema"}])
+
+        blockers = self.service.get_task(task["id"])["dispatch_blockers"]
+
+        self.assertEqual(["workspace_target_dirty"], [item["code"] for item in blockers])
+        self.assertEqual(["migrations/001.sql"], blockers[0]["files"])
+        self.assertIsNone(self.service.claim_next_task("worker-1", task["project"]))
+
+    def test_board_preview_does_not_initialize_git_integration_state(self):
+        (self.example_project / "src").mkdir()
+        (self.example_project / "src" / "A.ts").write_text("export const A = 1;\n")
+        subprocess.run(["git", "init"], cwd=self.example_project, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "dotasks@example.invalid"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "config", "user.name", "DoTasks Test"], cwd=self.example_project, check=True)
+        subprocess.run(["git", "add", "."], cwd=self.example_project, check=True)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=self.example_project, check=True, capture_output=True)
+        self.service.update_task_settings({
+            "task_token_budget": 60000,
+            "parallel_development_enabled": True,
+            "max_parallel_development": 2,
+            "max_batch_appended_tasks": 0,
+        })
+        self.create_located_task({
+            "title": "读取看板", "project": str(self.example_project),
+            "modules": ["app"], "goal": "验证只读预览", "scope": ["A"],
+            "out_of_scope": [], "acceptance_criteria": ["看板可读取"],
+        }, [{"file": "src/A.ts", "symbols": ["A"], "reason": "code"}])
+
+        self.service.board()
+
+        refs = subprocess.run(
+            ["git", "for-each-ref", "--format=%(refname)", "refs/heads/codex/dotasks-integration/"],
+            cwd=self.example_project, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        with self.service.db.connection() as connection:
+            integration_count = connection.execute(
+                "SELECT COUNT(*) FROM project_integration_states"
+            ).fetchone()[0]
+        self.assertEqual("", refs)
+        self.assertEqual(0, integration_count)
+
+    def test_project_exclusive_lock_is_scoped_to_same_project(self):
+        for project in (self.example_project, self.other_project):
+            (project / "src").mkdir()
+            (project / "src" / "A.ts").write_text("export const A = 1;\n")
+            (project / "migrations").mkdir()
+            (project / "migrations" / "001.sql").write_text("SELECT 1;\n")
+            subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "dotasks@example.invalid"], cwd=project, check=True)
+            subprocess.run(["git", "config", "user.name", "DoTasks Test"], cwd=project, check=True)
+            subprocess.run(["git", "add", "."], cwd=project, check=True)
+            subprocess.run(["git", "commit", "-m", "base"], cwd=project, check=True, capture_output=True)
+        self.service.update_task_settings({
+            "task_token_budget": 60000,
+            "parallel_development_enabled": True,
+            "max_parallel_development": 2,
+            "max_batch_appended_tasks": 0,
+        })
+        exclusive = self.create_located_task({
+            "title": "更新项目一迁移", "project": str(self.example_project),
+            "modules": ["database"], "goal": "更新迁移", "scope": ["migration"],
+            "out_of_scope": [], "acceptance_criteria": ["迁移可执行"],
+        }, [{"file": "migrations/001.sql", "symbols": [], "reason": "schema"}])
+        other = self.create_located_task({
+            "title": "更新项目二代码", "project": str(self.other_project),
+            "modules": ["app"], "goal": "更新代码", "scope": ["A"],
+            "out_of_scope": [], "acceptance_criteria": ["代码已更新"],
+        }, [{"file": "src/A.ts", "symbols": ["A"], "reason": "code"}])
+        same_project = self.create_located_task({
+            "title": "更新项目一代码", "project": str(self.example_project),
+            "modules": ["app"], "goal": "更新代码", "scope": ["A"],
+            "out_of_scope": [], "acceptance_criteria": ["代码已更新"],
+        }, [{"file": "src/A.ts", "symbols": ["A"], "reason": "code"}])
+
+        first_claim = self.service.claim_next_task("worker-1", exclusive["project"])
+        second_claim = self.service.claim_next_task("worker-2", other["project"])
+
+        self.assertEqual(exclusive["id"], first_claim["task"]["id"])
+        self.assertEqual(other["id"], second_claim["task"]["id"])
+        self.assertIsNone(
+            self.service.claim_next_task("worker-3", same_project["project"])
+        )
+        self.assertIn(
+            "project_exclusive_lock",
+            {
+                item["code"]
+                for item in self.service.get_task(same_project["id"])["dispatch_blockers"]
+            },
+        )
+
+    def test_ready_task_exposes_controller_pending_reason(self):
+        task = self.create_ready_task()
+
+        blockers = self.service.get_task(task["id"])["dispatch_blockers"]
+
+        self.assertEqual(["controller_pending"], [item["code"] for item in blockers])
+        self.assertIn("等待 Controller", blockers[0]["message"])
+
     def test_worktree_delivery_is_reviewed_then_integrated_into_project(self):
         (self.example_project / "src").mkdir()
         source = self.example_project / "src" / "A.ts"
@@ -2260,8 +2448,6 @@ class TaskboardServiceTest(unittest.TestCase):
         claim = self.service.claim_next_task("worker", blocker["project"])
         self.service.bind_conversation(blocker["id"], "execution", "blocked-project-thread", claim["run"]["id"])
         self.service.interrupt_unsubmitted_run(claim["run"]["id"], "crashed")
-        visible = self.service.get_task(waiting["id"])["project_blockers"]
-        self.assertEqual([], visible)
         resumed_queue = self.service.claim_next_task("worker-2", waiting["project"])
         self.assertEqual(blocker["id"], resumed_queue["task"]["id"])
 

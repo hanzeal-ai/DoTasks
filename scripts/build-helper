@@ -53,23 +53,6 @@ if [ -z "$SWIFTC_BIN" ] || [ ! -x "$SWIFTC_BIN" ]; then
   exit 1
 fi
 
-UV_BIN=${DOTASKS_UV_BIN:-}
-if [ -z "$UV_BIN" ]; then
-  for candidate in /opt/homebrew/bin/uv /usr/local/bin/uv "$HOME/.local/bin/uv"; do
-    if [ -x "$candidate" ]; then
-      UV_BIN=$candidate
-      break
-    fi
-  done
-fi
-if [ -z "$UV_BIN" ]; then
-  UV_BIN=$(command -v uv || true)
-fi
-if [ -z "$UV_BIN" ] || [ ! -x "$UV_BIN" ]; then
-  echo "uv not found; it is required to install locked Helper dependencies" >&2
-  exit 1
-fi
-
 "$NPM_BIN" --prefix "$PROJECT_ROOT/web" run build
 
 /bin/rm -rf "$APP_PATH"
@@ -79,8 +62,7 @@ fi
   "$APP_PATH/Contents/Resources/runtime/taskboard" \
   "$APP_PATH/Contents/Resources/runtime/scripts" \
   "$APP_PATH/Contents/Resources/runtime/skills" \
-  "$APP_PATH/Contents/Resources/runtime/static" \
-  "$APP_PATH/Contents/Resources/runtime/vendor"
+  "$APP_PATH/Contents/Resources/runtime/static"
 /bin/cp "$PROJECT_ROOT/macos/HelperInfo.plist" "$APP_PATH/Contents/Info.plist"
 "$SWIFTC_BIN" \
   -parse-as-library \
@@ -90,20 +72,14 @@ fi
 /bin/cp -R "$PROJECT_ROOT"/core/* "$APP_PATH/Contents/Resources/runtime/core/"
 /bin/cp -R "$PROJECT_ROOT"/taskboard/* "$APP_PATH/Contents/Resources/runtime/taskboard/"
 /bin/cp "$PROJECT_ROOT/scripts/start" "$APP_PATH/Contents/Resources/runtime/scripts/start"
+/bin/cp "$PROJECT_ROOT/scripts/start-agent" "$APP_PATH/Contents/Resources/runtime/scripts/start-agent"
 /bin/cp "$PROJECT_ROOT/scripts/mcp-server" "$APP_PATH/Contents/Resources/runtime/scripts/mcp-server"
 /bin/cp -R "$PROJECT_ROOT"/skills/* "$APP_PATH/Contents/Resources/runtime/skills/"
 /bin/cp -R "$PROJECT_ROOT"/static/* "$APP_PATH/Contents/Resources/runtime/static/"
-"$UV_BIN" pip install \
-  --target "$APP_PATH/Contents/Resources/runtime/vendor" \
-  --require-hashes \
-  --python-version 3.9.25 \
-  --python-platform macos \
-  --only-binary :all: \
-  --no-deps \
-  -r "$PROJECT_ROOT/requirements.lock"
 /bin/chmod 755 \
   "$APP_PATH/Contents/MacOS/DoTasksHelper" \
   "$APP_PATH/Contents/Resources/runtime/scripts/start" \
+  "$APP_PATH/Contents/Resources/runtime/scripts/start-agent" \
   "$APP_PATH/Contents/Resources/runtime/scripts/mcp-server"
 /usr/bin/find "$APP_PATH" -type d -name __pycache__ -prune -exec /bin/rm -rf {} +
 /usr/bin/codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" "$APP_PATH" >/dev/null

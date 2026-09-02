@@ -1,8 +1,14 @@
 #!/bin/sh
 set -eu
+
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_DIR=$(dirname "$SCRIPT_DIR")
 cd "$PROJECT_DIR"
+
+: "${DOTASKS_PUBLIC_URL:?DOTASKS_PUBLIC_URL is required}"
+: "${DOTASKS_HTTP_USER:?DOTASKS_HTTP_USER is required}"
+: "${DOTASKS_HTTP_PASSWORD:?DOTASKS_HTTP_PASSWORD is required}"
+: "${DOTASKS_AGENT_TOKEN:?DOTASKS_AGENT_TOKEN is required}"
 
 PYTHON_BIN=${DOTASKS_PYTHON_BIN:-}
 if [ -z "$PYTHON_BIN" ] && [ -x /opt/homebrew/bin/python3 ]; then
@@ -20,4 +26,4 @@ if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,
   exit 1
 fi
 
-exec "$PYTHON_BIN" -B -m taskboard.server "$@"
+exec "$PYTHON_BIN" -B -m taskboard.cloud.server "$@"

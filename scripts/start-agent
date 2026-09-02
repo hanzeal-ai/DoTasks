@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_DIR=$(dirname "$SCRIPT_DIR")
 cd "$PROJECT_DIR"
@@ -20,4 +21,4 @@ if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,
   exit 1
 fi
 
-exec "$PYTHON_BIN" -B -m taskboard.server "$@"
+exec "$PYTHON_BIN" -B -m taskboard.agent "$@"

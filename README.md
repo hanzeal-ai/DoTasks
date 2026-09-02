@@ -41,7 +41,7 @@ Codex Skill 充当编排器，本地服务作为任务系统记录：
 5. 执行会话实现并用 `submit_task_delivery` 提交真实改动清单及逐条验收证据；
 6. 代码类任务由独立验证会话完成 Code Review：服务端先执行确定性检查，Review Agent 只根据目标、约束和真实 Git Diff 判断正确性、安全、权限边界、回归与无关修改；不通过则恢复原开发会话返工，通过后直接完成；
 7. 文档、调研、文案、规划和无运行时影响的元数据任务不创建 Code Review 会话；开发交付的逐条证据全部通过后直接完成；
-8. 完成任务通过页面右上角“完成任务”入口查看；执行失败、待确认、阻塞、暂停，以及自动 Code Review 熔断后的任务显示在看板末列“待处理”，等待人工重试、确认、解除阻塞或恢复调度。
+8. 完成任务通过页面右上角“完成任务”入口查看；执行失败、待确认、阻塞、暂停，以及自动 Code Review 熔断后的任务显示在看板末列“待处理”，等待人工重试、确认、解除阻塞或恢复调度。仍处于 `ready`/`rework` 的任务会直接显示依赖任务、冲突文件、项目排他、容量、重试退避或 Controller 等待原因。
 
 交付时，上报位置必须命中任务建立阶段保存的目标锁，并覆盖领取后产生的真实 Git 工作区差异。执行或返工会话异常结束但没有提交交付时，服务最多自动恢复两次并优先续接原开发会话；仍未成功则关闭自动调度并进入“待处理”。Code Review 会话中断则保留在待审查并按独立熔断上限重试。看板的暂停按钮只持久关闭新的调度领取，不中断活动运行，也不改变任何任务状态；恢复调度会先消费 Review/返工等已有唤醒并在并发未满时补齐开发任务，已有的单任务暂停仍需逐个恢复。
 
@@ -52,6 +52,7 @@ Codex Skill 充当编排器，本地服务作为任务系统记录：
 ```text
 core/       任务创建、调度、工作流与生命周期等核心业务
 taskboard/  HTTP、MCP 与本地集成适配层
+taskboard/cloud/  云端安全入口、持久消息中继与 Obsidian 图谱镜像
 web/        React + Vite 前端源码
 static/     Vite 生成的生产静态资源
 macos/      隐藏 Helper 的 Swift 源码与 Info.plist
@@ -92,7 +93,7 @@ npm --prefix web run build
 
 新建运行数据库默认关闭调度。需要执行队列时，先在看板中点击“恢复调度”。恢复操作及之后每个任务/Run 状态流转都会写入 `scheduler_state` 持久化唤醒；显式 DoTasks intake 会立即执行一次 Controller kickoff。Controller 只调度，不直接修改代码，工作任务通过 `$dotasks-lifecycle` 完成当前阶段并将结果回调 MCP。
 
-Intake Agent 在创建任务后立即调用 Codex App 原生 `create_thread`，以完整派发 Prompt 作为新任务的首条消息；每个成功创建的任务都会显示在 Codex App 左侧任务栏并独立执行。生命周期 Agent 在成功提交拆解、交付、阻塞或 Code Review 结果后执行一次 handoff，通过全局租约消费调度代次：先恢复 Review，再按返工优先顺序填满 `development` 槽位，并在绑定导致新状态变化时继续消费有限轮次。每个派发都有独立 `dispatch_attempt_id`，过期回调不能绑定到新的派发尝试。只有续接已记录的开发、返工或 Review 任务时才调用 `send_message_to_thread`。设置页可开启并行开发并配置 1–8 个开发槽位（默认关闭、默认并发数 2）；安全并行只用于目标文件互不重叠、无显式依赖且没有项目级排他目标的任务，每个任务从固定的 DoTasks 集成分支 Revision 创建独立 Codex Worktree。同文件任务、迁移/Schema、依赖清单和锁文件保持串行；原工作区的未托管改动只阻塞目标文件与其重叠的任务，不影响其他任务并行。Review 通过后先串行提交到集成分支，再在不覆盖用户改动的前提下同步回原工作区；冲突时只延迟同步。任务领取时保持 `claimed`，只有真实 `threadId` 成功绑定后才进入 `implementing`。MCP 是客户端拉取协议，因此没有活跃 Agent turn 时，本地服务只能持久记录唤醒，不能自行调用 Codex App；下一次显式 DoTasks、手动 Controller，或用户明确授权的唯一全局 Controller heartbeat 会恢复遗留工作。禁止为单个任务创建定时器。
+Intake Agent 在创建任务后立即调用 Codex App 原生 `create_thread`，以完整派发 Prompt 作为新任务的首条消息；每个成功创建的任务都会显示在 Codex App 左侧任务栏并独立执行。生命周期 Agent 在成功提交拆解、交付、阻塞或 Code Review 结果后执行一次 handoff，通过全局租约消费调度代次：先恢复 Review，再按返工优先顺序填满 `development` 槽位，并在绑定导致新状态变化时继续消费有限轮次。每个派发都有独立 `dispatch_attempt_id`，过期回调不能绑定到新的派发尝试。只有续接已记录的开发、返工或 Review 任务时才调用 `send_message_to_thread`。设置页可开启并行开发并配置 1–8 个开发槽位（默认关闭、默认并发数 2）；安全并行只用于目标文件互不重叠、无显式依赖且没有项目级排他目标的任务，每个任务从固定的 DoTasks 集成分支 Revision 创建独立 Codex Worktree。同文件任务、迁移/Schema、依赖清单和锁文件保持串行；原工作区的未托管改动只阻塞目标文件与其重叠的任务，不影响其他任务并行。Review 通过后先串行提交到集成分支，再在不覆盖用户改动的前提下同步回原工作区；冲突时只延迟同步。任务领取时保持 `claimed`，只有真实 `threadId` 成功绑定后才进入 `implementing`。`scheduler_state.pending` 只负责持久化防丢，不是轮询器；自动调度只由 Intake kickoff 和每次 Lifecycle 状态变更后的 handoff 触发。异常退出留下的 pending 由下一次显式 DoTasks 或手动 Controller 恢复，不创建定时任务。
 
 指定端口：
 
@@ -101,6 +102,43 @@ Intake Agent 在创建任务后立即调用 Codex App 原生 `create_thread`，�
 ```
 
 HTTP 服务只允许绑定 `localhost` 或回环 IP。API 会校验 `Host` 与浏览器 `Origin`；带请求体的写操作只接受不超过 1 MiB 的 JSON 对象。DoTasks 不提供未经认证的局域网监听模式，如需跨设备访问，应在具备认证和 TLS 的受控代理后单独设计部署边界。
+
+### 云端部署与本地 Agent
+
+云端模式沿用同一套页面和 `/api` 交互。云端 Relay 保存持久命令队列、Agent 在线状态和
+Obsidian Markdown 镜像；本地 Agent 只建立出站连接，并把命令转发给现有的本地服务。
+任务数据库、Git/Worktree、MCP 和 Codex Controller 仍在本机，因此本地原子调度及现有
+Codex 原生任务交互不会被复制或改写。云端不可用时，`./scripts/start` 的纯本地模式仍可
+独立运行。
+
+服务器安装 Docker 后，在仓库目录执行：
+
+```bash
+cp .env.example .env
+# 编辑 .env，至少设置公开访问地址、独立的网页登录密码和 Agent Token
+docker compose up -d --build
+```
+
+临时使用 IP 时，将 `DOTASKS_PUBLIC_URL` 设置为
+`http://<服务器公网IP>:8765`，并将 `DOTASKS_BIND_ADDRESS` 设置为 `0.0.0.0`。安全组只放行
+自己的出口 IP；正式长期使用时应恢复仅本机监听，并通过 HTTPS 反向代理暴露域名。网页
+使用 `DOTASKS_HTTP_USER` 和 `DOTASKS_HTTP_PASSWORD` 登录，Agent 使用另一套
+`DOTASKS_AGENT_TOKEN`，两者不能复用。
+
+在运行 DoTasks 的 Mac 上执行一次配置：
+
+```bash
+./scripts/start-agent configure \
+  --cloud-url http://<服务器公网IP>:8765 \
+  --agent-id default \
+  --agent-token '<与云端 .env 完全一致的 Agent Token>'
+```
+
+源码运行时另开终端执行 `./scripts/start-agent`。通过 `./scripts/build-helper --install`
+安装的 Helper 会同时保活本地服务和 Agent；未配置云端时 Agent 静默等待，不影响本地模式。
+Agent 配置保存在 `~/Library/Application Support/DoTasks/cloud-agent.json`，文件权限为
+`0600`。云端持久数据位于 Compose 的 `dotasks-data` 卷，图谱镜像位于卷内
+`obsidian-vault/<agent-id>/DoTasks/`。
 
 ## Obsidian
 
@@ -198,11 +236,9 @@ development -> code_review -> done
 
 ### Python runtime and dependency contract
 
-开发与 Code Review 验证统一使用 `.python-version` 锁定的 Python 3.9.25；项目兼容下限由
-`pyproject.toml` 声明。Python 3.9/3.10 通过 `requirements.lock` 中精确锁定且带
-官方纯 Python wheel SHA-256 的 tomli 2.4.1 提供 `tomllib` 兼容层。Helper 构建会
-把同一锁文件安装到 `runtime/vendor`，启动脚本只在该目录存在时加入
-`PYTHONPATH`，不会改变项目路径校验规则。
+开发、Code Review、Helper 和云端镜像统一使用 `.python-version` 与
+`pyproject.toml` 声明的 Python 3.14 运行时。项目目前没有第三方 Python 运行依赖，
+因此不携带旧版本标准库兼容层或独立 `vendor` 目录。
 
 唯一受支持的 Python 测试入口是：
 
@@ -210,9 +246,9 @@ development -> code_review -> done
 ./scripts/test
 ```
 
-升级 Python 或依赖时，必须同时更新 `.python-version`、`pyproject.toml`、
-`requirements.lock` 及 `tests/test_dependency_contract.py` 中的版本和官方 wheel
-哈希，然后通过 `./scripts/test` 与 `./scripts/build-helper` 验证。其他独立校验：
+升级 Python 时，必须同时更新 `.python-version`、`pyproject.toml`、Docker 基础镜像
+及 `tests/test_dependency_contract.py`，然后通过 `./scripts/test` 与
+`./scripts/build-helper` 验证。其他独立校验：
 
 ```bash
 uv run --with pyyaml /Users/sanmws/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/dotasks

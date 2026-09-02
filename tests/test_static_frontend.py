@@ -43,6 +43,15 @@ const module = await import(`data:text/javascript;charset=utf-8,${{encodeURIComp
         self.assertNotIn("项目 / 聊天", html)
         self.assertNotIn("loadProjects();", app.split("async function load(", 1)[1].split("function scheduleBoardRefresh", 1)[0])
 
+    def test_dispatch_waiting_reason_is_visible_on_cards_and_details(self):
+        app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")
+
+        self.assertIn("dispatch_blockers", app)
+        self.assertIn("等待调度", app)
+        self.assertIn("调度等待原因", app)
+        self.assertNotIn("project_blockers", app)
+        self.assertNotIn("项目级阻塞", app)
+
     def test_request_guard_rejects_stale_scopes(self):
         completed = self.run_module_script("""
 const guard = new module.LatestRequest();

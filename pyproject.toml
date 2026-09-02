@@ -1,11 +1,11 @@
 [project]
 name = "dotasks"
 version = "0.4.0"
-requires-python = ">=3.9"
-dependencies = [
-    "tomli==2.4.1; python_version < '3.11'",
-]
+requires-python = ">=3.14"
+dependencies = []
 
 [project.scripts]
 dotasks = "taskboard.server:main"
 dotasks-mcp = "taskboard.mcp_server:main"
+dotasks-cloud = "taskboard.cloud.server:main"
+dotasks-agent = "taskboard.agent:main"

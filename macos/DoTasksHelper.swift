@@ -6,7 +6,9 @@ private final class DoTasksHelperDelegate: NSObject, NSApplicationDelegate {
     private let dataHome: URL
     private let runtimeHome: URL
     private var serverProcess: Process?
+    private var agentProcess: Process?
     private var serverGeneration = 0
+    private var agentGeneration = 0
     private var terminating = false
 
     override init() {
@@ -31,6 +33,7 @@ private final class DoTasksHelperDelegate: NSObject, NSApplicationDelegate {
             return
         }
         startServer()
+        startAgent()
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -40,9 +43,14 @@ private final class DoTasksHelperDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         terminating = true
         serverGeneration += 1
+        agentGeneration += 1
         serverProcess?.terminationHandler = nil
+        agentProcess?.terminationHandler = nil
         if serverProcess?.isRunning == true {
             serverProcess?.terminate()
+        }
+        if agentProcess?.isRunning == true {
+            agentProcess?.terminate()
         }
     }
 
@@ -98,6 +106,53 @@ private final class DoTasksHelperDelegate: NSObject, NSApplicationDelegate {
             serverProcess = process
         } catch {
             presentFatal("无法启动 DoTasks 服务：\(error.localizedDescription)")
+        }
+    }
+
+    private func startAgent() {
+        guard agentProcess?.isRunning != true else { return }
+        let startScript = runtimeHome.appendingPathComponent("scripts/start-agent")
+        guard fileManager.isExecutableFile(atPath: startScript.path) else {
+            presentFatal("DoTasks 运行时不完整：\(startScript.path)")
+            return
+        }
+        do {
+            let logHome = dataHome.appendingPathComponent("logs", isDirectory: true)
+            try fileManager.createDirectory(at: logHome, withIntermediateDirectories: true)
+            let stdout = try appendHandle(logHome.appendingPathComponent("agent.out.log"))
+            let stderr = try appendHandle(logHome.appendingPathComponent("agent.err.log"))
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            process.arguments = [startScript.path, "--wait-for-config"]
+            process.currentDirectoryURL = runtimeHome
+            var environment = ProcessInfo.processInfo.environment
+            environment["DOTASKS_HOME"] = dataHome.path
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
+            let toolDirectories = [
+                "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin",
+                "/usr/sbin", "/sbin",
+            ]
+            environment["PATH"] = (toolDirectories + [environment["PATH"] ?? ""])
+                .filter { !$0.isEmpty }
+                .joined(separator: ":")
+            process.environment = environment
+            process.standardOutput = stdout
+            process.standardError = stderr
+            agentGeneration += 1
+            let generation = agentGeneration
+            process.terminationHandler = { [weak self] _ in
+                DispatchQueue.main.async {
+                    guard let self, !self.terminating, self.agentGeneration == generation else { return }
+                    self.agentProcess = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        self.startAgent()
+                    }
+                }
+            }
+            try process.run()
+            agentProcess = process
+        } catch {
+            presentFatal("无法启动 DoTasks 云端连接：\(error.localizedDescription)")
         }
     }
 

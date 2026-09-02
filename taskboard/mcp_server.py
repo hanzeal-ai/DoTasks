@@ -264,7 +264,7 @@ TOOLS = [
     },
     {
         "name": "finalize_task_intake",
-        "description": "Persist intake_kind=requirement as a planning entity, or create a ready direct task for intake_kind=task.",
+        "description": "Persist intake_kind=requirement as a planning entity, or create a ready direct task for intake_kind=task. A successful auto-dispatched result returns controller_kickoff_required=true and a mandatory controller_kickoff next action.",
         "inputSchema": {
             "type": "object",
             "properties": {

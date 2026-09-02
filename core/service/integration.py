@@ -138,7 +138,11 @@ class TaskIntegrationMixin:
         }
 
     def _project_execution_policy(
-        self, project: str, connection: Any | None = None,
+        self,
+        project: str,
+        connection: Any | None = None,
+        *,
+        initialize_integration: bool = True,
     ) -> dict[str, Any]:
         """Return capacity and an immutable Git baseline independent of checkout dirt."""
         state = self._workspace_state(project)
@@ -158,14 +162,34 @@ class TaskIntegrationMixin:
                 "baseline": state,
                 "unmanaged_files": [],
             }
-        integration = self._ensure_project_integration_state(project, state, connection)
+        if initialize_integration:
+            integration = self._ensure_project_integration_state(
+                project, state, connection
+            )
+        else:
+            if connection is None:
+                raise ValueError("Read-only execution policy requires a connection")
+            row = connection.execute(
+                "SELECT * FROM project_integration_states WHERE project=?", (project,)
+            ).fetchone()
+            integration = dict(row) if row else {"managed_workspace_files": {}}
+            if row:
+                try:
+                    managed_files = json.loads(
+                        str(integration.get("managed_workspace_files") or "{}")
+                    )
+                except (TypeError, json.JSONDecodeError):
+                    managed_files = {}
+                integration["managed_workspace_files"] = (
+                    managed_files if isinstance(managed_files, dict) else {}
+                )
         unmanaged = self._unmanaged_workspace_files(state, integration)
         baseline = {
             "available": True,
             "project": project,
-            "revision": integration["revision"],
-            "integration_ref": integration["integration_ref"],
-            "integration_branch": integration["integration_branch"],
+            "revision": str(integration.get("revision") or state.get("revision") or ""),
+            "integration_ref": str(integration.get("integration_ref") or ""),
+            "integration_branch": str(integration.get("integration_branch") or ""),
             "files": {},
             "fingerprint": "",
         }
@@ -177,20 +201,18 @@ class TaskIntegrationMixin:
             "unmanaged_files": sorted(unmanaged),
         }
 
-    def _task_has_unmanaged_workspace_conflict(
+    def _task_unmanaged_workspace_conflicts(
         self, task: dict[str, Any], policy: dict[str, Any]
-    ) -> bool:
+    ) -> list[str]:
         unmanaged = set(policy.get("unmanaged_files") or [])
         if not unmanaged:
-            return False
-        if self._task_requires_project_exclusive_lock(task):
-            return True
+            return []
         targets = {
             self._normalize_target_file(target.get("file"))
             for target in (task.get("implementation_contract") or {}).get("targets") or []
             if isinstance(target, dict) and str(target.get("file") or "").strip()
         }
-        return bool(targets & unmanaged)
+        return sorted(targets & unmanaged)
 
     def _validate_execution_workspace(
         self, project: str, workspace_path: str, *, require_worktree: bool,

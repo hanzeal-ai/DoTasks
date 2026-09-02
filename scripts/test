@@ -45,6 +45,5 @@ if [ "$#" -eq 0 ]; then
 fi
 exec "$UV_BIN" run \
   --no-project \
-  --python 3.9.25 \
-  --with-requirements "$PROJECT_ROOT/requirements.lock" \
+  --python 3.14 \
   python -m unittest "$@"

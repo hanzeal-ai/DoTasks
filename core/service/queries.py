@@ -90,10 +90,23 @@ class TaskQueryMixin:
                 item["run_ids"] = [item["run_id"]]
                 conversations.setdefault(item["task_id"], []).append(item)
         with self.db.connection() as connection:
+            scheduler_row = connection.execute(
+                "SELECT * FROM scheduler_state WHERE id=1"
+            ).fetchone()
+            scheduler_state = dict(scheduler_row) if scheduler_row else {}
+            dispatcher_enabled = self.dispatcher_enabled()
+            policy_cache: dict[str, dict[str, Any]] = {}
             for task in tasks:
                 task["token_by_stage"] = metrics.get(task["id"], {})
                 task["target_conflicts"] = self._target_conflicts(connection, task["id"])
-                task["project_blockers"] = self._project_blockers(connection, task["id"])
+                task["dispatch_blockers"] = self._development_dispatch_blockers(
+                    connection,
+                    task,
+                    policy_cache=policy_cache,
+                    include_controller_state=True,
+                    scheduler_state=scheduler_state,
+                    dispatcher_enabled=dispatcher_enabled,
+                )
                 task["conversation_openable"] = task.get("active_run_status") not in ACTIVE_RUN_STATUSES
                 task["execution_batch"] = self.execution_batch(task["id"])
                 task["conversations"] = [
@@ -114,7 +127,16 @@ class TaskQueryMixin:
         task = decode_row(row)
         with self.db.connection() as connection:
             task["target_conflicts"] = self._target_conflicts(connection, task_id)
-            task["project_blockers"] = self._project_blockers(connection, task_id)
+            scheduler_row = connection.execute(
+                "SELECT * FROM scheduler_state WHERE id=1"
+            ).fetchone()
+            task["dispatch_blockers"] = self._development_dispatch_blockers(
+                connection,
+                task,
+                include_controller_state=True,
+                scheduler_state=dict(scheduler_row) if scheduler_row else {},
+                dispatcher_enabled=self.dispatcher_enabled(),
+            )
             active = connection.execute(
                 "SELECT status FROM task_runs WHERE id=? AND task_id=?",
                 (task.get("active_run_id"), task_id),

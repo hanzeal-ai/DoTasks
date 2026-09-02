@@ -12,6 +12,11 @@ description: Manually invoke DoTasks to clarify, create, relate, and inspect tra
 - Do not infer activation from the current repository, task-like wording, or general requests such as “清空任务”, “增加需求”, “实现这个功能”, or “开始验收”. Ask which task system the user means when the target is ambiguous.
 - Do not use this manual skill in DoTasks-generated execution, rework, or review conversations. Those prompts must explicitly invoke `$dotasks-lifecycle`.
 - After activation, use the DoTasks MCP tools as the task system of record for that task only.
+- A successful `finalize_task_intake` for `auto_dispatch=true` with
+  `controller_kickoff_required=true` is
+  not the end of the turn. Treat its returned `controller_kickoff` as the next
+  mandatory action before writing the user-facing response, even if earlier
+  discovery or creation output was truncated.
 
 ## Fast new-task intake
 
@@ -80,7 +85,11 @@ The resulting routes are: code task → code-quality Review → done; non-code t
 4. Execute the bounded plan through the selected route. Use one graph query only; if it does not locate the requirement, switch immediately to one bounded direct match. For direct matching, search only the likely source/config/test roots and narrow from textual matches to definitions and consumers. Keep source evidence, relationships or direct references, related tests, exact files and stable symbols.
 5. Map every acceptance criterion to a target file/symbol and concrete method, command or UI check. Build `targets` as `{file, mode, symbols, tasks}` objects; never use compact `file::symbol` strings. Omit `review_checks` to use the default quality/security/cohesion contract. Only add an explicit `{id, description, kind}` Review check when the user requests another code-quality concern; never derive one from the task goal or acceptance plan. Each target task requires an action; its symbol is optional only for `create` and `config`. Decide `quality_gates.code_review` using the code/non-code rule above and give a task-specific reason. Keep each fact in one field only.
 6. For a direct task, call `finalize_task_intake` once with `intake_kind=task`, the prepared analysis ID, confirmed task metadata, selected CodeGraph/GitNexus/`source_match` evidence, targets, review checks, quality gate and acceptance plan. At finalization the service performs one project-scoped history lookup using the exact files, symbols and actions, classifies scheduling relations and creates the task. If it returns `requires_confirmation`, resolve only that strong active relation choice and retry the same bundle with explicit `dependency_analysis`. A ready task still requires location evidence, dependency, target-lock, implementation, review-check and acceptance-plan contracts even when Code Review is skipped.
-7. Pass `source_thread_id` to creation when available, then report the requirement or task ID and its `ready` state. When the created entity has `auto_dispatch=true`, immediately continue with **Automatic dispatch kickoff** below. When `auto_dispatch=false`, stop after reporting the queued state.
+7. Pass `source_thread_id` to creation when available. Follow the returned
+   `controller_kickoff_required` field rather than reconstructing the decision
+   from earlier context: when true, immediately continue with **Automatic
+   dispatch kickoff** below and only report the created ID after that handoff;
+   when false, stop after reporting the queued state.
 
 ### Automatic dispatch kickoff
 
@@ -90,7 +99,7 @@ An explicit Taskboard intake that creates an auto-dispatched `ready` entity also
 2. Call `claim_schedule_cycle` with `worker_id=codex-native-controller`, `force=true`, and a 7200-second lease. Process `code_review.dispatches` before `development.dispatches`; the service consumes the durable wakeup and fills configured slots while preserving dependency, target-lock and Worktree gates. Returned work may include earlier eligible tasks rather than only the entity just created.
 3. For every new dispatch, call `create_thread` with the persisted title and full lifecycle prompt as its initial message so the task appears in the Codex App sidebar and starts directly. Use `send_message_to_thread` only to resume a recorded native task. Resolve asynchronous creation and bind each real `threadId` before reporting that execution started, then stop without monitoring the spawned workers; each lifecycle worker owns the next event-driven handoff after its stage callback.
 4. After every returned dispatch is bound, durably pending, or failed, call `complete_schedule_cycle`. If dispatching is disabled or no work is currently claimable, leave the entity in `ready` and report it as queued. Never claim that execution started without a persisted real thread binding.
-5. If native task creation tools are unavailable in the current host, leave the durable scheduler wakeup pending and state that a later explicit DoTasks, manual Controller, or the single user-authorized global Controller heartbeat must perform the handoff. Never create per-task automations.
+5. If native task creation tools are unavailable in the current host, leave the durable scheduler wakeup pending and state that a later explicit DoTasks or manual Controller must perform the handoff. Never create a scheduled automation.
 
 For workflow v2, scheduling metadata is a DoTasks-only object. Use `depends_tasks` for every direct prerequisite, `conflicts_tasks` for overlapping active work without an artifact dependency, `history_tasks` for the ordered same-project lineage and `history_edges` to preserve branches. Use `continues_from_task_id` only when the development thread should resume. `depends_tasks` must all be done before dispatch; history never blocks scheduling. None of these fields enter development or Code Review model context.
 

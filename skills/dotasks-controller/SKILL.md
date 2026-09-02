@@ -1,6 +1,6 @@
 ---
 name: dotasks-controller
-description: Consume durable DoTasks scheduler wakeups from the native Codex app after intake, lifecycle callbacks, manual recovery, or the single global Controller heartbeat.
+description: Consume durable DoTasks scheduler wakeups from the native Codex app after intake, lifecycle callbacks, or explicit manual recovery.
 ---
 
 # DoTasks Native Controller
@@ -10,15 +10,14 @@ description: Consume durable DoTasks scheduler wakeups from the native Codex app
 - `kickoff`: use only when an explicitly invoked `$dotasks` intake has just created an entity with `auto_dispatch=true`. Fill every configured `development` slot once and create or resume every returned native worker.
 - `handoff`: use only after an explicitly invoked `$dotasks-lifecycle` worker successfully completes requirement decomposition, delivery, or Code Review. Sweep every stage lane once, start newly eligible native workers, then stop.
 - `manual`: use when the user explicitly invokes `$dotasks-controller`. Recover pending native creation, inspect previously bound workers once, sweep every stage lane once, then stop.
-- `heartbeat`: use only from the single user-authorized global DoTasks Controller heartbeat. It consumes `scheduler_state.pending`; never create one heartbeat per task.
-- Never activate from an ordinary development request or a merely visible `ready` task. A heartbeat with no durable scheduler wakeup exits immediately.
+- Never activate from an ordinary development request or a merely visible `ready` task.
 - This skill schedules native Codex App tasks; it never implements or reviews the dispatched work itself.
 - Use native Codex App task tools to create, resume, and inspect workers. Do not use Codex CLI execution, UI injection, or private database writes.
 - Use the stable MCP base worker ID `codex-native-controller`. Pass an explicit `stage`; the service expands the development lane into the configured parallel slots and keeps Code Review as one lane.
 
 ## One event-driven sweep
 
-1. Call `claim_schedule_cycle` with `worker_id=codex-native-controller` and a 7200-second lease. Use `force=true` for `kickoff`, `handoff`, and `manual`; use `force=false` for `heartbeat`.
+1. Call `claim_schedule_cycle` with `worker_id=codex-native-controller`, `force=true`, and a 7200-second lease for `kickoff`, `handoff`, and `manual`.
 2. Process the returned `code_review.dispatches` first, then `development.dispatches`. The service atomically applies the Review lane, development capacity, Rework priority, dependency, conflict, target-lock, and Worktree gates.
 3. A dispatch may be persisted `bound` or `pending_thread`, newly `claimed`, or absent. Treat `dispatch_title`, `dispatch_prompt`, `project_path`, `execution_environment`, `base_revision`, `base_ref`, `run_id`, `status`, `resume_thread_id`, `client_thread_id`, and `thread_id` as authoritative.
 4. Resolve `pending_thread` in **Resolve asynchronous creation**. Start or resume every newly `claimed` dispatch through **Resume or create the native worker**. In `manual` mode only, add a dispatch that was already `bound` when claimed to the recovery snapshot; never add a worker newly bound by this sweep.
@@ -42,7 +41,7 @@ description: Consume durable DoTasks scheduler wakeups from the native Codex app
 2. Use `list_threads` to locate the most recent native task whose title exactly matches `dispatch_title` and whose project matches `project_path`. Prefer a candidate not already bound to another dispatch; titles are intentionally human-readable and may repeat across retries. Bind only when its real thread ID and host are available.
 3. If setup is still in progress, use bounded waits and repeat the exact-title lookup while the current Agent turn remains active. Do not create a duplicate.
 4. If preparation definitively fails, call `report_dispatch_failed` with the concrete setup error.
-5. If the current turn must end before setup resolves, preserve `pending_thread` and report its run ID and title. The next explicit DoTasks intake, lifecycle handoff, manual Controller invocation, or user-authorized global heartbeat recovers it; never schedule a per-task timer as a fallback.
+5. If the current turn must end before setup resolves, preserve `pending_thread` and report its run ID and title. The next explicit DoTasks intake, lifecycle handoff, or manual Controller invocation recovers it; never schedule a timer as a fallback.
 
 ## Recover pre-existing bound native workers
 
@@ -60,4 +59,4 @@ description: Consume durable DoTasks scheduler wakeups from the native Codex app
 - Development/rework/bugfix retry prefers the canonical development thread. Code Review retry prefers its prior independent review thread.
 - Do not mark development, Code Review, or decomposition complete. Only the lifecycle worker's MCP callback advances those stages.
 - A native task's completed turn is not evidence that the lifecycle callback succeeded. Always re-read the persisted dispatch before deciding whether recovery is required.
-- Do not create per-task automations, Codex CLI workers, UI automation, or private Codex database writes. At most one explicitly user-authorized global Controller heartbeat may consume durable scheduler wakeups.
+- Do not create scheduled automations, Codex CLI workers, UI automation, or private Codex database writes. Normal scheduling is always driven by the current Intake or Lifecycle Agent turn.

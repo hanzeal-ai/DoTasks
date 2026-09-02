@@ -191,6 +191,5 @@ class TaskboardHTTPServerTest(unittest.TestCase):
         self.assertEqual("native_codex_controller", payload["dispatcher"]["execution_mode"])
         self.assertIsNone(payload["dispatcher"]["running"])
 
-
 if __name__ == "__main__":
     unittest.main()

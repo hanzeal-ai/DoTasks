@@ -879,54 +879,6 @@ class TaskPlanningMixin:
         finally:
             connection.close()
 
-    @staticmethod
-    def _project_blockers(connection: Any, task_id: str) -> list[dict[str, Any]]:
-        rows = connection.execute(
-            """WITH blockers AS (
-                 SELECT other.id AS task_id, 'active_project_run' AS blocker_type
-                   FROM tasks current JOIN tasks other
-                     ON other.project=current.project AND other.id != current.id
-                  WHERE current.id=? AND EXISTS(
-                    SELECT 1 FROM task_runs active
-                     WHERE active.task_id=other.id
-                       AND active.status IN ('awaiting_thread','running')
-                  )
-                 UNION
-                 SELECT dependency.id AS task_id, 'dependency_not_done' AS blocker_type
-                   FROM task_relations relation
-                   JOIN tasks dependency ON dependency.id=CASE
-                     WHEN relation.relation_type IN ('depends_on','continues_from')
-                       THEN relation.target_task_id
-                     ELSE relation.source_task_id END
-                  WHERE (((relation.relation_type IN ('depends_on','continues_from'))
-                            AND relation.source_task_id=?)
-                      OR (relation.relation_type='blocks' AND relation.target_task_id=?))
-                    AND dependency.status!='done'
-                 UNION
-                 SELECT other.id AS task_id, 'relation_conflict' AS blocker_type
-                   FROM task_relations relation
-                   JOIN tasks other ON other.id=CASE
-                     WHEN relation.source_task_id=? THEN relation.target_task_id
-                     ELSE relation.source_task_id END
-                  WHERE relation.relation_type='conflicts_with'
-                    AND (relation.source_task_id=? OR relation.target_task_id=?)
-                    AND other.status IN (
-                      'claimed','investigating','implementing','waiting_confirmation',
-                      'code_review','failed','blocked'
-                    )
-               )
-               SELECT other.id AS task_id, other.title, other.status,
-                      other.paused_from_status, other.retry_required,
-                      other.last_failure_reason, blockers.blocker_type,
-                      EXISTS(SELECT 1 FROM task_runs active
-                             WHERE active.task_id=other.id
-                               AND active.status IN ('awaiting_thread','running')) AS active_run
-                 FROM blockers JOIN tasks other ON other.id=blockers.task_id
-                ORDER BY other.updated_at, other.id""",
-            (task_id, task_id, task_id, task_id, task_id, task_id),
-        ).fetchall()
-        return [dict(row) for row in rows]
-
     def report_location_status(
         self,
         project: str,
@@ -1174,6 +1126,25 @@ class TaskPlanningMixin:
             ),
         }
 
+    @staticmethod
+    def _controller_kickoff_contract(auto_dispatch: bool) -> dict[str, Any]:
+        return {
+            "auto_dispatch": bool(auto_dispatch),
+            "controller_kickoff_required": bool(auto_dispatch),
+            "controller_kickoff": (
+                {
+                    "mode": "kickoff",
+                    "tool": "claim_schedule_cycle",
+                    "arguments": {
+                        "worker_id": "codex-native-controller",
+                        "force": True,
+                        "lease_seconds": 7200,
+                    },
+                }
+                if auto_dispatch else None
+            ),
+        }
+
     def finalize_task_intake(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Persist a requirement or create a ready independently executable task."""
         intake_kind = str(payload.get("intake_kind") or "").strip().lower()
@@ -1235,6 +1206,9 @@ class TaskPlanningMixin:
                 "status": "created", "intake_kind": "requirement",
                 "requirement_id": requirement_id,
                 "requirement_status": "ready",
+                **self._controller_kickoff_contract(
+                    bool(payload.get("auto_dispatch", True))
+                ),
             }
         analysis_id = str(payload.get("analysis_id") or "").strip()
         if not analysis_id:
@@ -1376,6 +1350,7 @@ class TaskPlanningMixin:
         return {
             "status": "created", "intake_kind": "task", "analysis_id": analysis_id,
             "task_id": task["id"], "task_status": task["status"],
+            **self._controller_kickoff_contract(bool(task.get("auto_dispatch"))),
         }
 
     def complete_location_analysis(

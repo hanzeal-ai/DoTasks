@@ -66,10 +66,11 @@ class MacosHelperTest(unittest.TestCase):
             self.assertTrue((app / "Contents" / "MacOS" / "DoTasksHelper").is_file())
             runtime = app / "Contents" / "Resources" / "runtime"
             self.assertTrue((runtime / "scripts" / "start").is_file())
+            self.assertTrue((runtime / "scripts" / "start-agent").is_file())
             self.assertFalse((runtime / "taskboard" / "helper.py").exists())
             self.assertTrue((runtime / "taskboard" / "project_guard.py").is_file())
             self.assertTrue((runtime / "core" / "service" / "__init__.py").is_file())
-            self.assertTrue((runtime / "vendor" / "tomli" / "__init__.py").is_file())
+            self.assertFalse((runtime / "vendor").exists())
             self.assertTrue((runtime / "static" / "index.html").is_file())
             self.assertTrue(any((runtime / "static" / "assets").glob("*.js")))
             self.assertEqual([], list(runtime.rglob("__pycache__")))
@@ -112,12 +113,17 @@ class MacosHelperTest(unittest.TestCase):
             self.assertIn("runtime", (details.stdout + details.stderr).casefold())
 
     def test_runtime_scripts_prefer_homebrew_python(self) -> None:
-        for name, module in (("mcp-server", "taskboard.mcp_server"), ("start", "taskboard.server")):
+        for name, module in (
+            ("mcp-server", "taskboard.mcp_server"),
+            ("start", "taskboard.server"),
+            ("start-agent", "taskboard.agent"),
+            ("start-cloud", "taskboard.cloud.server"),
+        ):
             script = (ROOT / "scripts" / name).read_text()
             self.assertIn("DOTASKS_PYTHON_BIN", script)
             self.assertIn("/opt/homebrew/bin/python3", script)
-            self.assertIn("Python 3.9 or newer", script)
-            self.assertIn('VENDOR_DIR="$PROJECT_DIR/vendor"', script)
+            self.assertIn("Python 3.14 or newer", script)
+            self.assertNotIn('VENDOR_DIR="$PROJECT_DIR/vendor"', script)
             self.assertIn(f'exec "$PYTHON_BIN" -B -m {module}', script)
 
     def test_mcp_server_supports_one_shot_lifecycle_tool_fallback(self) -> None:
@@ -197,6 +203,8 @@ class MacosHelperTest(unittest.TestCase):
         source = (ROOT / "macos" / "DoTasksHelper.swift").read_text()
         self.assertIn("applicationDidFinishLaunching", source)
         self.assertIn("startServer()", source)
+        self.assertIn("startAgent()", source)
+        self.assertIn('"--wait-for-config"', source)
         for obsolete in (
             "NSOpenPanel", "authorized-projects.json", "BookmarkStore",
             "requestAuthorization", "restoreBookmarks", "persistAuthorization",
