@@ -572,14 +572,28 @@ async function handleTaskAction(event) {
       const path = String(project.path || "").trim();
       if (path && !projects.has(path)) projects.set(path, String(project.name || projectLabel(path)));
     });
-    document.querySelector("#known-project-paths").innerHTML = [...projects]
-      .map(([path, name]) => `<option value="${escapeHtml(path)}" label="${escapeHtml(name)}"></option>`)
-      .join("");
-    document.querySelector(
+    const dialog = document.querySelector(
       event.target.closest("#new-task-button")
         ? "#new-task-dialog"
         : "#new-requirement-dialog"
-    ).showModal();
+    );
+    const select = dialog.querySelector("[data-project-select]");
+    const emptyLabel = event.target.closest("#new-task-button")
+      ? "无项目（创建到 Codex 最近）"
+      : "无项目（仅保存需求）";
+    select.innerHTML = [
+      `<option value="">${emptyLabel}</option>`,
+      ...[...projects].map(([path, name]) =>
+        `<option value="${escapeHtml(path)}">${escapeHtml(name)} · ${escapeHtml(path)}</option>`
+      ),
+      '<option value="__manual__">手动输入绝对路径…</option>',
+    ].join("");
+    select.value = "";
+    const manual = dialog.querySelector("[data-manual-project]");
+    manual.hidden = true;
+    manual.required = false;
+    manual.value = "";
+    dialog.showModal();
     return true;
   }
   if (event.target.matches("[data-close]")) {
@@ -723,13 +737,31 @@ document.addEventListener("click", async event => {
   }
 });
 
+document.addEventListener("change", event => {
+  const select = event.target.closest("[data-project-select]");
+  if (!select) return;
+  const manual = select.closest("form").querySelector("[data-manual-project]");
+  const enabled = select.value === "__manual__";
+  manual.hidden = !enabled;
+  manual.required = enabled;
+  if (!enabled) manual.value = "";
+  else manual.focus();
+});
+
+function selectedProjectPath(values) {
+  const selected = String(values.get("project") || "").trim();
+  return selected === "__manual__"
+    ? String(values.get("manual_project") || "").trim()
+    : selected;
+}
+
 document.addEventListener("submit", async event => {
   if (event.target.id === "new-task-form") {
     event.preventDefault();
     const form = event.target;
     const button = form.querySelector('button[type="submit"]');
     const values = new FormData(form);
-    const project = String(values.get("project") || "").trim();
+    const project = selectedProjectPath(values);
     button.disabled = true;
     try {
       const result = await api("/api/task-intakes/enqueue", {
@@ -743,13 +775,13 @@ document.addEventListener("submit", async event => {
           modules: [],
           scope: [],
           out_of_scope: [],
-          auto_dispatch: Boolean(project) && values.get("auto_dispatch") === "on",
+          auto_dispatch: values.get("auto_dispatch") === "on",
         }),
       });
       form.reset();
       document.querySelector("#new-task-dialog").close();
       await load();
-      toast(`${result.task_id} 已加入任务队列${project ? "，正在等待定位" : "；未选择项目，保持草稿"}`);
+      toast(`${result.task_id} 已加入任务队列${project ? "，正在等待定位" : "，将创建无项目 Codex 会话"}`);
     } catch (error) {
       toast(error.message);
     } finally {
@@ -762,7 +794,7 @@ document.addEventListener("submit", async event => {
     const form = event.target;
     const button = form.querySelector('button[type="submit"]');
     const values = new FormData(form);
-    const project = String(values.get("project") || "").trim();
+    const project = selectedProjectPath(values);
     button.disabled = true;
     try {
       const result = await api("/api/task-intakes/finalize", {

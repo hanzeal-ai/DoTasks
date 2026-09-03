@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,10 +35,120 @@ LIFECYCLE_TOOLS = {
     "review_code",
 }
 
+THREAD_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
 
 def _default_codex_home() -> Path:
     configured = os.environ.get("CODEX_HOME")
     return Path(configured).expanduser().resolve() if configured else Path.home() / ".codex"
+
+
+def _latest_session_index_record(index: Path, thread_id: str) -> dict[str, Any] | None:
+    if not index.is_file():
+        return None
+    latest: dict[str, Any] | None = None
+    try:
+        with index.open("r", encoding="utf-8") as source:
+            for line in source:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict) and str(record.get("id") or "") == thread_id:
+                    latest = record
+    except OSError as exc:
+        raise AppServerError(f"Cannot read Codex session index: {index}: {exc}") from exc
+    return latest
+
+
+def sync_worker_thread_to_shared_home(
+    worker_codex_home: str | Path,
+    shared_codex_home: str | Path,
+    thread_id: str,
+    thread_name: str = "",
+) -> Path:
+    """Copy one completed worker session into the desktop Codex session store."""
+    normalized_id = str(thread_id or "").strip()
+    if not THREAD_ID_PATTERN.fullmatch(normalized_id):
+        raise AppServerError("Cannot sync an invalid Codex thread id")
+
+    worker = Path(worker_codex_home).expanduser().resolve()
+    shared = Path(shared_codex_home).expanduser().resolve()
+    candidates = [
+        candidate
+        for root_name in ("sessions", "archived_sessions")
+        for candidate in (worker / root_name).glob(
+            f"**/rollout-*-{normalized_id}.jsonl"
+        )
+        if candidate.is_file()
+    ]
+    if not candidates:
+        raise AppServerError(f"Worker session file not found for thread {normalized_id}")
+    source = max(candidates, key=lambda candidate: candidate.stat().st_mtime_ns)
+    relative = source.relative_to(worker)
+    destination = shared / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    same_file = False
+    if destination.exists():
+        try:
+            same_file = source.samefile(destination)
+        except OSError:
+            same_file = False
+    if not same_file:
+        temporary = destination.with_name(
+            f".{destination.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        try:
+            shutil.copy2(source, temporary)
+            os.replace(temporary, destination)
+        except OSError as exc:
+            raise AppServerError(
+                f"Cannot sync Codex worker session {normalized_id}: {exc}"
+            ) from exc
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+    worker_record = _latest_session_index_record(
+        worker / "session_index.jsonl", normalized_id
+    ) or {}
+    resolved_name = str(thread_name or worker_record.get("thread_name") or "").strip()
+    shared_index = shared / "session_index.jsonl"
+    current_record = _latest_session_index_record(shared_index, normalized_id)
+    current_name = str((current_record or {}).get("thread_name") or "").strip()
+    if current_record is None or (resolved_name and current_name != resolved_name):
+        shared.mkdir(parents=True, exist_ok=True)
+        record = dict(worker_record)
+        record.update(
+            {
+                "id": normalized_id,
+                "thread_name": resolved_name or f"DoTasks {normalized_id}",
+                "updated_at": str(
+                    worker_record.get("updated_at")
+                    or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                ),
+            }
+        )
+        encoded = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        )
+        try:
+            descriptor = os.open(
+                shared_index, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
+            )
+            try:
+                os.write(descriptor, encoded)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError as exc:
+            raise AppServerError(
+                f"Cannot update shared Codex session index: {shared_index}: {exc}"
+            ) from exc
+    return destination
 
 
 def prepare_worker_codex_home(
@@ -134,6 +245,8 @@ class CodexAppServerClient:
         )
         self.data_home = Path(data_home).expanduser().resolve()
         self.runtime_home = Path(runtime_home).expanduser().resolve()
+        self.shared_codex_home = _default_codex_home()
+        self.worker_codex_home: Path | None = None
         self.timeout = timeout
         self.process: subprocess.Popen[str] | None = None
         self.last_error = ""
@@ -142,6 +255,7 @@ class CodexAppServerClient:
         self._pending_lock = threading.Lock()
         self._write_lock = threading.Lock()
         self._notifications: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._threads_to_sync: dict[str, str] = {}
 
     @property
     def connected(self) -> bool:
@@ -153,8 +267,12 @@ class CodexAppServerClient:
         if not Path(self.executable).is_file() and not shutil.which(self.executable):
             raise AppServerError(f"Codex executable not found: {self.executable}")
         worker_home = prepare_worker_codex_home(
-            self.data_home, self.runtime_home, sys.executable
+            self.data_home,
+            self.runtime_home,
+            sys.executable,
+            shared_codex_home=self.shared_codex_home,
         )
+        self.worker_codex_home = worker_home
         environment = os.environ.copy()
         environment["CODEX_HOME"] = str(worker_home)
         environment["DOTASKS_HOME"] = str(self.data_home)
@@ -212,6 +330,7 @@ class CodexAppServerClient:
             except subprocess.TimeoutExpired:
                 process.kill()
         self._fail_pending("Codex App Server stopped")
+        self._sync_completed_threads()
 
     def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if not self.connected:
@@ -282,6 +401,7 @@ class CodexAppServerClient:
         if not thread_id:
             raise AppServerError("thread/start did not return a thread id")
         self.request("thread/name/set", {"threadId": thread_id, "name": title})
+        self._threads_to_sync[thread_id] = title
         return thread_id
 
     def resume_thread(self, thread_id: str) -> str:
@@ -289,7 +409,23 @@ class CodexAppServerClient:
         resumed_id = str((result.get("thread") or {}).get("id") or "")
         if not resumed_id:
             raise AppServerError("thread/resume did not return a thread id")
+        self._threads_to_sync.setdefault(resumed_id, "")
         return resumed_id
+
+    def _sync_completed_threads(self) -> None:
+        worker_home = self.worker_codex_home
+        if worker_home is None or worker_home == self.shared_codex_home:
+            return
+        for thread_id, thread_name in self._threads_to_sync.items():
+            try:
+                sync_worker_thread_to_shared_home(
+                    worker_home,
+                    self.shared_codex_home,
+                    thread_id,
+                    thread_name,
+                )
+            except AppServerError as exc:
+                print(f"[dotasks-agent] session visibility sync failed: {exc}", file=sys.stderr)
 
     def start_turn(self, thread_id: str, prompt: str) -> str:
         result = self.request(

@@ -1183,10 +1183,76 @@ class TaskPlanningMixin:
             raise ValueError("type must be feature or bug")
         raw_project = str(payload.get("project") or "").strip()
         project = self._require_project_directory(raw_project) if raw_project else None
-        auto_dispatch = bool(payload.get("auto_dispatch", True)) and bool(project)
+        auto_dispatch = bool(payload.get("auto_dispatch", True))
         modules = self._string_list(payload, "modules")
         scope = self._string_list(payload, "scope") or [goal]
         out_of_scope = self._string_list(payload, "out_of_scope")
+        if project is None:
+            acceptance_criteria = [goal]
+            acceptance_plan = [
+                {
+                    "criterion": goal,
+                    "method": "Codex response",
+                    "expected": goal,
+                    "required": True,
+                    "check_type": "static_review",
+                }
+            ]
+            dependency_analysis = self._normalize_dependency_analysis(
+                {"decision": "independent"}
+            )
+            review_contract = {
+                "checks": [],
+                "quality_gates": {
+                    "code_review": {
+                        "required": False,
+                        "reason": "Projectless tasks do not modify a repository",
+                    },
+                },
+            }
+            with self.db.transaction() as connection:
+                task_id = self.db.next_id(
+                    connection, "BUG" if task_type == "bug" else "TASK"
+                )
+                connection.execute(
+                    """INSERT INTO tasks(
+                           id, title, type, project, modules, status, priority,
+                           goal, scope, out_of_scope, acceptance_criteria,
+                           location_context, acceptance_plan, dependency_analysis,
+                           implementation_contract, review_contract, auto_dispatch
+                       ) VALUES(?, ?, ?, NULL, ?, 'ready', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        task_id, title, task_type,
+                        json.dumps(modules, ensure_ascii=False), priority, goal,
+                        json.dumps(scope, ensure_ascii=False),
+                        json.dumps(out_of_scope, ensure_ascii=False),
+                        json.dumps(acceptance_criteria, ensure_ascii=False),
+                        json.dumps(
+                            {"mode": "projectless", "targets": []},
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(acceptance_plan, ensure_ascii=False),
+                        json.dumps(dependency_analysis, ensure_ascii=False),
+                        json.dumps({"targets": []}, ensure_ascii=False),
+                        json.dumps(review_contract, ensure_ascii=False),
+                        int(auto_dispatch),
+                    ),
+                )
+                self._event(
+                    connection, "task", task_id, "intake_queued",
+                    {"projectless": True, "auto_dispatch": auto_dispatch},
+                )
+            return {
+                "status": "queued",
+                "intake_kind": "task",
+                "task_id": task_id,
+                "task_status": "ready",
+                "requirement_id": None,
+                "projectless": True,
+                **self._controller_kickoff_contract(auto_dispatch),
+            }
+
+        auto_dispatch = auto_dispatch and bool(project)
         with self.db.transaction() as connection:
             requirement_id = self.db.next_id(connection, "REQ")
             task_id = self.db.next_id(
@@ -1586,7 +1652,11 @@ class TaskPlanningMixin:
             missing.append("goal")
         if not list_values.get("acceptance_criteria"):
             missing.append("acceptance_criteria")
-        if not str(payload.get("project") or "").strip():
+        projectless = (
+            not str(payload.get("project") or "").strip()
+            and (payload.get("location_context") or {}).get("mode") == "projectless"
+        )
+        if not projectless and not str(payload.get("project") or "").strip():
             missing.append("project")
         if missing:
             raise ValueError(f"Task is not ready; missing: {', '.join(missing)}")

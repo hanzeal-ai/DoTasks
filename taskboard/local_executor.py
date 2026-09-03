@@ -213,8 +213,18 @@ class LocalCodexExecutor:
         )
 
     def _execution_path(self, dispatch: dict[str, Any]) -> str:
+        execution_environment = str(
+            dispatch.get("execution_environment") or "local"
+        )
+        if execution_environment == "projectless":
+            entity_id = str(dispatch.get("entity_id") or "task").strip()
+            if not entity_id or any(part in entity_id for part in ("/", "\\", "..")):
+                raise AppServerError("Projectless dispatch has an invalid entity id")
+            workspace = self.data_home / "projectless-workspaces" / entity_id
+            workspace.mkdir(parents=True, exist_ok=True)
+            return str(workspace)
         project = Path(str(dispatch["project_path"])).expanduser().resolve()
-        if str(dispatch.get("execution_environment") or "local") != "worktree":
+        if execution_environment != "worktree":
             return str(project)
         base_ref = str(dispatch.get("base_ref") or "").strip()
         base_revision = str(dispatch.get("base_revision") or "").strip()

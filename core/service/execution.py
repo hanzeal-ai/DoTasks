@@ -527,7 +527,8 @@ class TaskLifecycleMixin:
         rows = connection.execute(
             """SELECT DISTINCT task.* FROM tasks task
                JOIN task_runs run ON run.task_id=task.id
-               WHERE task.project=? AND run.status IN ('awaiting_thread','running')""",
+               WHERE COALESCE(task.project, '')=?
+                 AND run.status IN ('awaiting_thread','running')""",
             (project,),
         ).fetchall()
         return [decode_row(row) for row in rows]
@@ -535,7 +536,7 @@ class TaskLifecycleMixin:
     @staticmethod
     def _locking_project_tasks(connection: Any, project: str) -> list[dict[str, Any]]:
         rows = connection.execute(
-            """SELECT * FROM tasks WHERE project=?
+            """SELECT * FROM tasks WHERE COALESCE(project, '')=?
                AND status IN ('claimed','investigating','implementing','waiting_confirmation',
                               'code_review','rework','failed','blocked')""",
             (project,),
@@ -1354,6 +1355,23 @@ class TaskLifecycleMixin:
         run_type: str,
         context: dict[str, Any],
     ) -> str:
+        if str(context.get("execution_environment") or "") == "projectless":
+            task_brief = cls._task_prompt_brief(
+                task, "请完成以下无项目任务：", context.get("tasks") or []
+            )
+            return (
+                f"{task_brief}\n\n---\n\n"
+                "$dotasks-lifecycle\n\n"
+                "这是无项目 Codex 任务。不要进行代码定位，不要修改或创建文件；"
+                "直接完成任务目标并在当前会话中给出结果。\n\n"
+                "运行信息：\n"
+                f"- 任务 ID：{task['id']}\n"
+                f"- 运行 ID：{run_id}\n"
+                f"- 类型：{run_type}\n\n"
+                "完成后调用 submit_task_delivery：changed_locations 必须传空数组，"
+                "并提供任务目标对应的验收证据。无法继续时调用 report_run_blocked。\n\n"
+                f"RUN_CONTEXT_JSON={prompt_context(context)}"
+            )
         retry_note = ""
         if run_type == "rework":
             review_reasons = task.get("last_review_reasons") or (

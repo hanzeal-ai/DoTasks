@@ -5,7 +5,7 @@
 ## 当前能力
 
 - 手动触发的最小边界确认闸门：显式要求使用 DoTasks 处理会话、PRD、变更或缺陷时，只对影响最小实现的必要边界一次性提问；回答足够后进入任务队列；
-- 建立任务时使用已定位的文件、符号和修改动作执行一次项目级 Obsidian 历史检索，并按 CodeGraph、GitNexus、直接源码匹配的顺序定位目标；每条验收标准必须映射到具体目标与检查方式；
+- 建立项目任务时使用已定位的文件、符号和修改动作执行一次项目级 Obsidian 历史检索，并按 CodeGraph、GitNexus、直接源码匹配的顺序定位目标；每条验收标准必须映射到具体目标与检查方式；不选择项目的新任务直接创建为可调度的无项目 Codex 会话；
 - 任务状态机：待就绪、任务队列、调查、实现、验收、返工、待确认、暂停、完成、阻塞；
 - 原子状态更新，避免多个执行器重复领取；
 - Local Agent 事件驱动地调用 Codex CLI/App Server 创建、恢复和等待独立工作线程；不依赖 Codex Desktop 活跃窗口，也不创建周期性调度任务；
@@ -37,7 +37,7 @@ Codex Skill 充当编排器，本地服务作为任务系统记录：
 1. Skill 先确认需求边界，判断应修订现有任务、创建单个新任务，还是拆成多个可独立交付和验收的任务；
 2. 每个任务通过 `prepare_task_location` 建立一次受限定位计划，按 CodeGraph、GitNexus、直接源码匹配选择首个可用方式，并保存精确的 `{file, mode, symbols, tasks}` 执行目标和验收方式；
 3. `finalize_task_intake` 是唯一任务创建入口：接收一次性定位分析包，由服务端根据精确文件/符号/动作查询项目历史图谱，形成 `depends_tasks`、`conflicts_tasks`、`history_tasks` 和 `history_edges` 后原子创建任务；
-4. 显式 DoTasks intake 创建 `auto_dispatch=true` 的 ready 实体后会写入持久化调度唤醒；云端命令触发 WSS 通知，本地 Agent 按 Review 优先、返工优先和开发并发容量创建或恢复 Codex CLI/App Server 工作线程；
+4. 显式 DoTasks intake 创建 `auto_dispatch=true` 的 ready 实体后会写入持久化调度唤醒；云端命令触发 WSS 通知，本地 Agent 按 Review 优先、返工优先和开发并发容量创建或恢复 Codex CLI/App Server 工作线程；页面“新增任务”未选择项目时跳过代码定位，在 Agent 管理的临时工作区创建无项目会话，并在会话落盘后同步到 Codex App“最近”；
 5. 执行会话实现并用 `submit_task_delivery` 提交真实改动清单及逐条验收证据；
 6. 代码类任务由独立验证会话完成 Code Review：服务端先执行确定性检查，Review Agent 只根据目标、约束和真实 Git Diff 判断正确性、安全、权限边界、回归与无关修改；不通过则恢复原开发会话返工，通过后直接完成；
 7. 文档、调研、文案、规划和无运行时影响的元数据任务不创建 Code Review 会话；开发交付的逐条证据全部通过后直接完成；
@@ -216,7 +216,7 @@ npm --prefix web run build
 
 新建运行数据库默认关闭调度。需要执行队列时，在看板中点击“恢复调度”；HTTP 层会同时开启调度并写入持久化 Agent 信号。恢复操作及之后每个任务/Run 状态流转都会写入 `scheduler_state`。云端通过 WSS 通知常驻 Local Agent，Agent 只在收到真实事件或已有工作线程结束时领取需求拆解、开发、返工和 Code Review；没有周期性 heartbeat，也不会在空队列上消耗模型 Token。工作线程通过 `$dotasks-lifecycle` 完成当前阶段并将结果回调 MCP。
 
-Local Agent 通过 `codex app-server` 的 `thread/start`、`thread/resume` 和 `turn/start` 创建或续接工作线程；拿到真实 `threadId` 后才调用 `bind_native_dispatch`，因此任务领取状态不会领先于真实执行会话。生命周期回调产生的新唤醒在当前工作线程结束后立即由 Agent 消费；线程异常退出且没有提交回调时，Agent 回写派发失败并交给现有重试/熔断策略。设置页可开启并行开发并配置 1–8 个开发槽位（默认关闭、默认并发数 2）；Worktree 模式仍从固定 `base_ref` 创建隔离工作区。每个派发保留独立 `dispatch_attempt_id`，过期回调不能绑定到新的派发尝试。
+Local Agent 通过 `codex app-server` 的 `thread/start`、`thread/resume` 和 `turn/start` 创建或续接工作线程；拿到真实 `threadId` 后才调用 `bind_native_dispatch`，因此任务领取状态不会领先于真实执行会话。Worker 继续使用只暴露生命周期 MCP 的隔离 `CODEX_HOME`；进程停止并完成会话落盘后，Agent 会将对应会话文件原子同步到主 `CODEX_HOME` 并合并会话索引，使看板中的 `codex://threads/...` 链接可由 Codex 桌面端读取，同时避免两个 App Server 并发写同一会话。生命周期回调产生的新唤醒在当前工作线程结束后立即由 Agent 消费；线程异常退出且没有提交回调时，Agent 回写派发失败并交给现有重试/熔断策略。设置页可开启并行开发并配置 1–8 个开发槽位（默认关闭、默认并发数 2）；Worktree 模式仍从固定 `base_ref` 创建隔离工作区。每个派发保留独立 `dispatch_attempt_id`，过期回调不能绑定到新的派发尝试。
 
 指定端口：
 

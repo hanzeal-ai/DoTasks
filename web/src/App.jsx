@@ -210,12 +210,20 @@ export default function App() {
           </label>
           <label>
             Mac Codex 项目（可选）
-            <input
+            <select
               name="project"
-              list="known-project-paths"
-              placeholder="不选择即无项目，也可输入绝对路径"
+              data-project-select
+              defaultValue=""
+            >
+              <option value="">无项目（仅保存需求）</option>
+              <option value="__manual__">手动输入绝对路径…</option>
+            </select>
+            <input
+              name="manual_project"
+              data-manual-project
+              placeholder="输入 Mac 上的绝对路径"
+              hidden
             />
-            <datalist id="known-project-paths"></datalist>
           </label>
           <label>
             需求目标
@@ -265,10 +273,19 @@ export default function App() {
           </label>
           <label>
             Mac Codex 项目（可选）
-            <input
+            <select
               name="project"
-              list="known-project-paths"
-              placeholder="不选择即无项目，也可输入绝对路径"
+              data-project-select
+              defaultValue=""
+            >
+              <option value="">无项目（创建到 Codex 最近）</option>
+              <option value="__manual__">手动输入绝对路径…</option>
+            </select>
+            <input
+              name="manual_project"
+              data-manual-project
+              placeholder="输入 Mac 上的绝对路径"
+              hidden
             />
           </label>
           <label>

@@ -195,6 +195,24 @@ class LocalCodexExecutorTest(unittest.TestCase):
             ).stdout.strip(),
         )
 
+    def test_projectless_dispatch_uses_managed_non_project_workspace(self):
+        service = FakeService(None)
+        executor = self.build_executor(service, close_lifecycle=True)
+
+        workspace = executor._execution_path(
+            make_dispatch(
+                entity_id="TASK-0042",
+                project_path="",
+                execution_environment="projectless",
+            )
+        )
+
+        self.assertEqual(
+            executor.data_home / "projectless-workspaces" / "TASK-0042",
+            Path(workspace),
+        )
+        self.assertTrue(Path(workspace).is_dir())
+
 
 if __name__ == "__main__":
     unittest.main()

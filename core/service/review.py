@@ -185,8 +185,16 @@ class TaskReviewMixin:
             raise ValueError("token_used must be non-negative")
         if not delivery_summary.strip() or not verification_result.strip():
             raise ValueError("delivery_summary and verification_result are required")
-        if not isinstance(changed_locations, list) or not changed_locations:
+        projectless = (
+            not str(task.get("project") or "").strip()
+            and str(run.get("execution_environment") or "") == "projectless"
+        )
+        if not isinstance(changed_locations, list):
             raise ValueError("changed_locations is required")
+        if not projectless and not changed_locations:
+            raise ValueError("changed_locations is required")
+        if projectless and changed_locations:
+            raise ValueError("Projectless deliveries cannot report changed locations")
         for location in changed_locations:
             if not location.get("file"):
                 raise ValueError("Every changed location requires a file")
@@ -196,7 +204,10 @@ class TaskReviewMixin:
                 raise ValueError("Changed location symbols must be an array of strings")
             location["symbols"] = [symbol.strip() for symbol in symbols if symbol.strip()]
             location.setdefault("summary", "")
-        self._validate_changed_locations(task["id"], changed_locations, batch_task_ids)
+        if not projectless:
+            self._validate_changed_locations(
+                task["id"], changed_locations, batch_task_ids
+            )
         execution_environment = str(run.get("execution_environment") or "local")
         execution_workspace = str(workspace_path or task.get("project") or "")
         if execution_environment == "worktree":
@@ -209,11 +220,21 @@ class TaskReviewMixin:
                 str(task.get("project") or ""), execution_workspace,
                 require_worktree=False,
             )
-        workspace_state = self._workspace_state(execution_workspace)
-        self._validate_workspace_delta(
-            task, run, changed_locations, workspace_state, batch_task_ids,
-            execution_workspace,
+        workspace_state = (
+            {
+                "available": False,
+                "reason": "projectless_task",
+                "project": "",
+                "files": {},
+            }
+            if projectless
+            else self._workspace_state(execution_workspace)
         )
+        if not projectless:
+            self._validate_workspace_delta(
+                task, run, changed_locations, workspace_state, batch_task_ids,
+                execution_workspace,
+            )
         if not isinstance(acceptance_evidence, list) or not acceptance_evidence or any(not isinstance(item, dict) for item in acceptance_evidence):
             raise ValueError("acceptance_evidence is required")
         criteria = set(

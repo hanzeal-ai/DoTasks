@@ -32,6 +32,12 @@ class NativeDispatchMixin:
     def _native_dispatch_title(claim: dict[str, Any]) -> str:
         run = claim.get("run") or {}
         entity = claim.get("task") or claim.get("requirement") or {}
+        if (
+            entity
+            and not str(entity.get("project") or "").strip()
+            and str(run.get("execution_environment") or "") == "projectless"
+        ):
+            return str(entity.get("title") or entity.get("id") or "DoTasks")
         role = str(run.get("run_type") or "task")
         role_label = {
             "execution": "开发",

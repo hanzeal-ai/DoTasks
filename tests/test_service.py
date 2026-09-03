@@ -151,6 +151,21 @@ class TaskboardServiceTest(unittest.TestCase):
                     title({"run": {"run_type": role}, entity_key: {"id": entity_id}}),
                 )
 
+        self.assertEqual(
+            "检查本机性能",
+            title({
+                "run": {
+                    "run_type": "execution",
+                    "execution_environment": "projectless",
+                },
+                "task": {
+                    "id": "TASK-0002",
+                    "title": "检查本机性能",
+                    "project": None,
+                },
+            }),
+        )
+
     def test_native_controller_claim_is_serialized_across_service_processes(self):
         self.create_ready_task()
         self.create_located_task({
@@ -662,17 +677,59 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertEqual("从页面加入任务队列", ready["goal"])
         self.assertTrue(ready["auto_dispatch"])
 
-    def test_page_task_without_project_stays_as_a_draft_in_the_queue(self):
+    def test_page_task_without_project_dispatches_as_projectless_codex_task(self):
         queued = self.service.enqueue_task_intake({
-            "title": "稍后归属项目",
-            "goal": "先记录到任务队列",
+            "title": "检查本机性能",
+            "goal": "检查本机是否存在性能问题",
             "project": "",
             "auto_dispatch": True,
         })
 
         task = self.service.get_task(queued["task_id"])
-        self.assertEqual("draft", task["status"])
+        self.assertEqual("ready", task["status"])
         self.assertIsNone(task["project"])
+        self.assertTrue(task["auto_dispatch"])
+        self.assertIsNone(task["requirement_id"])
+        self.assertEqual("projectless", task["location_context"]["mode"])
+        self.assertTrue(queued["controller_kickoff_required"])
+
+        claimed = self.service.claim_next_task("planner")
+        self.assertEqual(task["id"], claimed["task"]["id"])
+        self.assertEqual(
+            "projectless", claimed["run"]["execution_environment"]
+        )
+        self.assertIn("请完成以下无项目任务", claimed["dispatch_prompt"])
+        self.assertIn("changed_locations 必须传空数组", claimed["dispatch_prompt"])
+
+        run = claimed["run"]
+        self.service.bind_conversation(
+            task["id"], "execution", "projectless-thread", run["id"]
+        )
+        self.service.transition_task(task["id"], "implementing")
+        delivered = self.service.submit_delivery(
+            run["id"],
+            "已完成本机性能检查",
+            "检查结果已在 Codex 会话中给出",
+            [],
+            [{
+                "criterion": "检查本机是否存在性能问题",
+                "status": "passed",
+                "evidence": "已完成检查并说明结论",
+            }],
+        )
+        self.assertEqual("done", delivered["task"]["status"])
+
+    def test_page_task_without_project_can_be_saved_without_auto_dispatch(self):
+        queued = self.service.enqueue_task_intake({
+            "title": "稍后执行",
+            "goal": "先记录无项目任务",
+            "project": "",
+            "auto_dispatch": False,
+        })
+
+        task = self.service.get_task(queued["task_id"])
+        self.assertEqual("ready", task["status"])
+        self.assertFalse(task["auto_dispatch"])
         self.assertFalse(queued["controller_kickoff_required"])
         self.assertIsNone(self.service.claim_next_task("planner"))
 

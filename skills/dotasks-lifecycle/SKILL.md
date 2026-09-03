@@ -22,6 +22,13 @@ description: Run only an explicitly invoked DoTasks requirement decomposition, d
 
 ## Execution and rework
 
+For `RUN_CONTEXT_JSON.execution_environment=projectless`, do not inspect a repository,
+run code-location steps, or create/modify files. Complete the natural-language task in
+the current Codex conversation, then call `submit_task_delivery` with
+`changed_locations=[]`, a compact result summary, and passing evidence for the saved
+criterion. The remaining file-target instructions in this section apply only to
+project-backed runs.
+
 1. Start directly from the natural-language task brief at the top of the prompt. Treat that brief as authoritative for the goal, scope, exclusions, and acceptance criteria. Use `RUN_CONTEXT_JSON` only for the immutable modification targets, verification commands, execution environment, and optional batch input; do not search the tool registry or refetch task details. If the snapshot or prompt IDs are missing, stop and report an invalid Taskboard prompt.
 2. Implement only the behavior described by the natural-language task brief. Treat `targets[].file`, `targets[].mode` and `targets[].symbols` only as immutable modification locks, never as another requirement source. Run each grouped item in `verify` once and retain criterion-level evidence for every nested criterion. Do not redo code location or search for additional implementation scope; read only the named targets and the direct dependencies strictly required for correctness.
 3. `mode=create` means the target is intentionally absent and must not be reported as blocked merely because the file does not exist. If a `modify` or `delete` target moved, or legitimate work falls outside the saved plan, return a precise project `failure_location`/scope gap for bounded self-healing instead of scanning the whole project.

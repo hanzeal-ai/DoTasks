@@ -145,6 +145,19 @@ class TaskIntegrationMixin:
         initialize_integration: bool = True,
     ) -> dict[str, Any]:
         """Return capacity and an immutable Git baseline independent of checkout dirt."""
+        if not str(project or "").strip():
+            return {
+                "capacity": 1,
+                "execution_environment": "projectless",
+                "fallback_reason": "projectless_task",
+                "baseline": {
+                    "available": False,
+                    "reason": "projectless_task",
+                    "project": "",
+                    "files": {},
+                },
+                "unmanaged_files": [],
+            }
         state = self._workspace_state(project)
         if not self.parallel_development_enabled():
             return {

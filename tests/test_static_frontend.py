@@ -242,8 +242,8 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
         self.assertIn('id="new-task-form"', html)
         self.assertIn("加入任务队列", html)
         self.assertIn("Mac Codex 项目（可选）", html)
-        self.assertIn("不选择即无项目", html)
-        self.assertIn("未选择项目，未自动调度", app)
+        self.assertIn("无项目（创建到 Codex 最近）", html)
+        self.assertIn("将创建无项目 Codex 会话", app)
         self.assertIn('api("/api/task-intakes/finalize"', app)
         responsive = css.split("@media (max-width: 760px)", 1)[1].split(
             "@media (prefers-color-scheme: dark)", 1
@@ -277,6 +277,21 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
         self.assertIn('name="task_token_budget"', app)
         self.assertIn('name="max_batch_appended_tasks"', app)
         self.assertIn('api("/api/settings"', app)
+
+    def test_project_picker_uses_explicit_options_and_manual_path_fallback(self):
+        html = (WEB_SOURCE / "App.jsx").read_text(encoding="utf-8")
+        app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")
+
+        self.assertEqual(2, html.count("data-project-select"))
+        self.assertEqual(2, html.count("data-manual-project"))
+        self.assertNotIn("known-project-paths", html + app)
+        self.assertIn("无项目（创建到 Codex 最近）", html + app)
+        self.assertIn("手动输入绝对路径", html + app)
+        self.assertIn("function selectedProjectPath(values)", app)
+        self.assertIn("codexProjects", app)
+        self.assertIn(
+            'auto_dispatch: values.get("auto_dispatch") === "on"', app
+        )
 
     def test_frontend_loads_workflow_metadata_instead_of_duplicating_statuses(self):
         app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")
