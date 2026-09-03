@@ -840,6 +840,96 @@ class TaskboardServiceTest(unittest.TestCase):
         )
         self.assertEqual("thread-requirement-latest", requirement["codex_thread_id"])
 
+    def test_requirement_can_be_deleted_without_deleting_child_tasks(self):
+        intake = self.service.finalize_task_intake({
+            "intake_kind": "requirement",
+            "title": "可删除需求",
+            "project": str(self.example_project),
+            "goal": "验证需求删除",
+        })
+        task = self.create_ready_task()
+        with self.service.db.transaction() as connection:
+            connection.execute(
+                """UPDATE tasks SET requirement_id=?, requirement_task_key='child'
+                   WHERE id=?""",
+                (intake["requirement_id"], task["id"]),
+            )
+
+        result = self.service.delete_requirement(intake["requirement_id"])
+
+        self.assertEqual("deleted", result["status"])
+        self.assertEqual(1, result["preserved_task_count"])
+        with self.assertRaisesRegex(KeyError, "Requirement not found"):
+            self.service.get_requirement(intake["requirement_id"])
+        preserved = self.service.get_task(task["id"])
+        self.assertIsNone(preserved["requirement_id"])
+        self.assertIsNone(preserved["requirement_task_key"])
+
+    def test_failed_requirement_can_be_manually_redecomposed(self):
+        intake = self.service.finalize_task_intake({
+            "intake_kind": "requirement",
+            "title": "手动重新拆解",
+            "project": str(self.example_project),
+            "goal": "重置拆解失败次数并重新入队",
+        })
+        requirement_id = intake["requirement_id"]
+        for attempt in range(1, 4):
+            claim = self.service.claim_next_task("planner", str(self.example_project))
+            self.service.fail_requirement_decomposition(
+                requirement_id, claim["run"]["id"], f"failure {attempt}",
+            )
+
+        result = self.service.redecompose_requirement(requirement_id)
+
+        self.assertEqual("ready", result["requirement"]["status"])
+        self.assertEqual(0, result["requirement"]["decomposition_attempts"])
+        self.assertEqual([], result["decomposition_runs"])
+        self.assertTrue(result["controller_kickoff_required"])
+        retry = self.service.claim_next_task("planner", str(self.example_project))
+        self.assertEqual(requirement_id, retry["requirement"]["id"])
+        self.assertEqual(1, retry["requirement"]["decomposition_attempts"])
+
+    def test_redecomposition_rejects_started_child_task(self):
+        intake = self.service.finalize_task_intake({
+            "intake_kind": "requirement",
+            "title": "不可重复需求",
+            "project": str(self.example_project),
+            "goal": "避免重复执行任务",
+        })
+        task = self.create_ready_task()
+        with self.service.db.transaction() as connection:
+            connection.execute(
+                """UPDATE tasks SET requirement_id=?, requirement_task_key='child',
+                   status='implementing' WHERE id=?""",
+                (intake["requirement_id"], task["id"]),
+            )
+
+        with self.assertRaisesRegex(ValueError, "already started"):
+            self.service.redecompose_requirement(intake["requirement_id"])
+
+    def test_redecomposition_cancels_and_detaches_unstarted_child_tasks(self):
+        intake = self.service.finalize_task_intake({
+            "intake_kind": "requirement",
+            "title": "替换未执行拆分任务",
+            "project": str(self.example_project),
+            "goal": "重新生成拆分任务",
+        })
+        task = self.create_ready_task()
+        with self.service.db.transaction() as connection:
+            connection.execute(
+                """UPDATE tasks SET requirement_id=?, requirement_task_key='old-child'
+                   WHERE id=?""",
+                (intake["requirement_id"], task["id"]),
+            )
+
+        self.service.redecompose_requirement(intake["requirement_id"])
+
+        replaced = self.service.get_task(task["id"])
+        self.assertEqual("cancelled", replaced["status"])
+        self.assertFalse(replaced["auto_dispatch"])
+        self.assertIsNone(replaced["requirement_id"])
+        self.assertIsNone(replaced["requirement_task_key"])
+
     def test_requirement_decomposition_failures_stop_after_three_attempts(self):
         intake = self.service.finalize_task_intake({
             "intake_kind": "requirement",

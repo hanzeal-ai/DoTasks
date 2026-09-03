@@ -154,6 +154,10 @@ class TaskRequirementMixin:
                 connection, "requirement", requirement_id, "redecomposition_requested",
                 {"replaced_task_ids": child_ids},
             )
+            self._request_schedule(
+                connection, "requirement_redecomposition_requested",
+                "requirement", requirement_id,
+            )
         return {
             **self.get_requirement(requirement_id),
             **self._controller_kickoff_contract(True),

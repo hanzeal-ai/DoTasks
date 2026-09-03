@@ -124,6 +124,34 @@ class TaskboardHTTPServerTest(unittest.TestCase):
         self.assertEqual(201, status)
         self.assertEqual("TASK-0001", payload["task_id"])
 
+    def test_requirement_delete_and_redecompose_routes(self) -> None:
+        service = self.server.RequestHandlerClass.service
+        original_delete = service.delete_requirement
+        original_redecompose = service.redecompose_requirement
+        service.delete_requirement = lambda requirement_id: {
+            "status": "deleted", "requirement_id": requirement_id,
+        }
+        service.redecompose_requirement = lambda requirement_id: {
+            "status": "ready", "requirement_id": requirement_id,
+        }
+        try:
+            status, _, payload = self.request(
+                "POST", "/api/requirements/REQ-0001/redecompose", b"{}",
+                Origin=self.origin, **{"Content-Type": "application/json"},
+            )
+            self.assertEqual(200, status)
+            self.assertEqual("ready", payload["status"])
+
+            status, _, payload = self.request(
+                "POST", "/api/requirements/REQ-0001/delete", b"{}",
+                Origin=self.origin, **{"Content-Type": "application/json"},
+            )
+            self.assertEqual(200, status)
+            self.assertEqual("deleted", payload["status"])
+        finally:
+            service.delete_requirement = original_delete
+            service.redecompose_requirement = original_redecompose
+
     def test_untrusted_origin_cannot_mutate_dispatcher(self) -> None:
         service = self.server.RequestHandlerClass.service
         service.set_dispatcher_enabled(True)
