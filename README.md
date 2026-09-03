@@ -248,17 +248,57 @@ Obsidian Markdown 镜像；命令入队后通过 WSS 向 Local DoTasks Agent 发
             thread/start + turn/start
 ```
 
-服务器安装 Docker 后，在仓库目录执行一键 IP 部署脚本：
+正式部署使用 GitHub Container Registry（GHCR）私有镜像，云服务器不需要保存源码。本地
+手工发布时，先使用具备 `write:packages` 权限的 GitHub Token 登录，然后构建并直接推送
+`linux/amd64` 镜像：
 
 ```bash
-chmod +x ./scripts/deploy-cloud-ip
-./scripts/deploy-cloud-ip --public-ip <服务器公网IPv4>
+docker login ghcr.io
+./scripts/publish-cloud-image \
+  --image ghcr.io/hanzeal-ai/dotasks:<版本号>
 ```
 
-脚本会生成独立的网页登录密码和 Agent Token，以 `0600` 权限写入 `.env`，随后校验
-Compose 配置、构建并启动容器，最后执行带认证的健康检查。再次运行时使用 `--reuse-env`
-复用现有配置；只有明确传入 `--force-env` 才会替换 `.env`。可通过 `--port`、
-`--http-user`、`--http-password`、`--agent-id` 和 `--agent-token` 覆盖默认值。
+`.github/workflows/deploy-cloud.yml` 会在 `main` 每次推送后自动运行完整测试，使用提交 SHA
+构建不可变镜像并通过仓库自带的 `GITHUB_TOKEN` 推送 GHCR。构建完成后，ECS 上的 GitHub
+Self-hosted Runner 只下载单文件部署脚本、拉取镜像并更新容器；不会下载项目源码，也不需要
+从 GitHub 主动 SSH 进入 ECS。
+
+Self-hosted Runner 使用 GitHub 默认标签 `self-hosted`、`Linux`、`X64`，以 `admin` 用户安装
+为系统服务，并且该用户必须能直接执行 `docker info`。Runner 只需向 GitHub 和 GHCR 建立
+出站 HTTPS 连接。GitHub 仓库的 Actions Secrets 只需配置：
+
+- `ECS_PUBLIC_IP`：浏览器访问 DoTasks 使用的公网 IPv4。
+
+服务器只需 Runner、Docker、Docker Compose 和 `curl`，不需要代码仓库。两个流水线阶段
+分别使用当次短期 `GITHUB_TOKEN` 发布和拉取 GHCR 私有镜像，不保存长期 GHCR Token。
+
+也可以只把 `scripts/deploy-cloud-ip` 上传到云服务器手工部署。服务器先使用具备
+`read:packages` 权限的 GitHub Token 登录 GHCR，然后执行：
+
+```bash
+docker login ghcr.io
+chmod +x ./deploy-cloud-ip
+./deploy-cloud-ip \
+  --public-ip <服务器公网IPv4> \
+  --image ghcr.io/hanzeal-ai/dotasks:<版本号>
+```
+
+服务器脚本会生成独立的网页登录密码和 Agent Token，以 `0600` 权限写入 `.env`，自动生成
+运行所需的 Compose 配置，然后拉取镜像、启动容器并执行带认证的健康检查。服务器既不构建
+镜像，也不需要 Dockerfile、前端产物或 Python 源码。
+
+发布新版本后，使用新镜像标签重新执行并保留原有密码、Token 和数据卷：
+
+```bash
+./deploy-cloud-ip \
+  --public-ip <服务器公网IPv4> \
+  --image ghcr.io/hanzeal-ai/dotasks:<新版本号> \
+  --reuse-env
+```
+
+不传新 `--image` 时，`--reuse-env` 会重新部署当前镜像。只有明确传入 `--force-env` 才会
+替换 `.env` 和凭据。可通过 `--port`、`--http-user`、`--http-password`、`--agent-id` 和
+`--agent-token` 覆盖默认值；回滚时传入旧版本镜像标签并使用 `--reuse-env`。
 
 阿里云安全组仍需手动添加入方向规则：TCP `8765`（或 `--port` 指定端口），来源只填写
 自己的出口公网 IP，不要对 `0.0.0.0/0` 开放。脚本结尾会输出网页地址、登录信息和 Mac

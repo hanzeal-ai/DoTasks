@@ -1,0 +1,72 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+
+IMAGE=
+PLATFORM=linux/amd64
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./scripts/publish-cloud-image --image <GHCR image:tag> [--platform <platform>]
+
+Example:
+  ./scripts/publish-cloud-image \
+    --image ghcr.io/hanzeal-ai/dotasks:2026.09.03
+
+The image is built with Docker Buildx and pushed directly to the registry.
+Run docker login ghcr.io before this command.
+EOF
+}
+
+fail() {
+  echo "Publish failed: $*" >&2
+  exit 1
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --image|--platform)
+      [ "$#" -ge 2 ] || fail "$1 requires a value"
+      case "$1" in
+        --image) IMAGE=$2 ;;
+        --platform) PLATFORM=$2 ;;
+      esac
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown option: $1"
+      ;;
+  esac
+done
+
+[ -n "$IMAGE" ] || fail "--image is required"
+case "$IMAGE" in
+  *[!A-Za-z0-9._/:@-]*) fail "--image must be a valid registry image reference without whitespace" ;;
+esac
+IMAGE_NAME=${IMAGE##*/}
+case "$IMAGE_NAME" in
+  *:*) ;;
+  *) fail "--image must include an explicit version tag" ;;
+esac
+case "$PLATFORM" in
+  linux/*) ;;
+  *) fail "--platform must be a Linux platform such as linux/amd64" ;;
+esac
+
+command -v docker >/dev/null 2>&1 || fail "docker is not installed"
+docker buildx version >/dev/null 2>&1 || fail "Docker Buildx is unavailable"
+
+echo "Building and pushing $IMAGE for $PLATFORM"
+docker buildx build \
+  --platform "$PLATFORM" \
+  --tag "$IMAGE" \
+  --push \
+  "$PROJECT_ROOT"
+echo "Published: $IMAGE"

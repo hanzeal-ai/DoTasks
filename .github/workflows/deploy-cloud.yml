@@ -1,0 +1,119 @@
+name: Test, publish, and deploy DoTasks Cloud
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: dotasks-cloud-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      image_tag: ${{ steps.image.outputs.tag }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+
+      - name: Run tests
+        run: ./scripts/test
+
+      - name: Resolve immutable image tag
+        id: image
+        shell: bash
+        run: |
+          image_name="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "name=$image_name" >> "$GITHUB_OUTPUT"
+          echo "tag=$image_name:$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR for publishing
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and publish image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Package standalone deployment script
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dotasks-deployment-${{ github.sha }}
+          path: scripts/deploy-cloud-ip
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    needs: build
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Download standalone deployment script
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: dotasks-deployment-${{ github.sha }}
+          path: ${{ runner.temp }}/dotasks-deployment
+
+      - name: Log in to GHCR for deployment
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Deploy immutable image on ECS
+        shell: bash
+        env:
+          ECS_PUBLIC_IP: ${{ secrets.ECS_PUBLIC_IP }}
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+        run: |
+          : "${ECS_PUBLIC_IP:?Set ECS_PUBLIC_IP in GitHub Actions secrets}"
+          deploy_root="$HOME/dotasks"
+          mkdir -p "$deploy_root"
+          install -m 755 \
+            "$RUNNER_TEMP/dotasks-deployment/deploy-cloud-ip" \
+            "$deploy_root/deploy-cloud-ip"
+          cd "$deploy_root"
+          reuse_env=()
+          if test -f .env; then reuse_env=(--reuse-env); fi
+          ./deploy-cloud-ip \
+            --public-ip "$ECS_PUBLIC_IP" \
+            --image "$IMAGE_TAG" \
+            "${reuse_env[@]}" \
+            --no-print-secrets

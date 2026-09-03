@@ -1,5 +1,6 @@
 .git
 .env
+.dotasks-cloud
 .venv
 __pycache__
 *.pyc

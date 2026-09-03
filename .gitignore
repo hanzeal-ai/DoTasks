@@ -6,6 +6,7 @@ data/*.db-shm
 data/*.db-wal
 .mcp.json
 .env
+.dotasks-cloud/
 .DS_Store
 dist/
 e2e-workspaces/

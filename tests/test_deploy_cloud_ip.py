@@ -19,7 +19,6 @@ class DeployCloudIpScriptTest(unittest.TestCase):
         self.bin_dir = Path(self.temp.name) / "bin"
         self.project.mkdir()
         self.bin_dir.mkdir()
-        (self.project / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
         self.log = Path(self.temp.name) / "docker.log"
         self._executable(
             "docker",
@@ -50,6 +49,8 @@ class DeployCloudIpScriptTest(unittest.TestCase):
                 str(SCRIPT),
                 "--public-ip",
                 "203.0.113.10",
+                "--image",
+                "registry.example.com/team/dotasks:2026.09.03",
                 "--http-password",
                 "browser-password-123456",
                 "--agent-token",
@@ -70,6 +71,7 @@ class DeployCloudIpScriptTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(env_file.stat().st_mode), 0o600)
         self.assertEqual(
             env_file.read_text(encoding="utf-8"),
+            "DOTASKS_IMAGE=registry.example.com/team/dotasks:2026.09.03\n"
             "DOTASKS_PUBLIC_URL=http://203.0.113.10:8765\n"
             "DOTASKS_HTTP_USER=dotasks\n"
             "DOTASKS_HTTP_PASSWORD=browser-password-123456\n"
@@ -80,8 +82,12 @@ class DeployCloudIpScriptTest(unittest.TestCase):
         )
         docker_calls = self.log.read_text(encoding="utf-8")
         self.assertIn("compose version", docker_calls)
-        self.assertIn("compose config", docker_calls)
-        self.assertIn("compose up -d --build", docker_calls)
+        self.assertIn("config", docker_calls)
+        self.assertIn("pull", docker_calls)
+        self.assertIn("up -d --remove-orphans", docker_calls)
+        self.assertNotIn("--build", docker_calls)
+        compose = self.project / ".dotasks-cloud" / "compose.yaml"
+        self.assertIn("image: ${DOTASKS_IMAGE:?set DOTASKS_IMAGE}", compose.read_text())
         self.assertIn("DoTasks Cloud is running: http://203.0.113.10:8765", result.stdout)
         self.assertIn("allow inbound TCP 8765", result.stdout)
 
@@ -93,10 +99,33 @@ class DeployCloudIpScriptTest(unittest.TestCase):
         self.assertIn("--reuse-env", result.stderr)
 
         reused = self.run_script("--reuse-env")
-        self.assertIn("Reusing", reused.stdout)
+        self.assertIn("Reused credentials", reused.stdout)
+
+    def test_reuse_can_update_only_the_image(self) -> None:
+        self.run_script()
+
+        result = self.run_script(
+            "--reuse-env",
+            "--image",
+            "registry.example.com/team/dotasks:2026.09.04",
+        )
+
+        environment = (self.project / ".env").read_text(encoding="utf-8")
+        self.assertIn("DOTASKS_IMAGE=registry.example.com/team/dotasks:2026.09.04", environment)
+        self.assertIn("DOTASKS_HTTP_PASSWORD=browser-password-123456", environment)
+        self.assertIn("DOTASKS_AGENT_TOKEN=agent-token-12345678901234567890", environment)
+        self.assertIn("Image: registry.example.com/team/dotasks:2026.09.04", result.stdout)
+
+    def test_ci_mode_keeps_credentials_out_of_output(self) -> None:
+        result = self.run_script("--no-print-secrets")
+
+        self.assertNotIn("browser-password-123456", result.stdout)
+        self.assertNotIn("agent-token-12345678901234567890", result.stdout)
+        self.assertIn("Credentials remain only in", result.stdout)
 
     def test_rejects_mismatched_reused_env(self) -> None:
         (self.project / ".env").write_text(
+            "DOTASKS_IMAGE=registry.example.com/team/dotasks:2026.09.03\n"
             "DOTASKS_PUBLIC_URL=http://198.51.100.20:8765\n"
             "DOTASKS_HTTP_USER=dotasks\n"
             "DOTASKS_HTTP_PASSWORD=browser-password-123456\n"

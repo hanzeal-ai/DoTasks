@@ -1,32 +1,42 @@
 #!/bin/sh
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-PROJECT_ROOT=${DOTASKS_DEPLOY_ROOT:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}
-ENV_FILE="$PROJECT_ROOT/.env"
+DEPLOY_ROOT=${DOTASKS_DEPLOY_ROOT:-$(pwd)}
+ENV_FILE="$DEPLOY_ROOT/.env"
+RUNTIME_DIR="$DEPLOY_ROOT/.dotasks-cloud"
+COMPOSE_FILE="$RUNTIME_DIR/compose.yaml"
 
 PUBLIC_IP=
 PORT=8765
+IMAGE=
 HTTP_USER=dotasks
 HTTP_PASSWORD=
 AGENT_ID=default
 AGENT_TOKEN=
 FORCE_ENV=0
 REUSE_ENV=0
+PRINT_SECRETS=1
 
 usage() {
   cat <<'EOF'
 Usage:
-  ./scripts/deploy-cloud-ip --public-ip <IPv4> [options]
+  ./deploy-cloud-ip --public-ip <IPv4> --image <GHCR image:tag> [options]
+
+First deployment:
+  ./deploy-cloud-ip \
+    --public-ip 203.0.113.10 \
+    --image ghcr.io/hanzeal-ai/dotasks:2026.09.03
 
 Options:
   --port <port>              Public TCP port (default: 8765)
+  --image <image:tag>        GHCR image; optional only with --reuse-env
   --http-user <user>         Browser login user (default: dotasks)
   --http-password <value>    Browser password (default: generated)
   --agent-id <id>            Local Agent ID (default: default)
   --agent-token <value>      Local Agent token (default: generated)
-  --reuse-env                Reuse a matching existing .env
-  --force-env                Replace an existing .env
+  --reuse-env                Preserve credentials and optionally update the image
+  --force-env                Replace the existing configuration and credentials
+  --no-print-secrets         Keep generated credentials out of CI logs
   -h, --help                 Show this help
 EOF
 }
@@ -38,11 +48,12 @@ fail() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --public-ip|--port|--http-user|--http-password|--agent-id|--agent-token)
+    --public-ip|--port|--image|--http-user|--http-password|--agent-id|--agent-token)
       [ "$#" -ge 2 ] || fail "$1 requires a value"
       case "$1" in
         --public-ip) PUBLIC_IP=$2 ;;
         --port) PORT=$2 ;;
+        --image) IMAGE=$2 ;;
         --http-user) HTTP_USER=$2 ;;
         --http-password) HTTP_PASSWORD=$2 ;;
         --agent-id) AGENT_ID=$2 ;;
@@ -56,6 +67,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --force-env)
       FORCE_ENV=1
+      shift
+      ;;
+    --no-print-secrets)
+      PRINT_SECRETS=0
       shift
       ;;
     -h|--help)
@@ -94,7 +109,6 @@ case "$AGENT_ID" in
   ''|*[!A-Za-z0-9._-]*) fail "--agent-id may only contain letters, numbers, dot, underscore, and hyphen" ;;
 esac
 
-[ -f "$PROJECT_ROOT/compose.yaml" ] || fail "compose.yaml not found in $PROJECT_ROOT"
 command -v docker >/dev/null 2>&1 || fail "docker is not installed"
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is unavailable"
 command -v curl >/dev/null 2>&1 || fail "curl is not installed"
@@ -103,37 +117,12 @@ read_env() {
   awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); value=$0 } END { print value }' "$ENV_FILE"
 }
 
-PUBLIC_URL="http://$PUBLIC_IP:$PORT"
-if [ -f "$ENV_FILE" ] && [ "$FORCE_ENV" -eq 0 ]; then
-  [ "$REUSE_ENV" -eq 1 ] || fail ".env already exists; use --reuse-env to keep it or --force-env to replace it"
-  EXISTING_PUBLIC_URL=$(read_env DOTASKS_PUBLIC_URL)
-  EXISTING_BIND_ADDRESS=$(read_env DOTASKS_BIND_ADDRESS)
-  EXISTING_PORT=$(read_env DOTASKS_BIND_PORT)
-  [ "$EXISTING_PUBLIC_URL" = "$PUBLIC_URL" ] || fail "existing DOTASKS_PUBLIC_URL does not match $PUBLIC_URL"
-  [ "$EXISTING_BIND_ADDRESS" = "0.0.0.0" ] || fail "existing DOTASKS_BIND_ADDRESS must be 0.0.0.0"
-  [ "$EXISTING_PORT" = "$PORT" ] || fail "existing DOTASKS_BIND_PORT does not match $PORT"
-  HTTP_USER=$(read_env DOTASKS_HTTP_USER)
-  HTTP_PASSWORD=$(read_env DOTASKS_HTTP_PASSWORD)
-  AGENT_ID=$(read_env DOTASKS_AGENT_ID)
-  AGENT_TOKEN=$(read_env DOTASKS_AGENT_TOKEN)
-  echo "Reusing $ENV_FILE"
-else
-  if [ -z "$HTTP_PASSWORD" ] || [ -z "$AGENT_TOKEN" ]; then
-    command -v openssl >/dev/null 2>&1 || fail "openssl is required to generate credentials"
-  fi
-  [ -n "$HTTP_PASSWORD" ] || HTTP_PASSWORD=$(openssl rand -hex 32)
-  [ -n "$AGENT_TOKEN" ] || AGENT_TOKEN=$(openssl rand -hex 32)
-
-  [ "${#HTTP_PASSWORD}" -ge 16 ] || fail "--http-password must contain at least 16 characters"
-  [ "${#AGENT_TOKEN}" -ge 24 ] || fail "--agent-token must contain at least 24 characters"
-  case "$HTTP_PASSWORD$AGENT_TOKEN" in
-    *[!A-Za-z0-9._~-]*) fail "password and token may only contain URL-safe characters" ;;
-  esac
-
+write_env() {
   umask 077
   ENV_TMP="$ENV_FILE.tmp.$$"
   trap 'rm -f "$ENV_TMP"' EXIT HUP INT TERM
   {
+    printf 'DOTASKS_IMAGE=%s\n' "$IMAGE"
     printf 'DOTASKS_PUBLIC_URL=%s\n' "$PUBLIC_URL"
     printf 'DOTASKS_HTTP_USER=%s\n' "$HTTP_USER"
     printf 'DOTASKS_HTTP_PASSWORD=%s\n' "$HTTP_PASSWORD"
@@ -145,18 +134,104 @@ else
   mv "$ENV_TMP" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   trap - EXIT HUP INT TERM
-  echo "Created $ENV_FILE with mode 0600"
+}
+
+generate_secret() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32
+    return
+  fi
+  if command -v od >/dev/null 2>&1 && [ -r /dev/urandom ]; then
+    od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
+    return
+  fi
+  fail "openssl or od with /dev/urandom is required to generate credentials"
+}
+
+PUBLIC_URL="http://$PUBLIC_IP:$PORT"
+if [ -f "$ENV_FILE" ] && [ "$FORCE_ENV" -eq 0 ]; then
+  [ "$REUSE_ENV" -eq 1 ] || fail ".env already exists; use --reuse-env to keep it or --force-env to replace it"
+  EXISTING_PUBLIC_URL=$(read_env DOTASKS_PUBLIC_URL)
+  EXISTING_BIND_ADDRESS=$(read_env DOTASKS_BIND_ADDRESS)
+  EXISTING_PORT=$(read_env DOTASKS_BIND_PORT)
+  [ "$EXISTING_PUBLIC_URL" = "$PUBLIC_URL" ] || fail "existing DOTASKS_PUBLIC_URL does not match $PUBLIC_URL"
+  [ "$EXISTING_BIND_ADDRESS" = "0.0.0.0" ] || fail "existing DOTASKS_BIND_ADDRESS must be 0.0.0.0"
+  [ "$EXISTING_PORT" = "$PORT" ] || fail "existing DOTASKS_BIND_PORT does not match $PORT"
+  EXISTING_IMAGE=$(read_env DOTASKS_IMAGE)
+  [ -n "$IMAGE" ] || IMAGE=$EXISTING_IMAGE
+  HTTP_USER=$(read_env DOTASKS_HTTP_USER)
+  HTTP_PASSWORD=$(read_env DOTASKS_HTTP_PASSWORD)
+  AGENT_ID=$(read_env DOTASKS_AGENT_ID)
+  AGENT_TOKEN=$(read_env DOTASKS_AGENT_TOKEN)
+  ENV_MESSAGE="Reused credentials from $ENV_FILE"
+else
+  [ -n "$IMAGE" ] || fail "--image is required for the first deployment"
+  [ -n "$HTTP_PASSWORD" ] || HTTP_PASSWORD=$(generate_secret)
+  [ -n "$AGENT_TOKEN" ] || AGENT_TOKEN=$(generate_secret)
+  ENV_MESSAGE="Created $ENV_FILE with mode 0600"
 fi
 
+case "$IMAGE" in
+  ''|*[!A-Za-z0-9._/:@-]*) fail "DOTASKS_IMAGE must be a valid registry image reference without whitespace" ;;
+esac
+IMAGE_NAME=${IMAGE##*/}
+case "$IMAGE_NAME" in
+  *:*) ;;
+  *) fail "DOTASKS_IMAGE must include an explicit version tag" ;;
+esac
 [ -n "$HTTP_USER" ] || fail "DOTASKS_HTTP_USER is missing from .env"
-[ "${#HTTP_PASSWORD}" -ge 16 ] || fail "DOTASKS_HTTP_PASSWORD in .env must contain at least 16 characters"
+[ "${#HTTP_PASSWORD}" -ge 16 ] || fail "DOTASKS_HTTP_PASSWORD must contain at least 16 characters"
 [ -n "$AGENT_ID" ] || fail "DOTASKS_AGENT_ID is missing from .env"
-[ "${#AGENT_TOKEN}" -ge 24 ] || fail "DOTASKS_AGENT_TOKEN in .env must contain at least 24 characters"
-chmod 600 "$ENV_FILE"
+[ "${#AGENT_TOKEN}" -ge 24 ] || fail "DOTASKS_AGENT_TOKEN must contain at least 24 characters"
+case "$HTTP_PASSWORD$AGENT_TOKEN" in
+  *[!A-Za-z0-9._~-]*) fail "password and token may only contain URL-safe characters" ;;
+esac
+write_env
+echo "$ENV_MESSAGE"
 
-cd "$PROJECT_ROOT"
-docker compose config >/dev/null
-docker compose up -d --build
+mkdir -p "$RUNTIME_DIR"
+COMPOSE_TMP="$COMPOSE_FILE.tmp.$$"
+trap 'rm -f "$COMPOSE_TMP"' EXIT HUP INT TERM
+cat > "$COMPOSE_TMP" <<'EOF'
+services:
+  dotasks:
+    image: ${DOTASKS_IMAGE:?set DOTASKS_IMAGE}
+    restart: unless-stopped
+    environment:
+      DOTASKS_MODE: cloud
+      DOTASKS_HOST: 0.0.0.0
+      DOTASKS_PORT: 8765
+      DOTASKS_HOME: /data/dotasks
+      DOTASKS_PUBLIC_URL: ${DOTASKS_PUBLIC_URL:?set DOTASKS_PUBLIC_URL}
+      DOTASKS_HTTP_USER: ${DOTASKS_HTTP_USER:?set DOTASKS_HTTP_USER}
+      DOTASKS_HTTP_PASSWORD: ${DOTASKS_HTTP_PASSWORD:?set DOTASKS_HTTP_PASSWORD}
+      DOTASKS_AGENT_ID: ${DOTASKS_AGENT_ID:-default}
+      DOTASKS_AGENT_TOKEN: ${DOTASKS_AGENT_TOKEN:?set DOTASKS_AGENT_TOKEN}
+    ports:
+      - "${DOTASKS_BIND_ADDRESS:-127.0.0.1}:${DOTASKS_BIND_PORT:-8765}:8765"
+    volumes:
+      - dotasks-data:/data/dotasks
+
+volumes:
+  dotasks-data:
+EOF
+mv "$COMPOSE_TMP" "$COMPOSE_FILE"
+chmod 600 "$COMPOSE_FILE"
+trap - EXIT HUP INT TERM
+
+compose() {
+  docker compose \
+    --project-name dotasks-cloud \
+    --env-file "$ENV_FILE" \
+    -f "$COMPOSE_FILE" \
+    "$@"
+}
+
+compose config >/dev/null
+if ! compose pull; then
+  fail "image pull failed; verify the image reference and run docker login ghcr.io"
+fi
+compose up -d --remove-orphans
 
 HEALTH_URL="http://127.0.0.1:$PORT/api/health"
 HEALTH_BODY=
@@ -175,14 +250,19 @@ done
 
 echo
 echo "DoTasks Cloud is running: $PUBLIC_URL"
+echo "Image: $IMAGE"
 echo "Browser username: $HTTP_USER"
-echo "Browser password: $HTTP_PASSWORD"
-echo
-echo "On the Mac that runs DoTasks, configure the Local Agent once:"
-printf '%s\n' './scripts/start-agent configure \'
-printf "  --cloud-url '%s' \\\n" "$PUBLIC_URL"
-printf "  --agent-id '%s' \\\n" "$AGENT_ID"
-printf "  --agent-token '%s'\n" "$AGENT_TOKEN"
+if [ "$PRINT_SECRETS" -eq 1 ]; then
+  echo "Browser password: $HTTP_PASSWORD"
+  echo
+  echo "On the Mac that runs DoTasks, configure the Local Agent once:"
+  printf '%s\n' './scripts/start-agent configure \'
+  printf "  --cloud-url '%s' \\\n" "$PUBLIC_URL"
+  printf "  --agent-id '%s' \\\n" "$AGENT_ID"
+  printf "  --agent-token '%s'\n" "$AGENT_TOKEN"
+else
+  echo "Credentials remain only in $ENV_FILE"
+fi
 echo
 echo "Required Alibaba Cloud action: allow inbound TCP $PORT only from your own public IP."
 echo "This HTTP/IP setup is temporary; credentials are not encrypted in transit."
