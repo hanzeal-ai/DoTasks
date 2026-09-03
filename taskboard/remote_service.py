@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import urllib.error
@@ -83,6 +85,23 @@ class RemoteToolClient:
             raise RuntimeError("Cloud service returned an invalid tool response")
         return result["result"]
 
+    def upload_local_visual_artifact(self, payload: dict[str, Any]) -> dict[str, Any]:
+        source = Path(str(payload.get("path") or "")).expanduser().resolve()
+        if not source.is_file():
+            raise ValueError(f"Visual artifact file does not exist: {source}")
+        if source.stat().st_size > 10 * 1024 * 1024:
+            raise ValueError("Visual artifact exceeds 10 MiB")
+        content = source.read_bytes()
+        return self.call(
+            "upload_visual_artifact",
+            {
+                "filename": source.name,
+                "purpose": str(payload.get("purpose") or ""),
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "content_base64": base64.b64encode(content).decode("ascii"),
+            },
+        )
+
 
 class RemoteTaskboardService:
     """Taskboard operations used by LocalCodexExecutor against cloud state."""
@@ -154,4 +173,9 @@ class RemoteTaskboardService:
         return self.client.call(
             "renew_dispatch_lease",
             {"run_id": run_id, "lease_seconds": lease_seconds},
+        )
+
+    def read_visual_artifact(self, artifact_id: str) -> dict[str, Any]:
+        return self.client.call(
+            "read_visual_artifact", {"artifact_id": artifact_id}
         )

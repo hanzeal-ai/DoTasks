@@ -174,6 +174,9 @@ class TaskLifecycleMixin:
             task_id, current, status, reason, changes, closes_active_run
         )
         task = self.get_task(task_id)
+        if task["status"] in {"done", "cancelled"}:
+            self.release_visuals_for_terminal_task(task_id)
+            task = self.get_task(task_id)
         self.flush_integration_outbox()
         return task
 
@@ -1434,6 +1437,7 @@ class TaskLifecycleMixin:
             f"{retry_section}"
             "修改目标与验证要求：\n"
             f"RUN_CONTEXT_JSON={prompt_context(context)}\n\n"
+            "如 RUN_CONTEXT_JSON 包含 visual_references，必须逐一读取图片并将其作为实现和验收依据。\n\n"
             "完成后上报：\n"
             "- 完成：调用 submit_task_delivery，上报实际修改文件、验证结果和逐条验收证据，由 DoTasks 推进任务状态。\n"
             "- 无法继续：调用 report_run_blocked，上报 waiting_confirmation 或 blocked 及具体原因。"

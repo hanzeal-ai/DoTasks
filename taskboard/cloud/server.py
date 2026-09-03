@@ -21,12 +21,12 @@ from urllib.parse import urlparse
 
 from core.db import Database
 from core.service import TaskboardService
+from core.service.visuals import VISUAL_UPLOAD_BODY_LIMIT
+from taskboard.codex_projects import sanitize_codex_projects
 from taskboard.config import CLOUD_MODE, ServerConfig
-from taskboard.http_base import MAX_JSON_BODY_BYTES
 from taskboard.http_security import HTTPRequestError
 from taskboard.mcp_server import tool_handlers_for
 from taskboard.project_guard import ProjectWorkspaceGuard
-from taskboard.codex_projects import sanitize_codex_projects
 from taskboard.server import TaskboardHandler
 from taskboard.websocket_transport import (
     WebSocketConnection,
@@ -37,7 +37,7 @@ from taskboard.websocket_transport import (
 from .store import RelayStore
 
 
-AGENT_BODY_LIMIT = MAX_JSON_BODY_BYTES * 8
+AGENT_BODY_LIMIT = VISUAL_UPLOAD_BODY_LIMIT
 SNAPSHOT_BODY_LIMIT = 90 * 1024 * 1024
 
 

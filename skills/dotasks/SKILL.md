@@ -42,6 +42,7 @@ Classify the consolidated input before location work and include the structured
 ### 60-second creation budget
 
 - For a complete request, target a ready requirement or task within 60 seconds and reserve the last 5 seconds for creation. This intake turn records planning state; it does not implement the product change.
+- Preserve every user-provided screenshot. Call `upload_visual_artifact` once per image and pass the returned `artifact_id`, filename, and purpose in `visual_references` when finalizing either a requirement or a direct task. Never rely on the original conversation attachment being inherited by a new execution conversation.
 - Do not load implementation-domain skills, full project development manuals, architecture guides, or broad repository context during intake. The independent execution conversation owns those instructions before editing.
 - Use at most one capability probe, one bounded location command, and two Taskboard execution cells: `detect_task_change` + `prepare_task_location`, then one `finalize_task_intake` call. Avoid model-visible round trips between deterministic calls.
 - For code-changing tasks, build each execution target exactly once as `{file, mode, symbols, tasks:[{symbol?, action, expected?}]}`. Use `mode=create` for a file that is intentionally absent, `config` for whole-file configuration, and `modify` or `delete` only with an exact existing symbol unless the target is a non-symbol configuration format. Read-only tasks may omit targets or use `mode=inspect` without implementation tasks.

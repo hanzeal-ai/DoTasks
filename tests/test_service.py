@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sqlite3
@@ -611,12 +612,19 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertEqual([], self.service.board()["projects"])
 
     def test_page_task_enters_queue_and_reuses_its_id_after_location(self):
+        visual = self.service.upload_visual_artifact({
+            "filename": "page-task.png",
+            "content_base64": base64.b64encode(
+                b"\x89PNG\r\n\x1a\npage-task"
+            ).decode("ascii"),
+        })
         queued = self.service.enqueue_task_intake({
             "title": "页面新增任务",
             "type": "feature",
             "project": str(self.example_project),
             "goal": "从页面加入任务队列",
             "priority": "P1",
+            "visual_references": [{"artifact_id": visual["artifact_id"]}],
             "auto_dispatch": True,
         })
         task_id = queued["task_id"]
@@ -631,6 +639,10 @@ class TaskboardServiceTest(unittest.TestCase):
         claim = self.service.claim_next_task("planner", str(self.example_project))
         self.assertEqual(requirement_id, claim["requirement"]["id"])
         self.assertEqual("web_task", claim["requirement"]["source_type"])
+        self.assertEqual(
+            visual["artifact_id"],
+            claim["requirement"]["visual_references"][0]["artifact_id"],
+        )
         analysis = self.service.prepare_location_analysis({
             "title": "页面新增任务",
             "goal": "从页面加入任务队列",
@@ -676,6 +688,10 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertEqual("页面新增任务", ready["title"])
         self.assertEqual("从页面加入任务队列", ready["goal"])
         self.assertTrue(ready["auto_dispatch"])
+        self.assertEqual(
+            visual["artifact_id"],
+            ready["implementation_contract"]["visual_references"][0]["artifact_id"],
+        )
 
     def test_page_task_without_project_dispatches_as_projectless_codex_task(self):
         queued = self.service.enqueue_task_intake({
@@ -2858,17 +2874,129 @@ class TaskboardServiceTest(unittest.TestCase):
 
     def test_visual_reference_is_copied_into_managed_artifacts(self):
         source = Path(self.temp.name) / "temporary-reference.png"
-        source.write_bytes(b"png-reference")
+        source.write_bytes(b"\x89PNG\r\n\x1a\nvisual-reference")
 
         managed = self.service._manage_visual_references(
             "LOC-visual", [{"path": str(source), "purpose": "match selector layout"}]
         )
 
         self.assertEqual(1, len(managed))
-        self.assertTrue(managed[0]["artifact_id"].startswith("artifact://intake/LOC-visual/"))
+        self.assertTrue(managed[0]["artifact_id"].startswith("artifact://visuals/"))
         self.assertTrue(Path(managed[0]["path"]).is_file())
         source.unlink()
         self.assertTrue(Path(managed[0]["path"]).is_file())
+
+    def test_conversation_requirement_persists_visuals_for_decomposition(self):
+        source = Path(self.temp.name) / "requirement-reference.png"
+        source.write_bytes(b"\x89PNG\r\n\x1a\nrequirement-reference")
+
+        created = self.service.finalize_task_intake({
+            "intake_kind": "requirement",
+            "title": "带截图需求",
+            "project": str(self.example_project),
+            "goal": "按截图完成多个交付项",
+            "visual_references": [{"path": str(source), "purpose": "页面布局"}],
+            "auto_dispatch": True,
+        })
+
+        requirement = self.service.get_requirement(created["requirement_id"])["requirement"]
+        self.assertEqual(1, len(requirement["visual_references"]))
+        artifact_path = Path(requirement["visual_references"][0]["path"])
+        self.assertTrue(artifact_path.is_file())
+        dispatch = self.service._claim_next_native_dispatch(
+            "codex-native-controller", stage="development"
+        )
+        self.assertIn("REQUIREMENT_VISUAL_REFERENCES_JSON=", dispatch["dispatch_prompt"])
+        self.assertIn(requirement["visual_references"][0]["artifact_id"], dispatch["dispatch_prompt"])
+
+    def test_projectless_task_deletes_server_visual_after_completion(self):
+        content = b"\x89PNG\r\n\x1a\nprojectless-reference"
+        uploaded = self.service.upload_visual_artifact({
+            "filename": "reference.png",
+            "content_base64": base64.b64encode(content).decode("ascii"),
+            "purpose": "expected result",
+        })
+        artifact_path = Path(uploaded["path"])
+        queued = self.service.enqueue_task_intake({
+            "title": "查看截图",
+            "goal": "根据截图给出结论",
+            "project": "",
+            "visual_references": [{"artifact_id": uploaded["artifact_id"]}],
+            "auto_dispatch": True,
+        })
+        task = self.service.get_task(queued["task_id"])
+        self.assertEqual(1, len(task["implementation_contract"]["visual_references"]))
+        claim = self.service.claim_next_task("visual-worker")
+        run = claim["run"]
+        self.service.bind_conversation(task["id"], "execution", "visual-thread", run["id"])
+        self.service.transition_task(task["id"], "implementing")
+        delivered = self.service.submit_delivery(
+            run["id"],
+            "已按截图完成",
+            "response checked",
+            [],
+            [{
+                "criterion": "根据截图给出结论",
+                "status": "passed",
+                "evidence": "passed",
+            }],
+        )
+
+        self.assertEqual("done", delivered["task"]["status"])
+        self.assertFalse(artifact_path.exists())
+        self.assertEqual(
+            [],
+            self.service.get_task(task["id"])["implementation_contract"]["visual_references"],
+        )
+
+    def test_shared_requirement_visual_is_deleted_after_last_child_finishes(self):
+        uploaded = self.service.upload_visual_artifact({
+            "filename": "shared.png",
+            "content_base64": base64.b64encode(
+                b"\x89PNG\r\n\x1a\nshared-reference"
+            ).decode("ascii"),
+        })
+        requirement = self.service.finalize_task_intake({
+            "intake_kind": "requirement",
+            "title": "共享截图需求",
+            "project": "",
+            "goal": "两个任务共用截图",
+            "visual_references": [{"artifact_id": uploaded["artifact_id"]}],
+            "auto_dispatch": False,
+        })
+        child_ids = []
+        for title in ("子任务一", "子任务二"):
+            child = self.service.enqueue_task_intake({
+                "title": title,
+                "goal": title,
+                "project": "",
+                "visual_references": [{"artifact_id": uploaded["artifact_id"]}],
+                "auto_dispatch": False,
+            })
+            child_ids.append(child["task_id"])
+        with self.service.db.transaction() as connection:
+            connection.execute(
+                "UPDATE tasks SET requirement_id=?, status='done' WHERE id=?",
+                (requirement["requirement_id"], child_ids[0]),
+            )
+            connection.execute(
+                "UPDATE tasks SET requirement_id=? WHERE id=?",
+                (requirement["requirement_id"], child_ids[1]),
+            )
+
+        artifact_path = Path(uploaded["path"])
+        self.service.release_visuals_for_terminal_task(child_ids[0])
+        self.assertTrue(artifact_path.exists())
+        with self.service.db.transaction() as connection:
+            connection.execute(
+                "UPDATE tasks SET status='done' WHERE id=?", (child_ids[1],)
+            )
+        self.service.release_visuals_for_terminal_task(child_ids[1])
+        self.assertFalse(artifact_path.exists())
+        self.assertEqual(
+            [],
+            self.service.get_requirement(requirement["requirement_id"])["requirement"]["visual_references"],
+        )
 
     def test_creation_rejects_acceptance_plan_mismatch_without_consuming_location(self):
         payload = {

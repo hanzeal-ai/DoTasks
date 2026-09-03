@@ -189,6 +189,35 @@ class RelayHTTPServerTest(unittest.TestCase):
         self.assertEqual([requirement_id], [item["id"] for item in board["requirements"]])
         self.assertFalse(board["dispatcher"]["running"])
 
+    def test_browser_uploads_visual_to_cloud_owned_storage(self) -> None:
+        content = b"\x89PNG\r\n\x1a\ncloud-visual"
+        status, _, body = self.request(
+            "POST",
+            "/api/visual-artifacts",
+            json.dumps({
+                "filename": "phone.png",
+                "content_base64": base64.b64encode(content).decode("ascii"),
+                "purpose": "phone requirement",
+            }).encode(),
+            {**self.browser_headers, "Content-Type": "application/json"},
+        )
+
+        self.assertEqual(201, status)
+        reference = json.loads(body)
+        self.assertTrue(reference["artifact_id"].startswith("artifact://visuals/"))
+        self.assertNotIn("path", reference)
+        status, _, body = self.agent_post(
+            "/_agent/v1/tools/call",
+            {
+                "agent_id": "mac",
+                "name": "read_visual_artifact",
+                "arguments": {"artifact_id": reference["artifact_id"]},
+            },
+        )
+        self.assertEqual(200, status)
+        downloaded = json.loads(body)["result"]
+        self.assertEqual(content, base64.b64decode(downloaded["content_base64"]))
+
     def test_websocket_notifies_agent_after_cloud_state_change(self) -> None:
         connection = socket.create_connection(("127.0.0.1", self.port), timeout=2)
         key = base64.b64encode(b"0123456789abcdef").decode("ascii")

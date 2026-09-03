@@ -346,33 +346,6 @@ class TaskPlanningMixin:
             stored.append(f"artifact://{relative.as_posix()}")
         return list(dict.fromkeys(stored))
 
-    def _manage_visual_references(
-        self, analysis_id: str, references: Any,
-    ) -> list[dict[str, Any]]:
-        if references in (None, []):
-            return []
-        if not isinstance(references, list) or any(
-            not isinstance(item, dict) for item in references
-        ):
-            raise ValueError("visual_references must be an array of objects")
-        managed: list[dict[str, Any]] = []
-        for item in references:
-            source = str(item.get("path") or item.get("artifact_id") or "").strip()
-            if not source:
-                raise ValueError("Every visual reference requires path or artifact_id")
-            artifact_id = self._store_managed_artifacts(
-                f"intake/{analysis_id}", [source]
-            )[0]
-            relative = Path(artifact_id.removeprefix("artifact://"))
-            target = (self.data_home / "artifacts" / relative).resolve()
-            managed.append({
-                "artifact_id": artifact_id,
-                "path": str(target),
-                "purpose": str(item.get("purpose") or "visual acceptance reference").strip(),
-                "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
-            })
-        return managed
-
     @staticmethod
     def _normalize_review_contract(contract: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(contract, dict):
@@ -1239,6 +1212,9 @@ class TaskPlanningMixin:
         modules = self._string_list(payload, "modules")
         scope = self._string_list(payload, "scope") or [goal]
         out_of_scope = self._string_list(payload, "out_of_scope")
+        visual_references = self._manage_visual_references(
+            "web-task", payload.get("visual_references")
+        )
         if project is None:
             acceptance_criteria = [goal]
             acceptance_plan = [
@@ -1285,7 +1261,10 @@ class TaskPlanningMixin:
                         ),
                         json.dumps(acceptance_plan, ensure_ascii=False),
                         json.dumps(dependency_analysis, ensure_ascii=False),
-                        json.dumps({"targets": []}, ensure_ascii=False),
+                        json.dumps({
+                            "targets": [],
+                            "visual_references": visual_references,
+                        }, ensure_ascii=False),
                         json.dumps(review_contract, ensure_ascii=False),
                         int(auto_dispatch),
                     ),
@@ -1315,9 +1294,9 @@ class TaskPlanningMixin:
                        id, title, original_content, description, source_type,
                        project, status, priority, goal, modules, scope,
                        out_of_scope, acceptance_criteria, auto_dispatch,
-                       decomposition_plan
+                       decomposition_plan, visual_references
                    ) VALUES(?, ?, ?, ?, 'web_task', ?, 'ready', ?, ?, ?, ?, ?,
-                            '[]', ?, ?)""",
+                            '[]', ?, ?, ?)""",
                 (
                     requirement_id, title, goal, goal, project, priority, goal,
                     json.dumps(modules, ensure_ascii=False),
@@ -1325,6 +1304,7 @@ class TaskPlanningMixin:
                     json.dumps(out_of_scope, ensure_ascii=False),
                     int(auto_dispatch),
                     json.dumps([{"key": "direct", "title": title, "goal": goal}], ensure_ascii=False),
+                    json.dumps(visual_references, ensure_ascii=False),
                 ),
             )
             connection.execute(
@@ -1389,6 +1369,9 @@ class TaskPlanningMixin:
             original_content = str(
                 payload.get("original_content") or payload.get("description") or goal
             ).strip()
+            visual_references = self._manage_visual_references(
+                "requirement", payload.get("visual_references")
+            )
             with self.db.transaction() as connection:
                 requirement_id = self.db.next_id(connection, "REQ")
                 connection.execute(
@@ -1396,8 +1379,9 @@ class TaskPlanningMixin:
                            id, title, original_content, description, source_type,
                            source_reference, project, status, priority, goal,
                            modules, scope, out_of_scope, acceptance_criteria,
-                           source_thread_id, auto_dispatch, decomposition_plan
-                       ) VALUES(?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           source_thread_id, auto_dispatch, decomposition_plan,
+                           visual_references
+                       ) VALUES(?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         requirement_id, title, original_content,
                         str(payload.get("description") or goal),
@@ -1410,6 +1394,7 @@ class TaskPlanningMixin:
                         payload.get("source_thread_id"),
                         int(auto_dispatch),
                         json.dumps(plan, ensure_ascii=False),
+                        json.dumps(visual_references, ensure_ascii=False),
                     ),
                 )
                 self._event(

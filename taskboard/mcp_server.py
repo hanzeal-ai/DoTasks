@@ -181,6 +181,31 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "upload_visual_artifact",
+        "description": "Upload one PNG, JPEG, GIF, or WebP from a local source path into DoTasks-managed server storage before creating a requirement or task. Use the returned artifact_id in visual_references.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "minLength": 1},
+                "purpose": {"type": "string"},
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "read_visual_artifact",
+        "description": "Read one managed visual artifact by artifact_id. This is primarily used by the Local Agent to materialize server images before dispatch.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "artifact_id": {"type": "string", "pattern": "^artifact://"},
+            },
+            "required": ["artifact_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "prepare_task_location",
         "description": "Query bounded Obsidian history and prepare an ordered CodeGraph, GitNexus, or direct-source location plan before a task is created.",
         "inputSchema": {
@@ -291,7 +316,7 @@ TOOLS = [
                 "agent_id": {"type": "string"},
                 "location_evidence": LOCATION_EVIDENCE_SCHEMA,
                 "targets": {"type": "array", "items": TARGET_SCHEMA},
-                "visual_references": {"type": "array", "description": "All requirement screenshots and visual references; each source path is copied immediately into DoTasks-managed storage.", "items": {"type": "object", "properties": {"path": {"type": "string", "minLength": 1}, "purpose": {"type": "string"}}, "required": ["path"]}},
+                "visual_references": {"type": "array", "maxItems": 8, "description": "All requirement screenshots and visual references. Pass either a source path or the artifact_id returned by upload_visual_artifact.", "items": {"type": "object", "properties": {"path": {"type": "string", "minLength": 1}, "artifact_id": {"type": "string", "pattern": "^artifact://"}, "filename": {"type": "string"}, "purpose": {"type": "string"}}, "anyOf": [{"required": ["path"]}, {"required": ["artifact_id"]}], "additionalProperties": False}},
                 "review_checks": {"type": "array", "description": "Optional explicit code-quality checks. Read-only tasks may use an empty array; code-changing tasks may omit this field to use defaults. Never copy task acceptance criteria here.", "items": {"type": "object", "properties": {"id": {"type": "string", "minLength": 1}, "description": {"type": "string", "minLength": 1}, "kind": {"type": "string", "enum": ["code", "static"]}}, "required": ["id", "description", "kind"]}},
                 "quality_gates": QUALITY_GATES_SCHEMA,
                 "acceptance_plan": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
@@ -574,6 +599,10 @@ def tool_handlers_for(
 ) -> dict[str, Callable[[dict[str, Any]], Any]]:
     return {
         "list_board": lambda _arguments: service.board(),
+        "upload_visual_artifact": service.upload_visual_artifact,
+        "read_visual_artifact": lambda arguments: service.read_visual_artifact(
+            arguments["artifact_id"]
+        ),
         "prepare_task_location": lambda arguments: service.prepare_location_analysis(
             arguments, "creation"
         ),
@@ -700,6 +729,17 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
         remote = RemoteToolClient.from_environment()
         if remote is None:
             raise RuntimeError("DOTASKS_REMOTE_SERVICE requires Cloud Agent configuration")
+        if name == "upload_visual_artifact" and arguments.get("path"):
+            return remote.upload_local_visual_artifact(arguments)
+        if name == "finalize_task_intake" and arguments.get("visual_references"):
+            arguments = dict(arguments)
+            references = []
+            for item in arguments["visual_references"]:
+                if item.get("artifact_id") or item.get("content_base64"):
+                    references.append(item)
+                else:
+                    references.append(remote.upload_local_visual_artifact(item))
+            arguments["visual_references"] = references
         return remote.call(name, arguments)
     handler = TOOL_HANDLERS.get(name)
     if handler is None:
@@ -748,6 +788,7 @@ def _compact_lifecycle_result(name: str, result: Any) -> Any:
     if not isinstance(result, dict):
         return result
     if name in {
+        "upload_visual_artifact",
         "prepare_task_location", "report_location_status", "complete_location_analysis",
         "finalize_task_intake", "get_requirement",
         "submit_requirement_decomposition",

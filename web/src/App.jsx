@@ -230,6 +230,15 @@ export default function App() {
             <textarea name="goal" rows="5" required></textarea>
           </label>
           <label>
+            需求截图（最多 8 张，每张不超过 10 MiB）
+            <input
+              name="visual_references"
+              type="file"
+              accept="image/png,image/jpeg,image/gif,image/webp"
+              multiple
+            />
+          </label>
+          <label>
             优先级
             <select name="priority" defaultValue="P2">
               <option value="P0">P0</option>
@@ -291,6 +300,15 @@ export default function App() {
           <label>
             任务目标
             <textarea name="goal" rows="5" required></textarea>
+          </label>
+          <label>
+            任务截图（最多 8 张，每张不超过 10 MiB）
+            <input
+              name="visual_references"
+              type="file"
+              accept="image/png,image/jpeg,image/gif,image/webp"
+              multiple
+            />
           </label>
           <label>
             优先级

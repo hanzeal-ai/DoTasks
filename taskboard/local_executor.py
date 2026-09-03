@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
+import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -102,17 +107,123 @@ class LocalCodexExecutor:
             )
         launched = 0
         for dispatch in dispatches:
-            if self._launch(self._localize_dispatch_prompt(dispatch)):
+            localized = self._localize_dispatch_prompt(dispatch)
+            if self._launch(localized):
                 launched += 1
+            else:
+                self._cleanup_dispatch_visuals(localized)
         return launched
 
     def _localize_dispatch_prompt(self, dispatch: dict[str, Any]) -> dict[str, Any]:
         localized = dict(dispatch)
-        localized["dispatch_prompt"] = TaskboardService._attach_lifecycle_skill(
+        prompt = TaskboardService._attach_lifecycle_skill(
             str(dispatch.get("dispatch_prompt") or ""),
             runtime_home=self.runtime_home,
         )
+        local_paths: list[str] = []
+        for marker in (
+            "RUN_CONTEXT_JSON=",
+            "REQUIREMENT_VISUAL_REFERENCES_JSON=",
+        ):
+            prompt, paths = self._localize_prompt_visuals(
+                prompt, marker, str(dispatch.get("run_id") or "")
+            )
+            local_paths.extend(paths)
+        localized["dispatch_prompt"] = prompt
+        localized["local_visual_paths"] = local_paths
         return localized
+
+    def _localize_prompt_visuals(
+        self, prompt: str, marker: str, run_id: str,
+    ) -> tuple[str, list[str]]:
+        offset = prompt.find(marker)
+        if offset < 0:
+            return prompt, []
+        start = offset + len(marker)
+        try:
+            payload, length = json.JSONDecoder().raw_decode(prompt[start:])
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Dispatch prompt contains invalid {marker[:-1]}") from exc
+        references = (
+            payload.get("visual_references") or []
+            if isinstance(payload, dict)
+            else payload
+        )
+        if not isinstance(references, list) or not references:
+            return prompt, []
+        localized_references: list[dict[str, Any]] = []
+        local_paths: list[str] = []
+        for item in references:
+            if not isinstance(item, dict):
+                raise ValueError("Dispatch visual reference must be an object")
+            reference = dict(item)
+            existing = Path(str(reference.get("path") or "")).expanduser()
+            if existing.is_file():
+                expected = str(reference.get("sha256") or "").strip()
+                if not expected or hashlib.sha256(existing.read_bytes()).hexdigest() != expected:
+                    raise ValueError(
+                        f"Dispatch visual artifact checksum failed: {reference.get('artifact_id') or existing}"
+                    )
+                localized_references.append(reference)
+                continue
+            artifact_id = str(reference.get("artifact_id") or "").strip()
+            if not artifact_id or not hasattr(self.service, "read_visual_artifact"):
+                raise ValueError(f"Dispatch visual artifact is unavailable: {artifact_id}")
+            artifact = self.service.read_visual_artifact(artifact_id)
+            content = base64.b64decode(
+                str(artifact.get("content_base64") or ""), validate=True
+            )
+            digest = hashlib.sha256(content).hexdigest()
+            expected_digests = {
+                str(value).strip()
+                for value in (artifact.get("sha256"), reference.get("sha256"))
+                if str(value or "").strip()
+            }
+            if not expected_digests or expected_digests != {digest}:
+                raise ValueError(f"Dispatch visual artifact checksum failed: {artifact_id}")
+            suffix = {
+                "image/png": ".png",
+                "image/jpeg": ".jpg",
+                "image/gif": ".gif",
+                "image/webp": ".webp",
+            }.get(str(artifact.get("content_type") or reference.get("content_type") or ""))
+            if not suffix:
+                raise ValueError(f"Dispatch visual artifact type is unsupported: {artifact_id}")
+            if not run_id or any(part in run_id for part in ("/", "\\", "..")):
+                raise ValueError("Dispatch run id is invalid for visual materialization")
+            destination = self.data_home / "artifacts" / "dispatch-visuals" / run_id
+            destination.mkdir(parents=True, exist_ok=True)
+            target = destination / f"{digest}{suffix}"
+            if not target.exists():
+                temporary = target.with_suffix(target.suffix + ".tmp")
+                temporary.write_bytes(content)
+                os.replace(temporary, target)
+            reference.update({
+                "path": str(target),
+                "sha256": digest,
+                "content_type": str(artifact.get("content_type") or ""),
+                "size": len(content),
+            })
+            localized_references.append(reference)
+            local_paths.append(str(target))
+        if isinstance(payload, dict):
+            payload = dict(payload)
+            payload["visual_references"] = localized_references
+        else:
+            payload = localized_references
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        return prompt[:start] + encoded + prompt[start + length:], local_paths
+
+    def _cleanup_dispatch_visuals(self, dispatch: dict[str, Any]) -> None:
+        paths = [Path(path) for path in dispatch.get("local_visual_paths") or []]
+        roots = {path.parent for path in paths}
+        for path in paths:
+            path.unlink(missing_ok=True)
+        managed_root = (self.data_home / "artifacts" / "dispatch-visuals").resolve()
+        for root in roots:
+            resolved = root.resolve()
+            if managed_root in resolved.parents:
+                shutil.rmtree(resolved, ignore_errors=True)
 
     def wait_for_workers(self) -> None:
         while True:
@@ -188,6 +299,7 @@ class LocalCodexExecutor:
                     file=sys.stderr,
                 )
         finally:
+            self._cleanup_dispatch_visuals(dispatch)
             if client is not None:
                 client.stop()
             with self._active_lock:

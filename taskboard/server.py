@@ -10,11 +10,13 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from core.service import TaskboardService
+from core.service.visuals import VISUAL_UPLOAD_BODY_LIMIT
+from core.workflow import workflow_metadata
+
 from .codex_projects import discover_codex_projects
 from .config import LOCAL_MODE, ServerConfig
 from .http_base import BaseDoTasksHandler, MAX_JSON_BODY_BYTES
 from .version import VERSION
-from core.workflow import workflow_metadata
 
 class TaskboardHandler(BaseDoTasksHandler):
     service: TaskboardService
@@ -117,6 +119,13 @@ class TaskboardHandler(BaseDoTasksHandler):
         parsed = urlparse(self.path)
         try:
             self._validate_api_request()
+            if parsed.path == "/api/visual-artifacts":
+                payload = self._read_json(VISUAL_UPLOAD_BODY_LIMIT)
+                reference = self.service.upload_visual_artifact(payload)
+                self._json(HTTPStatus.CREATED, {
+                    key: value for key, value in reference.items() if key != "path"
+                })
+                return
             payload = self._read_json()
             if parsed.path == "/api/settings":
                 self._json(HTTPStatus.OK, self.service.update_task_settings(payload))

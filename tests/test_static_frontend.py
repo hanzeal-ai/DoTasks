@@ -245,6 +245,9 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
         self.assertIn("无项目（创建到 Codex 最近）", html)
         self.assertIn("将创建无项目 Codex 会话", app)
         self.assertIn('api("/api/task-intakes/finalize"', app)
+        self.assertEqual(2, html.count('name="visual_references"'))
+        self.assertIn('api("/api/visual-artifacts"', app)
+        self.assertEqual(2, app.count("visual_references: visualReferences"))
         responsive = css.split("@media (max-width: 760px)", 1)[1].split(
             "@media (prefers-color-scheme: dark)", 1
         )[0]

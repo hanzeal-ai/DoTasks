@@ -14,7 +14,7 @@ class TaskRequirementMixin:
         item = dict(row)
         for field in (
             "modules", "scope", "out_of_scope", "acceptance_criteria",
-            "decomposition_plan",
+            "decomposition_plan", "visual_references",
         ):
             item[field] = json.loads(item.get(field) or "[]")
         item["auto_dispatch"] = bool(item.get("auto_dispatch"))
@@ -60,7 +60,7 @@ class TaskRequirementMixin:
         """Delete a requirement while preserving its child tasks as standalone history."""
         with self.db.transaction() as connection:
             requirement = connection.execute(
-                "SELECT id, title FROM requirements WHERE id=?", (requirement_id,),
+                "SELECT id, title, visual_references FROM requirements WHERE id=?", (requirement_id,),
             ).fetchone()
             if not requirement:
                 raise KeyError(f"Requirement not found: {requirement_id}")
@@ -81,6 +81,9 @@ class TaskRequirementMixin:
                 connection, "requirement", requirement_id, "deleted",
                 {"title": requirement["title"], "preserved_task_count": child_count},
             )
+        self._delete_unreferenced_visuals(
+            json.loads(requirement["visual_references"] or "[]")
+        )
         return {
             "status": "deleted",
             "requirement_id": requirement_id,
@@ -91,7 +94,7 @@ class TaskRequirementMixin:
         """Permanently remove one completed DoTasks record without deleting Codex sessions."""
         with self.db.transaction() as connection:
             task = connection.execute(
-                "SELECT id, title, status FROM tasks WHERE id=?", (task_id,),
+                "SELECT id, title, status, implementation_contract FROM tasks WHERE id=?", (task_id,),
             ).fetchone()
             if not task:
                 raise KeyError(f"Task not found: {task_id}")
@@ -231,6 +234,8 @@ class TaskRequirementMixin:
                 "deleted",
                 {"title": task["title"], "codex_sessions_preserved": True},
             )
+        contract = json.loads(task["implementation_contract"] or "{}")
+        self._delete_unreferenced_visuals(contract.get("visual_references") or [])
         return {"status": "deleted", "task_id": task_id}
 
     def redecompose_requirement(self, requirement_id: str) -> dict[str, Any]:
@@ -304,6 +309,8 @@ class TaskRequirementMixin:
                 connection, "requirement_redecomposition_requested",
                 "requirement", requirement_id,
             )
+        for child_id in child_ids:
+            self.release_visuals_for_terminal_task(child_id)
         return {
             **self.get_requirement(requirement_id),
             **self._controller_kickoff_contract(True),
@@ -355,6 +362,9 @@ class TaskRequirementMixin:
             raise ValueError("A page-created task must produce exactly the direct task")
         requirement_modules = json.loads(requirement_row["modules"] or "[]")
         requirement_out_of_scope = json.loads(requirement_row["out_of_scope"] or "[]")
+        requirement_visual_references = json.loads(
+            requirement_row["visual_references"] or "[]"
+        )
 
         # Validate the entire decomposition before creating any child. A
         # requirement run is submitted once, so a contract error in a later
@@ -516,6 +526,7 @@ class TaskRequirementMixin:
                 "quality_gates": normalized_gates,
                 "acceptance_plan": normalized_plan,
                 "dependency_analysis": {"decision": "independent"},
+                "visual_references": requirement_visual_references,
             }, existing_task_id=existing_task_id)
             task_id = str(result.get("task_id") or "")
             if not task_id or result.get("task_status") != "ready":

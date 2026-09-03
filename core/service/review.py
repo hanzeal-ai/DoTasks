@@ -458,6 +458,8 @@ class TaskReviewMixin:
         updated = self.get_task(task["id"])
         if updated["status"] == "done":
             self._create_experience(updated)
+            self.release_visuals_for_terminal_task(task["id"])
+            updated = self.get_task(task["id"])
         self.flush_integration_outbox()
         return {
             "task": updated,
@@ -727,8 +729,12 @@ class TaskReviewMixin:
         updated = self.get_task(task_id)
         if updated["status"] == "done":
             self._create_experience(updated)
+            self.release_visuals_for_terminal_task(task_id)
         for completed_task_id in completed_batch_task_ids:
             self._create_experience(self.get_task(completed_task_id))
+            self.release_visuals_for_terminal_task(completed_task_id)
+        if updated["status"] == "done":
+            updated = self.get_task(task_id)
         self.flush_integration_outbox()
         return updated
 

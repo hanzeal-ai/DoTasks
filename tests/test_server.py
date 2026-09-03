@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import http.client
 import json
 import tempfile
@@ -123,6 +124,28 @@ class TaskboardHTTPServerTest(unittest.TestCase):
             service.enqueue_task_intake = original_enqueue
         self.assertEqual(201, status)
         self.assertEqual("TASK-0001", payload["task_id"])
+
+    def test_visual_artifact_can_be_uploaded_to_server(self) -> None:
+        content = b"\x89PNG\r\n\x1a\nserver-upload"
+        status, _, payload = self.request(
+            "POST",
+            "/api/visual-artifacts",
+            json.dumps({
+                "filename": "screen.png",
+                "content_base64": base64.b64encode(content).decode("ascii"),
+                "purpose": "requirement screenshot",
+            }).encode("utf-8"),
+            Origin=self.origin,
+            **{"Content-Type": "application/json"},
+        )
+
+        self.assertEqual(201, status)
+        self.assertTrue(payload["artifact_id"].startswith("artifact://visuals/"))
+        self.assertNotIn("path", payload)
+        downloaded = self.server.RequestHandlerClass.service.read_visual_artifact(
+            payload["artifact_id"]
+        )
+        self.assertEqual(content, base64.b64decode(downloaded["content_base64"]))
 
     def test_completed_task_delete_route(self) -> None:
         service = self.server.RequestHandlerClass.service

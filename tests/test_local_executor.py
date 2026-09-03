@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import tempfile
 import subprocess
 import unittest
@@ -17,6 +19,7 @@ class FakeService:
         self.completed_cycles: list[tuple[str, int]] = []
         self.bindings: list[tuple[str, str]] = []
         self.failures: list[tuple[str, str]] = []
+        self.visual_artifacts: dict[str, dict] = {}
 
     def claim_schedule_cycle(self, worker_id, lease_seconds, force=False):
         self.assert_worker = (worker_id, lease_seconds, force)
@@ -45,6 +48,9 @@ class FakeService:
 
     def renew_native_dispatch(self, run_id, lease_seconds):
         raise AssertionError("short test must not renew its lease")
+
+    def read_visual_artifact(self, artifact_id):
+        return self.visual_artifacts[artifact_id]
 
 
 class FakeClient:
@@ -147,6 +153,38 @@ class LocalCodexExecutorTest(unittest.TestCase):
             localized["dispatch_prompt"],
         )
         self.assertIn("/app/", dispatch["dispatch_prompt"])
+
+    def test_dispatch_downloads_server_visual_and_rewrites_prompt_path(self):
+        service = FakeService(None)
+        content = b"\x89PNG\r\n\x1a\nremote-visual"
+        digest = hashlib.sha256(content).hexdigest()
+        artifact_id = f"artifact://visuals/{digest}.png"
+        service.visual_artifacts[artifact_id] = {
+            "artifact_id": artifact_id,
+            "content_type": "image/png",
+            "sha256": digest,
+            "content_base64": base64.b64encode(content).decode("ascii"),
+        }
+        executor = self.build_executor(service, close_lifecycle=True)
+        dispatch = make_dispatch(
+            dispatch_prompt=(
+                "$dotasks-lifecycle\n"
+                "RUN_CONTEXT_JSON={\"visual_references\":[{\"artifact_id\":\""
+                + artifact_id
+                + "\",\"path\":\"/app/data/missing.png\",\"sha256\":\""
+                + digest
+                + "\"}]}\n\n完成后上报"
+            )
+        )
+
+        localized = executor._localize_dispatch_prompt(dispatch)
+
+        self.assertNotIn("/app/data/missing.png", localized["dispatch_prompt"])
+        self.assertEqual(1, len(localized["local_visual_paths"]))
+        local_path = Path(localized["local_visual_paths"][0])
+        self.assertEqual(content, local_path.read_bytes())
+        executor._cleanup_dispatch_visuals(localized)
+        self.assertFalse(local_path.exists())
 
     def test_completed_turn_without_callback_is_failed_and_wakes_next_cycle(self):
         service = FakeService(make_dispatch())

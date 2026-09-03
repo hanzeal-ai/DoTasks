@@ -23,10 +23,12 @@ from .native_dispatch import NativeDispatchMixin
 from .scheduling import TaskSchedulingMixin
 from .integration import TaskIntegrationMixin
 from .settings import TaskSettingsMixin
+from .visuals import TaskVisualMixin
 
 
 class TaskboardService(
     TaskSettingsMixin,
+    TaskVisualMixin,
     TaskPlanningMixin,
     TaskChangeMixin,
     TaskQueryMixin,

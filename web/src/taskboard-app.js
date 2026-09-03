@@ -773,6 +773,34 @@ function selectedProjectPath(values) {
     : selected;
 }
 
+function fileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      const encoded = String(reader.result || "").split(",", 2)[1] || "";
+      encoded ? resolve(encoded) : reject(new Error(`无法读取图片：${file.name}`));
+    });
+    reader.addEventListener("error", () => reject(new Error(`无法读取图片：${file.name}`)));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadVisualReferences(values) {
+  const files = values.getAll("visual_references").filter(file => file instanceof File && file.size);
+  if (files.length > 8) throw new Error("一次最多上传 8 张图片");
+  for (const file of files) {
+    if (file.size > 10 * 1024 * 1024) throw new Error(`${file.name} 超过 10 MiB`);
+  }
+  return Promise.all(files.map(async file => api("/api/visual-artifacts", {
+    method: "POST",
+    body: JSON.stringify({
+      filename: file.name,
+      content_base64: await fileAsBase64(file),
+      purpose: "任务视觉参考",
+    }),
+  })));
+}
+
 document.addEventListener("submit", async event => {
   if (event.target.id === "new-task-form") {
     event.preventDefault();
@@ -782,6 +810,7 @@ document.addEventListener("submit", async event => {
     const project = selectedProjectPath(values);
     button.disabled = true;
     try {
+      const visualReferences = await uploadVisualReferences(values);
       const result = await api("/api/task-intakes/enqueue", {
         method: "POST",
         body: JSON.stringify({
@@ -793,6 +822,7 @@ document.addEventListener("submit", async event => {
           modules: [],
           scope: [],
           out_of_scope: [],
+          visual_references: visualReferences,
           auto_dispatch: values.get("auto_dispatch") === "on",
         }),
       });
@@ -815,6 +845,7 @@ document.addEventListener("submit", async event => {
     const project = selectedProjectPath(values);
     button.disabled = true;
     try {
+      const visualReferences = await uploadVisualReferences(values);
       const result = await api("/api/task-intakes/finalize", {
         method: "POST",
         body: JSON.stringify({
@@ -829,6 +860,7 @@ document.addEventListener("submit", async event => {
           scope: [],
           out_of_scope: [],
           acceptance_criteria: [],
+          visual_references: visualReferences,
           decomposition_tasks: [],
           auto_dispatch: Boolean(project) && values.get("auto_dispatch") === "on",
         }),

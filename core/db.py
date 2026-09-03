@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS requirements (
   scope TEXT NOT NULL DEFAULT '[]',
   out_of_scope TEXT NOT NULL DEFAULT '[]',
   acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+  visual_references TEXT NOT NULL DEFAULT '[]',
   source_thread_id TEXT,
   auto_dispatch INTEGER NOT NULL DEFAULT 1,
   decomposition_plan TEXT NOT NULL DEFAULT '[]',
@@ -451,7 +452,7 @@ CREATE INDEX IF NOT EXISTS idx_native_dispatches_entity ON native_dispatches(ent
 """
 
 # Schema version changes whenever migration output or validation constraints change.
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 
 class Database:
@@ -548,6 +549,7 @@ class Database:
             "goal", "modules", "scope", "out_of_scope", "acceptance_criteria",
             "source_thread_id", "auto_dispatch", "decomposition_plan",
             "decomposition_attempts", "last_decomposition_error", "decomposed_at",
+            "visual_references",
         }.issubset(requirement_columns):
             return True
         if "requirement_decomposition_runs" not in existing_tables:
@@ -691,6 +693,7 @@ class Database:
             "scope": "TEXT NOT NULL DEFAULT '[]'",
             "out_of_scope": "TEXT NOT NULL DEFAULT '[]'",
             "acceptance_criteria": "TEXT NOT NULL DEFAULT '[]'",
+            "visual_references": "TEXT NOT NULL DEFAULT '[]'",
             "source_thread_id": "TEXT",
             "auto_dispatch": "INTEGER NOT NULL DEFAULT 1",
             "decomposition_plan": "TEXT NOT NULL DEFAULT '[]'",

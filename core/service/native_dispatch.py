@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -121,11 +122,19 @@ class NativeDispatchMixin:
                 if direct_task
                 else "调用 get_requirement 获取完整内容，将需求拆成可独立执行、具备明确依赖且状态为 ready 的子任务。"
             )
+            visual_references = requirement.get("visual_references") or []
+            visual_section = (
+                "需求包含图片。拆解前必须逐一读取，并让所有需要这些图片的子任务继承对应附件。\n"
+                "REQUIREMENT_VISUAL_REFERENCES_JSON="
+                + json.dumps(visual_references, ensure_ascii=False, separators=(",", ":"))
+                + "\n"
+                if visual_references else ""
+            )
             prompt = (
                 f"$dotasks-lifecycle\n\n{introduction}"
                 f"需求 ID：{requirement.get('id')}\n"
                 f"拆解运行 ID：{run.get('id')}\n"
-                f"{instruction}"
+                f"{visual_section}{instruction}"
                 "完成后调用 submit_requirement_decomposition；失败时调用 report_requirement_decomposition_failed。"
             )
             return cls._attach_lifecycle_skill(prompt)
