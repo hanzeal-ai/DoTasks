@@ -33,7 +33,7 @@ Delivery contract validation errors are recoverable and leave the run active. Wh
 
 If investigation reveals a major scope decision, call `report_run_blocked` with `waiting_confirmation`. If execution cannot continue after recoverable validation issues have been corrected, call it with `blocked` and a concrete reason. For a known project or environment problem that has one or more exact safe repair files, also pass `failure_category` and `failure_locations`; the service may schedule one bounded repair. Do not provide repair fields for user decisions, approvals, external access, or an uncertain location.
 
-After any successful `report_run_blocked` callback, perform the **Event-driven native handoff** below so the Controller can fill newly available capacity.
+After any successful `report_run_blocked` callback, finish the current worker. The Local Agent observes worker completion and consumes the durable scheduler wakeup.
 
 ## Code Review
 
@@ -46,17 +46,11 @@ A failed review moves to `rework`; it is not an execution failure. After three c
 
 ## Event-driven native handoff
 
-Every lifecycle state transition writes a durable scheduler wakeup. A successful state-changing callback is not the end of the turn: consume that wakeup immediately while the native Codex Agent turn is active, before writing the user-facing response, even if earlier output was truncated.
-
-1. Read the sibling `../dotasks-controller/SKILL.md` and follow its `handoff` mode with base worker ID `codex-native-controller`.
-2. Call `claim_schedule_cycle` with `force=true`, start or resume `code_review.dispatches` followed by `development.dispatches`, pass every `dispatch_attempt_id` while binding, then call `complete_schedule_cycle`.
-3. Do not monitor the spawned workers and do not create scheduled automations. Each spawned lifecycle worker repeats this handoff after its own successful stage callback.
-4. If a lane has no claimable work, leave it idle. If an asynchronous native task is still preparing, resolve it in the current turn; if it cannot be resolved, preserve `pending_thread` and report that the next explicit DoTasks invocation must recover it.
-5. Renew the current dispatch lease to 7200 seconds at lifecycle start and before or after long-running commands. Lease renewal is part of the active worker turn, not a scheduled trigger.
+Every lifecycle state transition writes a durable scheduler wakeup. Submit the required callback exactly once and then finish this CLI/App Server turn. The parent Local Agent monitors `turn/completed`, verifies that the dispatch reached a terminal callback state, releases capacity, and immediately consumes the next pending scheduler generation. Do not call `claim_schedule_cycle`, create another Codex task, or create a scheduled automation from the lifecycle worker. Renew the current dispatch lease before long-running commands; lease renewal is active-run maintenance, not a scheduling trigger.
 
 ## Lifecycle safety
 
 - Treat `paused` and a disabled dispatcher as persisted operator stops. Never bypass them.
-- Never create scheduled work or a hidden App Server dispatcher. Intake kickoff and Lifecycle handoff are the only automatic scheduling triggers.
+- Never create scheduled work. The Local Agent is a persistent event consumer and starts Codex CLI/App Server only when WSS or a completed worker supplies a real wakeup.
 - Only `submit_task_delivery` may move implementation into `code_review`, and only `review_code` may pass the combined review and move a code task to `done`. A non-code task may complete directly from a fully passed delivery.
 - Keep acceptance evidence granular. Do not describe warnings, blocked checks, or unrun browser checks as passing.

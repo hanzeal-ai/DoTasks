@@ -87,19 +87,12 @@ The resulting routes are: code task → code-quality Review → done; non-code t
 6. For a direct task, call `finalize_task_intake` once with `intake_kind=task`, the prepared analysis ID, confirmed task metadata, selected CodeGraph/GitNexus/`source_match` evidence, targets, review checks, quality gate and acceptance plan. At finalization the service performs one project-scoped history lookup using the exact files, symbols and actions, classifies scheduling relations and creates the task. If it returns `requires_confirmation`, resolve only that strong active relation choice and retry the same bundle with explicit `dependency_analysis`. A ready task still requires location evidence, dependency, target-lock, implementation, review-check and acceptance-plan contracts even when Code Review is skipped.
 7. Pass `source_thread_id` to creation when available. Follow the returned
    `controller_kickoff_required` field rather than reconstructing the decision
-   from earlier context: when true, immediately continue with **Automatic
-   dispatch kickoff** below and only report the created ID after that handoff;
-   when false, stop after reporting the queued state.
+   from earlier context. When true, the durable scheduler wakeup is consumed by
+   the Local DoTasks Agent; report the entity as queued for event-driven dispatch.
 
 ### Automatic dispatch kickoff
 
-An explicit Taskboard intake that creates an auto-dispatched `ready` entity also authorizes one immediate Controller kickoff. This handoff is scheduling, not implementation, and runs after the 60-second creation budget has produced the durable queue record.
-
-1. Read the sibling `../dotasks-controller/SKILL.md` and follow its `kickoff` mode with the stable worker ID `codex-native-controller`.
-2. Call `claim_schedule_cycle` with `worker_id=codex-native-controller`, `force=true`, and a 7200-second lease. Process `code_review.dispatches` before `development.dispatches`; the service consumes the durable wakeup and fills configured slots while preserving dependency, target-lock and Worktree gates. Returned work may include earlier eligible tasks rather than only the entity just created.
-3. For every new dispatch, call `create_thread` with the persisted title and full lifecycle prompt as its initial message so the task appears in the Codex App sidebar and starts directly. Use `send_message_to_thread` only to resume a recorded native task. Resolve asynchronous creation and bind each real `threadId` before reporting that execution started, then stop without monitoring the spawned workers; each lifecycle worker owns the next event-driven handoff after its stage callback.
-4. After every returned dispatch is bound, durably pending, or failed, call `complete_schedule_cycle`. If dispatching is disabled or no work is currently claimable, leave the entity in `ready` and report it as queued. Never claim that execution started without a persisted real thread binding.
-5. If native task creation tools are unavailable in the current host, leave the durable scheduler wakeup pending and state that a later explicit DoTasks or manual Controller must perform the handoff. Never create a scheduled automation.
+An intake that creates an auto-dispatched `ready` entity writes `scheduler_state.pending` in the same transaction. In the three-layer deployment, the cloud returns the command result and emits a WSS notification; the Local Agent then claims one scheduler cycle and starts or resumes every eligible Codex CLI/App Server worker. Do not call `claim_schedule_cycle`, `create_thread`, or `send_message_to_thread` from the intake task. Never create a scheduled automation. Execution has started only after the Local Agent persists the real CLI thread ID through `bind_native_dispatch`; before that, report the entity as queued.
 
 For workflow v2, scheduling metadata is a DoTasks-only object. Use `depends_tasks` for every direct prerequisite, `conflicts_tasks` for overlapping active work without an artifact dependency, `history_tasks` for the ordered same-project lineage and `history_edges` to preserve branches. Use `continues_from_task_id` only when the development thread should resume. `depends_tasks` must all be done before dispatch; history never blocks scheduling. None of these fields enter development or Code Review model context.
 

@@ -5,6 +5,7 @@ import base64
 import hmac
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -18,6 +19,11 @@ from taskboard.config import CLOUD_MODE, ServerConfig
 from taskboard.http_base import BaseDoTasksHandler, MAX_JSON_BODY_BYTES
 from taskboard.http_security import HTTPRequestError
 from taskboard.version import VERSION
+from taskboard.websocket_transport import (
+    WebSocketConnection,
+    read_frame,
+    websocket_accept,
+)
 
 from .store import RelayStore
 
@@ -87,6 +93,51 @@ class RelayHandler(BaseDoTasksHandler):
     def _read_agent_json(self) -> dict[str, Any]:
         return self._read_json(AGENT_BODY_LIMIT)
 
+    @property
+    def relay_server(self) -> "RelayHTTPServer":
+        return self.server  # type: ignore[return-value]
+
+    def _serve_agent_events(self) -> None:
+        agent_id = self._require_agent()
+        if self.headers.get("Upgrade", "").lower() != "websocket":
+            raise HTTPRequestError(
+                HTTPStatus.UPGRADE_REQUIRED, "Agent event stream requires WebSocket"
+            )
+        if "upgrade" not in self.headers.get("Connection", "").lower():
+            raise HTTPRequestError(HTTPStatus.BAD_REQUEST, "Invalid WebSocket connection")
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        if not key or self.headers.get("Sec-WebSocket-Version") != "13":
+            raise HTTPRequestError(HTTPStatus.BAD_REQUEST, "Invalid WebSocket handshake")
+        self.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", websocket_accept(key))
+        self.end_headers()
+        connection = WebSocketConnection(self.connection)
+        registration = self.relay_server.register_agent_socket(agent_id, connection)
+        self.store.touch_agent(agent_id, "", {"transport": "websocket"})
+        try:
+            self.relay_server.notify_agent(agent_id, "connected")
+            while True:
+                opcode, payload = read_frame(self.rfile)
+                if opcode == 0x8:
+                    break
+                if opcode == 0x9:
+                    connection.send(payload, opcode=0xA)
+                elif opcode == 0x1:
+                    message = json.loads(payload.decode("utf-8"))
+                    if message.get("type") == "heartbeat":
+                        self.store.touch_agent(
+                            agent_id,
+                            str(message.get("board_hash") or ""),
+                            message.get("metadata") or {},
+                        )
+        except (ConnectionError, BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            self.relay_server.unregister_agent_socket(agent_id, registration)
+            self.close_connection = True
+
     def _serve_relay_events(self) -> None:
         try:
             cursor = int(self.headers.get("Last-Event-ID", "0") or "0")
@@ -130,6 +181,7 @@ class RelayHandler(BaseDoTasksHandler):
         command_id = self.store.enqueue(
             self.relay_config.agent_id, method, self.path, headers, body
         )
+        self.relay_server.notify_agent(self.relay_config.agent_id, "command_available")
         result = self.store.wait_result(
             command_id, self.relay_config.command_timeout_seconds
         )
@@ -164,6 +216,9 @@ class RelayHandler(BaseDoTasksHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         try:
+            if parsed.path == "/_agent/v1/events":
+                self._serve_agent_events()
+                return
             if parsed.path.startswith("/_agent/"):
                 self._json(HTTPStatus.NOT_FOUND, {"error": "Agent route not found"})
                 return
@@ -180,7 +235,7 @@ class RelayHandler(BaseDoTasksHandler):
                         "agent": agent,
                         "dispatcher": {
                             "enabled": None,
-                            "execution_mode": "native_codex_controller",
+                            "execution_mode": "codex_cli_app_server",
                             "running": None,
                         },
                     },
@@ -212,6 +267,10 @@ class RelayHandler(BaseDoTasksHandler):
                     payload.get("metadata") or {},
                 )
                 deadline = time.monotonic() + self.relay_config.agent_poll_seconds
+                if payload.get("wait_seconds") is not None:
+                    deadline = time.monotonic() + max(
+                        0, min(float(payload["wait_seconds"]), 25)
+                    )
                 command = self.store.claim(agent_id)
                 while command is None and time.monotonic() < deadline:
                     time.sleep(0.25)
@@ -275,7 +334,50 @@ class RelayHandler(BaseDoTasksHandler):
 
 
 class RelayHTTPServer(ThreadingHTTPServer):
-    pass
+    daemon_threads = True
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._agent_sockets: dict[str, dict[int, WebSocketConnection]] = {}
+        self._agent_sockets_lock = threading.Lock()
+        self._next_agent_socket_id = 0
+
+    def register_agent_socket(
+        self, agent_id: str, connection: WebSocketConnection
+    ) -> int:
+        with self._agent_sockets_lock:
+            self._next_agent_socket_id += 1
+            registration = self._next_agent_socket_id
+            self._agent_sockets.setdefault(agent_id, {})[registration] = connection
+            return registration
+
+    def unregister_agent_socket(self, agent_id: str, registration: int) -> None:
+        with self._agent_sockets_lock:
+            connections = self._agent_sockets.get(agent_id)
+            if not connections:
+                return
+            connections.pop(registration, None)
+            if not connections:
+                self._agent_sockets.pop(agent_id, None)
+
+    def notify_agent(self, agent_id: str, event: str) -> int:
+        payload = json.dumps(
+            {
+                "type": event,
+                "event_id": self.RequestHandlerClass.store.latest_event_id(),
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        with self._agent_sockets_lock:
+            connections = list(self._agent_sockets.get(agent_id, {}).items())
+        delivered = 0
+        for registration, connection in connections:
+            try:
+                connection.send(payload)
+                delivered += 1
+            except OSError:
+                self.unregister_agent_socket(agent_id, registration)
+        return delivered
 
 
 def build_relay_server(config: RelayConfig) -> RelayHTTPServer:

@@ -185,11 +185,25 @@ class TaskboardHTTPServerTest(unittest.TestCase):
             self.assertEqual(404, status, path)
             self.assertEqual("API route not found", payload["error"])
 
-    def test_health_reports_native_controller_execution_mode(self) -> None:
+    def test_health_reports_cli_app_server_execution_mode(self) -> None:
         status, _, payload = self.request("GET", "/api/health")
         self.assertEqual(200, status)
-        self.assertEqual("native_codex_controller", payload["dispatcher"]["execution_mode"])
+        self.assertEqual("codex_cli_app_server", payload["dispatcher"]["execution_mode"])
+        self.assertFalse(payload["dispatcher"]["agent_configured"])
         self.assertIsNone(payload["dispatcher"]["running"])
+
+    def test_resuming_dispatcher_persists_agent_signal(self) -> None:
+        status, _, payload = self.request(
+            "POST", "/api/dispatcher/resume", b"{}",
+            Origin=self.origin, **{"Content-Type": "application/json"},
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(payload["enabled"])
+        self.assertEqual("pending", payload["agent_signal"])
+        self.assertFalse(payload["agent_configured"])
+        self.assertTrue(
+            self.server.RequestHandlerClass.service.scheduler_snapshot()["pending"]
+        )
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,6 @@
 # DoTasks
 
-一个本地优先的 Codex 原生任务调度系统：用户显式调用 DoTasks 时补全并确认需求，确认后进入任务队列；原生 DoTasks Controller 为开发、Code Review、验收和返工创建或恢复可在 Codex App 中直接查看的任务，DoTasks 只保存队列、状态机、运行审计和验收结果。普通开发请求不会自动创建 DoTasks 任务。
+一个由云端管理、本地执行的 Codex 任务调度系统：用户显式调用 DoTasks 时补全并确认需求，确认后进入任务队列；Local DoTasks Agent 根据云端 WSS 事件创建或恢复 Codex CLI/App Server 工作线程，DoTasks 保存队列、状态机、运行审计和验收结果。普通开发请求不会自动创建 DoTasks 任务。
 
 ## 当前能力
 
@@ -8,7 +8,7 @@
 - 建立任务时使用已定位的文件、符号和修改动作执行一次项目级 Obsidian 历史检索，并按 CodeGraph、GitNexus、直接源码匹配的顺序定位目标；每条验收标准必须映射到具体目标与检查方式；
 - 任务状态机：待就绪、任务队列、调查、实现、验收、返工、待确认、暂停、完成、阻塞；
 - 原子状态更新，避免多个执行器重复领取；
-- 原生 Controller Skill 通过 Codex App 自带的任务能力创建、恢复、等待独立任务；DoTasks 不启动 App Server；
+- Local Agent 事件驱动地调用 Codex CLI/App Server 创建、恢复和等待独立工作线程；不依赖 Codex Desktop 活跃窗口，也不创建周期性调度任务；
 - 多前置任务依赖闸门、目标位置锁、文件/符号冲突关系、可配置 Worktree 并行开发、串行补丁集成、自动续租和异常会话熔断；
 - 调度开关与任务暂停状态持久化，重启后不会意外恢复领取；
 - Code Review 不达标进入返工；普通任务验收不达标会创建关联 Bug，原任务等待 Bug 修复后重新验收；只有执行/返工会话意外退出、连接中断或未提交结果才进入执行失败；
@@ -27,7 +27,7 @@
 - React + Vite 本地看板，生产资源构建到 `static/`；
 - DoTasks 页面只保留任务看板、需求看板、Token、设置和调度开关；需求看板集中展示已确认需求及其拆分任务，不再维护项目或聊天会话；
 - 隐藏的 hardened-runtime `DoTasks Helper.app` 提供打包运行时、登录自启和服务保活，不申请 Documents 或完全磁盘访问；
-- 每个执行任务均是 Codex App 原生任务；真实 `threadId` 回写 DoTasks 后用于审计与失败重试；
+- 每个执行任务均是 Codex CLI/App Server 工作线程；真实 `threadId` 回写 DoTasks 后用于审计与失败重试，但不会显示为 Codex Desktop 原生侧栏任务；
 - Token预算、上下文数量限制和会话摘要字段；完整历史对话默认不加载；看板分别展示原始 Token 与有效预算 Token，并按阶段展示输入、缓存输入、输出和推理 Token。
 
 ## 多会话执行
@@ -37,7 +37,7 @@ Codex Skill 充当编排器，本地服务作为任务系统记录：
 1. Skill 先确认需求边界，判断应修订现有任务、创建单个新任务，还是拆成多个可独立交付和验收的任务；
 2. 每个任务通过 `prepare_task_location` 建立一次受限定位计划，按 CodeGraph、GitNexus、直接源码匹配选择首个可用方式，并保存精确的 `{file, mode, symbols, tasks}` 执行目标和验收方式；
 3. `finalize_task_intake` 是唯一任务创建入口：接收一次性定位分析包，由服务端根据精确文件/符号/动作查询项目历史图谱，形成 `depends_tasks`、`conflicts_tasks`、`history_tasks` 和 `history_edges` 后原子创建任务；
-4. 显式 DoTasks intake 创建 `auto_dispatch=true` 的 ready 实体后，当前会话立即以 Controller kickoff 模式消费一次持久化调度唤醒；每次任务或 Run 状态流转都会再次写入唤醒，Controller 按 Review 优先、返工优先和开发并发容量创建或恢复原生工作任务；
+4. 显式 DoTasks intake 创建 `auto_dispatch=true` 的 ready 实体后会写入持久化调度唤醒；云端命令触发 WSS 通知，本地 Agent 按 Review 优先、返工优先和开发并发容量创建或恢复 Codex CLI/App Server 工作线程；
 5. 执行会话实现并用 `submit_task_delivery` 提交真实改动清单及逐条验收证据；
 6. 代码类任务由独立验证会话完成 Code Review：服务端先执行确定性检查，Review Agent 只根据目标、约束和真实 Git Diff 判断正确性、安全、权限边界、回归与无关修改；不通过则恢复原开发会话返工，通过后直接完成；
 7. 文档、调研、文案、规划和无运行时影响的元数据任务不创建 Code Review 会话；开发交付的逐条证据全部通过后直接完成；
@@ -60,18 +60,140 @@ macos/      隐藏 Helper 的 Swift 源码与 Info.plist
 
 `core/` 不负责页面渲染，`web/` 只通过 `/api` 使用后端能力；任务创建与调度仍由 Python 核心层执行，不依赖 Vite 开发服务器。
 
-## 启动
+## 全新 Mac 安装与首次使用
 
-首次开发先安装 Web 依赖：
+本地服务、Codex 原生任务、Git/Worktree 和 Helper 运行在 Mac 上；云端服务器只提供页面、
+消息中继和图谱镜像，不能替代本机 Codex。因此，一台全新的电脑至少需要完成下面五步。
+
+### 1. 准备运行环境
+
+- 安装并登录 Codex 桌面应用，确认同一用户下可以执行 `codex` CLI；
+- 安装 Git、Python 3.14、Node.js 24（包含 npm）和 `uv`；
+- 执行 `xcode-select --install` 安装 Xcode Command Line Tools，Helper 构建需要其中的
+  `/usr/bin/swiftc` 和代码签名工具。
+
+安装后先确认命令实际可用：
 
 ```bash
-npm --prefix web install
+codex --version
+git --version
+python3 --version
+node --version
+npm --version
+uv --version
+/usr/bin/swiftc --version
 ```
 
-启动后端：
+`python3` 必须解析到 Python 3.14 或更高版本。临时 shell alias 不会被登录自启的 Helper
+继承；如果机器上有多个 Python，应确保 PATH 中的 `python3` 本身满足版本要求。
+
+### 2. 获取源码并安装前端依赖
 
 ```bash
-cd /Users/sanmws/Documents/codex-taskboard
+git clone https://github.com/hanzeal-ai/DoTasks.git "$HOME/Documents/DoTasks"
+cd "$HOME/Documents/DoTasks"
+npm --prefix web ci
+./scripts/test
+```
+
+仓库可以放在其他位置，但后续 personal marketplace 必须指向它的真实绝对路径。
+
+### 3. 将 DoTasks 注册为本地 Codex 插件
+
+Codex 从 personal marketplace 安装本地插件。全新用户先创建目录，并让 marketplace 中的
+`./plugins/dotasks` 指向当前仓库：
+
+```bash
+mkdir -p "$HOME/plugins" "$HOME/.agents/plugins"
+ln -s "$PWD" "$HOME/plugins/dotasks"
+```
+
+然后创建 `~/.agents/plugins/marketplace.json`：
+
+```json
+{
+  "name": "personal",
+  "interface": {
+    "displayName": "Personal"
+  },
+  "plugins": [
+    {
+      "name": "dotasks",
+      "source": {
+        "source": "local",
+        "path": "./plugins/dotasks"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
+```
+
+如果该文件已经存在，不要覆盖；只需把上面的 `dotasks` 对象合并进现有 `plugins` 数组。
+随后安装插件：
+
+```bash
+codex plugin marketplace list
+codex plugin add dotasks@personal
+```
+
+Codex 官方的本地插件和 marketplace 说明见
+[Package your plugin](https://developers.openai.com/plugins/build/plugins)。
+
+### 4. 安装并启动本地 Helper
+
+```bash
+./scripts/build-helper --install
+curl -fsS http://127.0.0.1:8765/api/health
+```
+
+安装命令会构建 Web 静态资源、打包 Helper，并注册当前 macOS 用户的 LaunchAgent。以后登录
+系统时，本地服务会自动恢复，不需要长期打开终端。Helper 和运行数据位于：
+
+```text
+~/Library/Application Support/DoTasks/
+```
+
+看板地址为 <http://127.0.0.1:8765>。健康接口应返回包含 `"ok": true` 的 JSON。
+
+### 5. 在 Codex 中首次使用
+
+1. 完全退出并重新打开 Codex，或至少新建一个 Codex 任务，使新安装的 Skill 和 MCP 生效；
+2. 打开一个本机存在、且当前用户和 Codex 都有权限访问的 Git 项目；
+3. 显式输入 `$dotasks` 或提及 DoTasks 创建需求，也可以输入“打开任务看板”；
+4. 首次数据库默认暂停调度，在看板右上角点击“恢复调度”后再执行队列。
+
+不使用云端时，到这里即可完整使用 DoTasks。若已有云端 Relay，再按下方“云端部署与本地
+Agent”配置连接；云端断开不影响这个本地流程。
+
+### 更新已有安装
+
+源码更新后执行：
+
+```bash
+git pull
+npm --prefix web ci
+./scripts/full-update
+```
+
+该命令会测试源码、重新安装 Helper 和插件，并检查源码、插件缓存与打包运行时是否一致。
+更新完成后新建一个 Codex 任务。服务异常时优先检查：
+
+```bash
+curl -fsS http://127.0.0.1:8765/api/health
+tail -n 100 "$HOME/Library/Application Support/DoTasks/logs/server.err.log"
+tail -n 100 "$HOME/Library/Application Support/DoTasks/logs/agent.err.log"
+```
+
+## 源码开发启动
+
+不安装 Helper 时，可以直接从仓库启动本地服务：
+
+```bash
 ./scripts/start
 ```
 
@@ -91,9 +213,9 @@ npm --prefix web run dev
 npm --prefix web run build
 ```
 
-新建运行数据库默认关闭调度。需要执行队列时，先在看板中点击“恢复调度”。恢复操作及之后每个任务/Run 状态流转都会写入 `scheduler_state` 持久化唤醒；显式 DoTasks intake 会立即执行一次 Controller kickoff。Controller 只调度，不直接修改代码，工作任务通过 `$dotasks-lifecycle` 完成当前阶段并将结果回调 MCP。
+新建运行数据库默认关闭调度。需要执行队列时，在看板中点击“恢复调度”；HTTP 层会同时开启调度并写入持久化 Agent 信号。恢复操作及之后每个任务/Run 状态流转都会写入 `scheduler_state`。云端通过 WSS 通知常驻 Local Agent，Agent 只在收到真实事件或已有工作线程结束时领取需求拆解、开发、返工和 Code Review；没有周期性 heartbeat，也不会在空队列上消耗模型 Token。工作线程通过 `$dotasks-lifecycle` 完成当前阶段并将结果回调 MCP。
 
-Intake Agent 在创建任务后立即调用 Codex App 原生 `create_thread`，以完整派发 Prompt 作为新任务的首条消息；每个成功创建的任务都会显示在 Codex App 左侧任务栏并独立执行。生命周期 Agent 在成功提交拆解、交付、阻塞或 Code Review 结果后执行一次 handoff，通过全局租约消费调度代次：先恢复 Review，再按返工优先顺序填满 `development` 槽位，并在绑定导致新状态变化时继续消费有限轮次。每个派发都有独立 `dispatch_attempt_id`，过期回调不能绑定到新的派发尝试。只有续接已记录的开发、返工或 Review 任务时才调用 `send_message_to_thread`。设置页可开启并行开发并配置 1–8 个开发槽位（默认关闭、默认并发数 2）；安全并行只用于目标文件互不重叠、无显式依赖且没有项目级排他目标的任务，每个任务从固定的 DoTasks 集成分支 Revision 创建独立 Codex Worktree。同文件任务、迁移/Schema、依赖清单和锁文件保持串行；原工作区的未托管改动只阻塞目标文件与其重叠的任务，不影响其他任务并行。Review 通过后先串行提交到集成分支，再在不覆盖用户改动的前提下同步回原工作区；冲突时只延迟同步。任务领取时保持 `claimed`，只有真实 `threadId` 成功绑定后才进入 `implementing`。`scheduler_state.pending` 只负责持久化防丢，不是轮询器；自动调度只由 Intake kickoff 和每次 Lifecycle 状态变更后的 handoff 触发。异常退出留下的 pending 由下一次显式 DoTasks 或手动 Controller 恢复，不创建定时任务。
+Local Agent 通过 `codex app-server` 的 `thread/start`、`thread/resume` 和 `turn/start` 创建或续接工作线程；拿到真实 `threadId` 后才调用 `bind_native_dispatch`，因此任务领取状态不会领先于真实执行会话。生命周期回调产生的新唤醒在当前工作线程结束后立即由 Agent 消费；线程异常退出且没有提交回调时，Agent 回写派发失败并交给现有重试/熔断策略。设置页可开启并行开发并配置 1–8 个开发槽位（默认关闭、默认并发数 2）；Worktree 模式仍从固定 `base_ref` 创建隔离工作区。每个派发保留独立 `dispatch_attempt_id`，过期回调不能绑定到新的派发尝试。
 
 指定端口：
 
@@ -105,11 +227,26 @@ HTTP 服务只允许绑定 `localhost` 或回环 IP。API 会校验 `Host` 与�
 
 ### 云端部署与本地 Agent
 
-云端模式沿用同一套页面和 `/api` 交互。云端 Relay 保存持久命令队列、Agent 在线状态和
-Obsidian Markdown 镜像；本地 Agent 只建立出站连接，并把命令转发给现有的本地服务。
-任务数据库、Git/Worktree、MCP 和 Codex Controller 仍在本机，因此本地原子调度及现有
-Codex 原生任务交互不会被复制或改写。云端不可用时，`./scripts/start` 的纯本地模式仍可
-独立运行。
+云端模式沿用同一套页面和 `/api` 交互。云端 Relay 保存 Dispatch Outbox、Agent 在线状态和
+Obsidian Markdown 镜像；命令入队后通过 WSS 向 Local DoTasks Agent 发送轻量通知，Agent
+再通过 HTTPS 领取命令并提交回调。Local Agent 只建立出站连接，并把命令转发给现有的本地
+服务，不在云端执行项目代码。
+
+本地服务收到恢复调度或任务状态变更命令后，持久化 `scheduler_state.pending`。Local Agent
+在同一个 WSS 事件回合消费该信号，并使用 Codex CLI/App Server 的 `thread/start`、
+`thread/resume` 和 `turn/start` 创建、续接开发与 Review 工作线程；成功取得真实 `threadId`
+后才绑定 Dispatch。任务数据库、Git/Worktree、Diff、MCP 和 Codex 执行器都留在本机。
+
+```text
+浏览器 -> DoTasks Cloud / Dispatch Outbox
+                     | WSS 通知 + HTTPS 命令/回调
+                     v
+            Local DoTasks Agent
+                     | event wake
+                     v
+            Codex CLI / App Server
+            thread/start + turn/start
+```
 
 服务器安装 Docker 后，在仓库目录执行：
 
@@ -142,10 +279,10 @@ Agent 配置保存在 `~/Library/Application Support/DoTasks/cloud-agent.json`�
 
 ## Obsidian
 
-默认使用项目内的测试Vault：
+默认使用仓库内的测试 Vault：
 
 ```text
-/Users/sanmws/Documents/codex-taskboard/data/obsidian-vault
+<仓库目录>/data/obsidian-vault
 ```
 
 连接现有Vault：
@@ -186,7 +323,7 @@ skills/dotasks-lifecycle/SKILL.md
 把TASK-0012标记为TASK-0004的变更任务。
 ```
 
-Controller 生成的需求拆解、执行、返工和 Code Review 提示会显式调用 `$dotasks-lifecycle`。该内部 Skill 同样禁止语义自动调用，并要求提示包含对应的实体 ID 与运行 ID。Controller 会等待已绑定的原生任务结束并复核持久化 Dispatch；若任务已经结束却没有提交生命周期回调，会中断未提交的 Run 并按现有重试策略恢复，而不是让任务永久停留在执行或 Code Review 状态。
+Local Agent 生成的需求拆解、执行、返工和 Code Review 提示会显式调用 `$dotasks-lifecycle`。该内部 Skill 同样禁止语义自动调用，并要求提示包含对应的实体 ID 与运行 ID。Agent 会等待已绑定的 CLI 工作线程结束并复核持久化 Dispatch；若线程已经结束却没有提交生命周期回调，会中断未提交的 Run 并按现有重试策略恢复，而不是让任务永久停留在执行或 Code Review 状态。
 
 插件只提供 Skill、MCP 与会话工具，不再向 Codex 左侧面板注入入口。生产方式使用隐藏的签名 Helper 启动 DoTasks 服务：
 
@@ -200,9 +337,9 @@ Helper 安装在：
 ~/Library/Application Support/DoTasks/DoTasks Helper.app
 ```
 
-它设置了 `LSUIElement`，不会出现在 Dock 或 Codex 左侧面板。Helper 只负责提供打包运行时、启动并保活 DoTasks HTTP 服务；启动时不会弹出项目文件夹选择窗口，也不维护逐项目 allowlist。
+它设置了 `LSUIElement`，不会出现在 Dock 或 Codex 左侧面板。Helper 负责提供打包运行时，并保活 DoTasks HTTP 服务和 Local Agent；启动时不会弹出项目文件夹选择窗口，也不维护逐项目 allowlist。
 
-安装脚本同时创建用户级 LaunchAgent；登录后会自动恢复 Helper 和 DoTasks HTTP 服务。Helper 不启动 Codex App Server。项目路径仍必须是存在的合法绝对目录；实际访问能力由当前用户的文件系统权限、macOS TCC 与 Codex 工作区边界共同约束。服务仍只监听：
+安装脚本同时创建用户级 LaunchAgent；登录后会自动恢复 Helper、DoTasks HTTP 服务和 Local Agent。Local Agent 仅在收到执行事件时为相应任务启动 Codex App Server 子进程。项目路径仍必须是存在的合法绝对目录；实际访问能力由当前用户的文件系统权限、macOS TCC 与 Codex 工作区边界共同约束。服务仍只监听：
 
 ```text
 http://127.0.0.1:8765
@@ -251,10 +388,11 @@ development -> code_review -> done
 `./scripts/build-helper` 验证。其他独立校验：
 
 ```bash
-uv run --with pyyaml /Users/sanmws/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/dotasks
-uv run --with pyyaml /Users/sanmws/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/dotasks-lifecycle
-uv run --with pyyaml /Users/sanmws/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/dotasks-controller
-python3 /Users/sanmws/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py .
+CODEX_SYSTEM_SKILLS="${CODEX_HOME:-$HOME/.codex}/skills/.system"
+uv run --with pyyaml "$CODEX_SYSTEM_SKILLS/skill-creator/scripts/quick_validate.py" skills/dotasks
+uv run --with pyyaml "$CODEX_SYSTEM_SKILLS/skill-creator/scripts/quick_validate.py" skills/dotasks-lifecycle
+uv run --with pyyaml "$CODEX_SYSTEM_SKILLS/skill-creator/scripts/quick_validate.py" skills/dotasks-controller
+python3 "$CODEX_SYSTEM_SKILLS/plugin-creator/scripts/validate_plugin.py" .
 ```
 
 ## API摘要

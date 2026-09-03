@@ -118,6 +118,16 @@ if [ "$INSTALL" = true ]; then
   if /bin/launchctl print "$SERVICE_DOMAIN/$HELPER_LABEL" >/dev/null 2>&1; then
     /bin/launchctl bootout "$SERVICE_DOMAIN/$HELPER_LABEL"
   fi
+  stale_agent_pids=$(/usr/bin/pgrep -f 'taskboard.agent --wait-for-config' 2>/dev/null || true)
+  for stale_agent_pid in $stale_agent_pids; do
+    stale_agent_command=$(/bin/ps -p "$stale_agent_pid" -o command= 2>/dev/null || true)
+    stale_agent_cwd=$(/usr/sbin/lsof -a -p "$stale_agent_pid" -d cwd -Fn 2>/dev/null | /usr/bin/sed -n 's/^n//p' || true)
+    case "$stale_agent_command:$stale_agent_cwd" in
+      *" -m taskboard.agent --wait-for-config:$INSTALL_PATH/Contents/Resources/runtime")
+        /bin/kill -TERM "$stale_agent_pid"
+        ;;
+    esac
+  done
   listener_pids=$(/usr/sbin/lsof -nP -t -iTCP:8765 -sTCP:LISTEN 2>/dev/null || true)
   for listener_pid in $listener_pids; do
     listener_command=$(/bin/ps -p "$listener_pid" -o command= 2>/dev/null || true)

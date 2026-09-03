@@ -509,9 +509,13 @@ async function handleTaskAction(event) {
   if (dispatcherToggle) {
     const action = dispatcherToggle.dataset.action;
     try {
-      await api(`/api/dispatcher/${action}`, {method:"POST", body:JSON.stringify({reason:"用户从任务看板暂停"})});
+      const result = await api(`/api/dispatcher/${action}`, {method:"POST", body:JSON.stringify({reason:"用户从任务看板暂停"})});
       await load();
-      toast(action === "pause" ? "调度已暂停；现有任务继续运行" : "调度已恢复；等待 Controller 领取任务");
+      toast(action === "pause"
+        ? "调度已暂停；现有任务继续运行"
+        : result.agent_configured
+          ? "调度已恢复；已发送 Local Agent 信号"
+          : "调度已恢复，但 Local Agent 尚未配置云端连接");
     } catch (error) { toast(error.message); }
     return true;
   }

@@ -18,6 +18,14 @@ from core.workflow import workflow_metadata
 class TaskboardHandler(BaseDoTasksHandler):
     service: TaskboardService
 
+    def _dispatcher_status(self) -> dict[str, Any]:
+        return {
+            "enabled": self.service.dispatcher_enabled(),
+            "execution_mode": "codex_cli_app_server",
+            "agent_configured": (self.service.data_home / "cloud-agent.json").is_file(),
+            "running": None,
+        }
+
     def _serve_event_stream(self) -> None:
         try:
             cursor = int(self.headers.get("Last-Event-ID", "0") or "0")
@@ -60,11 +68,7 @@ class TaskboardHandler(BaseDoTasksHandler):
                     {
                         "ok": True,
                         "version": VERSION,
-                        "dispatcher": {
-                            "enabled": self.service.dispatcher_enabled(),
-                            "execution_mode": "native_codex_controller",
-                            "running": None,
-                        },
+                        "dispatcher": self._dispatcher_status(),
                     },
                 )
             elif parsed.path == "/api/workflow":
@@ -75,11 +79,7 @@ class TaskboardHandler(BaseDoTasksHandler):
                 self._serve_event_stream()
             elif parsed.path == "/api/board":
                 board = self.service.board()
-                board["dispatcher"] = {
-                    "enabled": self.service.dispatcher_enabled(),
-                    "execution_mode": "native_codex_controller",
-                    "running": None,
-                }
+                board["dispatcher"] = self._dispatcher_status()
                 self._json(HTTPStatus.OK, board)
             elif parsed.path == "/api/integrations":
                 query = parse_qs(parsed.query)
@@ -168,7 +168,16 @@ class TaskboardHandler(BaseDoTasksHandler):
                     if payload.get("resume_tasks")
                     else self.service.set_dispatcher_enabled(True)
                 )
-                self._json(HTTPStatus.OK, result)
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        **result,
+                        "agent_signal": "pending",
+                        "agent_configured": (
+                            self.service.data_home / "cloud-agent.json"
+                        ).is_file(),
+                    },
+                )
             elif match := re.fullmatch(r"/api/tasks/([^/]+)/resume", parsed.path):
                 self._json(HTTPStatus.OK, self.service.resume_task(match.group(1)))
             elif match := re.fullmatch(r"/api/tasks/([^/]+)/transition", parsed.path):

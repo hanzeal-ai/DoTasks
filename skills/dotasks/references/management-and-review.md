@@ -5,8 +5,8 @@ Read this reference only for explicit dispatch, review, rework, traceability, re
 ## Dispatch and execution
 
 - Do not implement a queued task in the intake or dispatcher conversation.
-- `$dotasks-controller` calls `claim_schedule_cycle` as the only scheduling entry. One cycle fills the independent `code_review` and `development` lanes: Code Review has one slot and development uses the configured parallel slot count. All claims preserve dependency, project-exclusive, target-lock and isolated-Worktree gates. Requirement decomposition shares a development slot.
-- A new or resumed native worker task must use the persisted `$dotasks-lifecycle` prompt and be bound with `bind_native_dispatch` only after a real thread ID exists. Never bind the controller conversation or a `clientThreadId`.
+- The Local DoTasks Agent calls `claim_schedule_cycle` as the only automatic scheduling entry. One event-driven cycle fills the independent `code_review` and `development` lanes: Code Review has one slot and development uses the configured parallel slot count. All claims preserve dependency, project-exclusive, target-lock and isolated-Worktree gates. Requirement decomposition shares a development slot.
+- A new or resumed Codex CLI/App Server worker must use the persisted `$dotasks-lifecycle` prompt and be bound with `bind_native_dispatch` only after a real CLI thread ID exists.
 - Execution starts from saved targets, location evidence, acceptance plan and `RUN_CONTEXT_JSON`. Current code is authoritative; expand location only when a saved target is missing or contradicted.
 - Only `submit_task_delivery` moves implementation into code review. It requires exact in-lock changed locations and criterion-level evidence. Store a compact conversation summary after delivery.
 - A material new product decision moves the task to `waiting_confirmation`; an external blocker is reported concretely.
@@ -28,5 +28,5 @@ Read this reference only for explicit dispatch, review, rework, traceability, re
 
 - `open_taskboard` returns the local URL and startup command. The default URL is `http://127.0.0.1:8765`.
 - Pausing the dispatcher only disables new claims. It never changes task status and never interrupts an active native worker.
-- For an explicit DoTasks request to resume scheduling, call `set_dispatcher_enabled` with `enabled=true`, then follow `$dotasks-controller` manual mode so the current event-driven turn immediately sweeps Code Review and every development slot. A dashboard-only toggle persists the switch but cannot wake Codex without an active Agent turn.
+- For an explicit DoTasks request to resume scheduling, call `set_dispatcher_enabled` with `enabled=true`. The cloud command's WSS notification wakes the Local Agent, which immediately sweeps Code Review and every development slot.
 - Resuming the dispatcher does not resume individually paused tasks automatically. Reserve task status `failed` for execution failure, not review rejection or interruption.

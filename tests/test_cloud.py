@@ -5,16 +5,18 @@ import hashlib
 import http.client
 import json
 import os
+import socket
 import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from taskboard.agent import AgentConfig, RelayAgent, load_agent_config, save_agent_config
 from taskboard.cloud.server import RelayConfig, build_relay_server
 from taskboard.cloud.store import RelayStore
 from taskboard.config import CLOUD_MODE, ServerConfig
+from taskboard.websocket_transport import encode_frame, read_frame, websocket_accept
 
 
 class RelayStoreTest(unittest.TestCase):
@@ -194,6 +196,74 @@ class RelayHTTPServerTest(unittest.TestCase):
         self.assertEqual(200, response_status)
         self.assertEqual({"tasks": []}, json.loads(response_body))
 
+    def test_websocket_notifies_agent_before_https_claim(self) -> None:
+        connection = socket.create_connection(("127.0.0.1", self.port), timeout=2)
+        key = base64.b64encode(b"0123456789abcdef").decode("ascii")
+        connection.sendall(
+            (
+                "GET /_agent/v1/events HTTP/1.1\r\n"
+                "Host: dotasks.test\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\n"
+                "Sec-WebSocket-Version: 13\r\n"
+                f"Authorization: Bearer {self.config.agent_token}\r\n"
+                "\r\n"
+            ).encode("ascii")
+        )
+        stream = connection.makefile("rb")
+        self.assertIn(b"101 Switching Protocols", stream.readline())
+        response_headers: dict[str, str] = {}
+        while True:
+            line = stream.readline()
+            if line in {b"\r\n", b"\n", b""}:
+                break
+            name, value = line.decode("iso-8859-1").split(":", 1)
+            response_headers[name.lower()] = value.strip()
+        self.assertEqual(websocket_accept(key), response_headers["sec-websocket-accept"])
+        opcode, payload = read_frame(stream)
+        self.assertEqual(0x1, opcode)
+        self.assertEqual("connected", json.loads(payload)["type"])
+
+        received: dict[str, object] = {}
+
+        def browser_request() -> None:
+            received["response"] = self.request(
+                "GET", "/api/board?view=all", headers=self.browser_headers
+            )
+
+        browser = threading.Thread(target=browser_request)
+        browser.start()
+        opcode, payload = read_frame(stream)
+        self.assertEqual(0x1, opcode)
+        self.assertEqual("command_available", json.loads(payload)["type"])
+
+        status, _, body = self.agent_post(
+            "/_agent/v1/claim",
+            {
+                "agent_id": "mac",
+                "board_hash": "abc",
+                "metadata": {"version": "1"},
+                "wait_seconds": 0,
+            },
+        )
+        self.assertEqual(200, status)
+        command = json.loads(body)["command"]
+        self.agent_post(
+            "/_agent/v1/complete",
+            {
+                "agent_id": "mac",
+                "command_id": command["id"],
+                "status": 200,
+                "headers": {"Content-Type": "application/json"},
+                "body": base64.b64encode(b'{"tasks":[]}').decode("ascii"),
+            },
+        )
+        browser.join(timeout=4)
+        self.assertFalse(browser.is_alive())
+        connection.sendall(encode_frame(b"", opcode=0x8, masked=True))
+        stream.close()
+        connection.close()
     def test_agent_token_cannot_be_replaced_by_browser_credentials(self) -> None:
         status, _, body = self.request(
             "POST",
@@ -223,7 +293,54 @@ class RelayHTTPServerTest(unittest.TestCase):
         self.assertIsNone(self.server.RequestHandlerClass.store.claim("mac"))
 
 
+class WebSocketTransportTest(unittest.TestCase):
+    def test_masked_frame_round_trip(self) -> None:
+        left, right = socket.socketpair()
+        stream = right.makefile("rb")
+        try:
+            left.sendall(encode_frame(b'{"type":"wake"}', masked=True))
+            opcode, payload = read_frame(stream)
+        finally:
+            stream.close()
+            left.close()
+            right.close()
+        self.assertEqual(0x1, opcode)
+        self.assertEqual(b'{"type":"wake"}', payload)
+
+
 class RelayAgentTest(unittest.TestCase):
+    def test_websocket_command_event_wakes_local_codex_executor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = AgentConfig(
+                cloud_url="https://dotasks.example.com",
+                agent_id="mac",
+                agent_token="agent-token-with-at-least-24-characters",
+                data_home=temporary,
+            )
+            executor = MagicMock()
+            agent = RelayAgent(config, executor=executor)
+            agent.sync_vault = lambda: None
+            agent.drain_commands = MagicMock(return_value=0)
+            connection = MagicMock()
+            stream = MagicMock()
+            with (
+                patch(
+                    "taskboard.agent.connect_websocket",
+                    return_value=(connection, stream),
+                ),
+                patch(
+                    "taskboard.agent.read_frame",
+                    side_effect=[
+                        (0x1, b'{"type":"command_available"}'),
+                        (0x8, b""),
+                    ],
+                ),
+            ):
+                agent.run_event_stream_once()
+
+            agent.drain_commands.assert_called_once_with()
+            executor.wake.assert_called_once_with()
+
     def test_configuration_round_trip_uses_private_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             config_path = Path(temporary) / "cloud-agent.json"

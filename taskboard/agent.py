@@ -7,6 +7,7 @@ import http.client
 import json
 import os
 import platform
+import signal
 import socket
 import sys
 import time
@@ -18,7 +19,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from .local_executor import LocalCodexExecutor
 from .version import VERSION
+from .websocket_transport import connect_websocket, encode_frame, read_frame
 
 
 @dataclass(frozen=True)
@@ -107,11 +110,16 @@ def save_agent_config(config: AgentConfig, path: Path | None = None) -> Path:
 
 
 class RelayAgent:
-    def __init__(self, config: AgentConfig):
+    def __init__(
+        self,
+        config: AgentConfig,
+        executor: LocalCodexExecutor | None = None,
+    ):
         self.config = config.validate()
         self.uploaded_vault_files: dict[str, str] = {}
         self.next_vault_sync_at = 0.0
         self.pending_result = self._load_pending_result()
+        self.executor = executor or LocalCodexExecutor(self.config.data_home)
 
     @property
     def pending_result_path(self) -> Path:
@@ -282,6 +290,7 @@ class RelayAgent:
                 "agent_id": self.config.agent_id,
                 "board_hash": self.board_hash(),
                 "metadata": self.metadata(),
+                "wait_seconds": 0,
             },
         )
         command = response.get("command")
@@ -290,17 +299,61 @@ class RelayAgent:
             return True
         return False
 
+    def drain_commands(self) -> int:
+        completed = 0
+        while self.run_once():
+            completed += 1
+        return completed
+
+    def run_event_stream_once(self) -> None:
+        if self.pending_result is not None:
+            self._cloud_request("/_agent/v1/complete", self.pending_result)
+            self._clear_pending_result()
+        if time.monotonic() >= self.next_vault_sync_at:
+            self.sync_vault()
+            self.next_vault_sync_at = time.monotonic() + 60
+        connection, stream = connect_websocket(
+            self.config.cloud_url, self.config.agent_token
+        )
+        try:
+            while True:
+                opcode, payload = read_frame(stream)
+                if opcode == 0x8:
+                    return
+                if opcode == 0x9:
+                    connection.sendall(encode_frame(payload, opcode=0xA, masked=True))
+                    continue
+                if opcode != 0x1:
+                    continue
+                event = json.loads(payload.decode("utf-8"))
+                if event.get("type") in {"connected", "command_available"}:
+                    self.drain_commands()
+                    self.executor.wake()
+        finally:
+            stream.close()
+            connection.close()
+
     def run_forever(self) -> None:
         failures = 0
-        while True:
-            try:
-                self.run_once()
-                failures = 0
-            except (OSError, ValueError, RuntimeError, urllib.error.URLError) as exc:
-                failures += 1
-                delay = min(30, 2 ** min(failures, 5))
-                print(f"[dotasks-agent] {exc}; retrying in {delay}s", file=sys.stderr)
-                time.sleep(delay)
+        self.executor.start()
+        try:
+            while True:
+                try:
+                    self.run_event_stream_once()
+                    failures = 0
+                except (
+                    ConnectionError,
+                    OSError,
+                    ValueError,
+                    RuntimeError,
+                    urllib.error.URLError,
+                ) as exc:
+                    failures += 1
+                    delay = min(30, 2 ** min(failures, 5))
+                    print(f"[dotasks-agent] {exc}; retrying in {delay}s", file=sys.stderr)
+                    time.sleep(delay)
+        finally:
+            self.executor.stop()
 
 
 def main() -> None:
@@ -318,6 +371,12 @@ def main() -> None:
     configure.add_argument("--local-url", default="http://127.0.0.1:8765")
     configure.add_argument("--vault", default="")
     args = parser.parse_args()
+
+    def stop_agent(_signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_agent)
+    signal.signal(signal.SIGINT, stop_agent)
 
     if args.command == "configure":
         config = AgentConfig(
@@ -341,7 +400,10 @@ def main() -> None:
                 time.sleep(5)
     else:
         config = load_agent_config()
-    RelayAgent(config).run_forever()
+    try:
+        RelayAgent(config).run_forever()
+    except KeyboardInterrupt:
+        return
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
-  <title id="title">DoTasks</title>
-  <desc id="desc">A letter D built from task cards, a workflow loop, and a completed check.</desc>
+  <title id="title">Done Loop concept</title>
+  <desc id="desc">Task cards form the stem of a D, closed by a workflow loop and completion check.</desc>
   <rect x="4" y="4" width="56" height="56" rx="16" fill="#317CFF"/>
   <g fill="#FFFFFF">
     <rect x="13" y="14" width="14" height="10" rx="3"/>
