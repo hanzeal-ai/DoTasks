@@ -28,6 +28,14 @@ class GithubDeployWorkflowTest(unittest.TestCase):
         self.assertIn("actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53", source)
         self.assertIn("reuse_env=(--reuse-env)", source)
         self.assertIn('"${reuse_env[@]}"', source)
+        self.assertIn(
+            "CONFIGURED_PUBLIC_URL: ${{ secrets.DOTASKS_PUBLIC_URL }}", source
+        )
+        self.assertIn('if [[ -n "$CONFIGURED_PUBLIC_URL" ]]', source)
+        self.assertNotIn(
+            "\n          DOTASKS_PUBLIC_URL: ${{ secrets.DOTASKS_PUBLIC_URL }}",
+            source,
+        )
 
     def test_deployment_needs_no_inbound_ssh_or_long_lived_ghcr_token(self) -> None:
         source = (ROOT / ".github" / "workflows" / "deploy-cloud.yml").read_text(

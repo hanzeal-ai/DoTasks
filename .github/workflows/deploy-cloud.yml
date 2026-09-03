@@ -101,11 +101,11 @@ jobs:
         shell: bash
         env:
           ECS_PUBLIC_IP: ${{ secrets.ECS_PUBLIC_IP }}
-          DOTASKS_PUBLIC_URL: ${{ secrets.DOTASKS_PUBLIC_URL }}
+          CONFIGURED_PUBLIC_URL: ${{ secrets.DOTASKS_PUBLIC_URL }}
           IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
         run: |
-          if [[ -n "$DOTASKS_PUBLIC_URL" ]]; then
-            endpoint=(--public-url "$DOTASKS_PUBLIC_URL")
+          if [[ -n "$CONFIGURED_PUBLIC_URL" ]]; then
+            endpoint=(--public-url "$CONFIGURED_PUBLIC_URL")
           else
             : "${ECS_PUBLIC_IP:?Set ECS_PUBLIC_IP or DOTASKS_PUBLIC_URL in GitHub Actions secrets}"
             endpoint=(--public-ip "$ECS_PUBLIC_IP")
