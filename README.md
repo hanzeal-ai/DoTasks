@@ -248,19 +248,22 @@ Obsidian Markdown 镜像；命令入队后通过 WSS 向 Local DoTasks Agent 发
             thread/start + turn/start
 ```
 
-服务器安装 Docker 后，在仓库目录执行：
+服务器安装 Docker 后，在仓库目录执行一键 IP 部署脚本：
 
 ```bash
-cp .env.example .env
-# 编辑 .env，至少设置公开访问地址、独立的网页登录密码和 Agent Token
-docker compose up -d --build
+chmod +x ./scripts/deploy-cloud-ip
+./scripts/deploy-cloud-ip --public-ip <服务器公网IPv4>
 ```
 
-临时使用 IP 时，将 `DOTASKS_PUBLIC_URL` 设置为
-`http://<服务器公网IP>:8765`，并将 `DOTASKS_BIND_ADDRESS` 设置为 `0.0.0.0`。安全组只放行
-自己的出口 IP；正式长期使用时应恢复仅本机监听，并通过 HTTPS 反向代理暴露域名。网页
-使用 `DOTASKS_HTTP_USER` 和 `DOTASKS_HTTP_PASSWORD` 登录，Agent 使用另一套
-`DOTASKS_AGENT_TOKEN`，两者不能复用。
+脚本会生成独立的网页登录密码和 Agent Token，以 `0600` 权限写入 `.env`，随后校验
+Compose 配置、构建并启动容器，最后执行带认证的健康检查。再次运行时使用 `--reuse-env`
+复用现有配置；只有明确传入 `--force-env` 才会替换 `.env`。可通过 `--port`、
+`--http-user`、`--http-password`、`--agent-id` 和 `--agent-token` 覆盖默认值。
+
+阿里云安全组仍需手动添加入方向规则：TCP `8765`（或 `--port` 指定端口），来源只填写
+自己的出口公网 IP，不要对 `0.0.0.0/0` 开放。脚本结尾会输出网页地址、登录信息和 Mac
+端 Agent 配置命令。IP 方案使用明文 HTTP，只适合短期联调；正式长期使用时应恢复仅本机
+监听，并通过 HTTPS 反向代理暴露域名。网页密码与 Agent Token 不能复用。
 
 在运行 DoTasks 的 Mac 上执行一次配置：
 

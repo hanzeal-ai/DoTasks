@@ -1,0 +1,188 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PROJECT_ROOT=${DOTASKS_DEPLOY_ROOT:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}
+ENV_FILE="$PROJECT_ROOT/.env"
+
+PUBLIC_IP=
+PORT=8765
+HTTP_USER=dotasks
+HTTP_PASSWORD=
+AGENT_ID=default
+AGENT_TOKEN=
+FORCE_ENV=0
+REUSE_ENV=0
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./scripts/deploy-cloud-ip --public-ip <IPv4> [options]
+
+Options:
+  --port <port>              Public TCP port (default: 8765)
+  --http-user <user>         Browser login user (default: dotasks)
+  --http-password <value>    Browser password (default: generated)
+  --agent-id <id>            Local Agent ID (default: default)
+  --agent-token <value>      Local Agent token (default: generated)
+  --reuse-env                Reuse a matching existing .env
+  --force-env                Replace an existing .env
+  -h, --help                 Show this help
+EOF
+}
+
+fail() {
+  echo "Deployment failed: $*" >&2
+  exit 1
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --public-ip|--port|--http-user|--http-password|--agent-id|--agent-token)
+      [ "$#" -ge 2 ] || fail "$1 requires a value"
+      case "$1" in
+        --public-ip) PUBLIC_IP=$2 ;;
+        --port) PORT=$2 ;;
+        --http-user) HTTP_USER=$2 ;;
+        --http-password) HTTP_PASSWORD=$2 ;;
+        --agent-id) AGENT_ID=$2 ;;
+        --agent-token) AGENT_TOKEN=$2 ;;
+      esac
+      shift 2
+      ;;
+    --reuse-env)
+      REUSE_ENV=1
+      shift
+      ;;
+    --force-env)
+      FORCE_ENV=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown option: $1"
+      ;;
+  esac
+done
+
+[ -n "$PUBLIC_IP" ] || fail "--public-ip is required"
+[ "$FORCE_ENV" -eq 0 ] || [ "$REUSE_ENV" -eq 0 ] || fail "--force-env and --reuse-env cannot be combined"
+
+if ! printf '%s\n' "$PUBLIC_IP" | awk -F. '
+  NF != 4 { exit 1 }
+  {
+    for (i = 1; i <= 4; i++) {
+      if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) exit 1
+    }
+  }
+'; then
+  fail "--public-ip must be a valid IPv4 address"
+fi
+
+case "$PORT" in
+  ''|*[!0-9]*) fail "--port must be an integer between 1 and 65535" ;;
+esac
+[ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || fail "--port must be between 1 and 65535"
+
+case "$HTTP_USER" in
+  ''|*[!A-Za-z0-9._-]*) fail "--http-user may only contain letters, numbers, dot, underscore, and hyphen" ;;
+esac
+case "$AGENT_ID" in
+  ''|*[!A-Za-z0-9._-]*) fail "--agent-id may only contain letters, numbers, dot, underscore, and hyphen" ;;
+esac
+
+[ -f "$PROJECT_ROOT/compose.yaml" ] || fail "compose.yaml not found in $PROJECT_ROOT"
+command -v docker >/dev/null 2>&1 || fail "docker is not installed"
+docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is unavailable"
+command -v curl >/dev/null 2>&1 || fail "curl is not installed"
+
+read_env() {
+  awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); value=$0 } END { print value }' "$ENV_FILE"
+}
+
+PUBLIC_URL="http://$PUBLIC_IP:$PORT"
+if [ -f "$ENV_FILE" ] && [ "$FORCE_ENV" -eq 0 ]; then
+  [ "$REUSE_ENV" -eq 1 ] || fail ".env already exists; use --reuse-env to keep it or --force-env to replace it"
+  EXISTING_PUBLIC_URL=$(read_env DOTASKS_PUBLIC_URL)
+  EXISTING_BIND_ADDRESS=$(read_env DOTASKS_BIND_ADDRESS)
+  EXISTING_PORT=$(read_env DOTASKS_BIND_PORT)
+  [ "$EXISTING_PUBLIC_URL" = "$PUBLIC_URL" ] || fail "existing DOTASKS_PUBLIC_URL does not match $PUBLIC_URL"
+  [ "$EXISTING_BIND_ADDRESS" = "0.0.0.0" ] || fail "existing DOTASKS_BIND_ADDRESS must be 0.0.0.0"
+  [ "$EXISTING_PORT" = "$PORT" ] || fail "existing DOTASKS_BIND_PORT does not match $PORT"
+  HTTP_USER=$(read_env DOTASKS_HTTP_USER)
+  HTTP_PASSWORD=$(read_env DOTASKS_HTTP_PASSWORD)
+  AGENT_ID=$(read_env DOTASKS_AGENT_ID)
+  AGENT_TOKEN=$(read_env DOTASKS_AGENT_TOKEN)
+  echo "Reusing $ENV_FILE"
+else
+  if [ -z "$HTTP_PASSWORD" ] || [ -z "$AGENT_TOKEN" ]; then
+    command -v openssl >/dev/null 2>&1 || fail "openssl is required to generate credentials"
+  fi
+  [ -n "$HTTP_PASSWORD" ] || HTTP_PASSWORD=$(openssl rand -hex 32)
+  [ -n "$AGENT_TOKEN" ] || AGENT_TOKEN=$(openssl rand -hex 32)
+
+  [ "${#HTTP_PASSWORD}" -ge 16 ] || fail "--http-password must contain at least 16 characters"
+  [ "${#AGENT_TOKEN}" -ge 24 ] || fail "--agent-token must contain at least 24 characters"
+  case "$HTTP_PASSWORD$AGENT_TOKEN" in
+    *[!A-Za-z0-9._~-]*) fail "password and token may only contain URL-safe characters" ;;
+  esac
+
+  umask 077
+  ENV_TMP="$ENV_FILE.tmp.$$"
+  trap 'rm -f "$ENV_TMP"' EXIT HUP INT TERM
+  {
+    printf 'DOTASKS_PUBLIC_URL=%s\n' "$PUBLIC_URL"
+    printf 'DOTASKS_HTTP_USER=%s\n' "$HTTP_USER"
+    printf 'DOTASKS_HTTP_PASSWORD=%s\n' "$HTTP_PASSWORD"
+    printf 'DOTASKS_AGENT_ID=%s\n' "$AGENT_ID"
+    printf 'DOTASKS_AGENT_TOKEN=%s\n' "$AGENT_TOKEN"
+    printf 'DOTASKS_BIND_ADDRESS=0.0.0.0\n'
+    printf 'DOTASKS_BIND_PORT=%s\n' "$PORT"
+  } > "$ENV_TMP"
+  mv "$ENV_TMP" "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  trap - EXIT HUP INT TERM
+  echo "Created $ENV_FILE with mode 0600"
+fi
+
+[ -n "$HTTP_USER" ] || fail "DOTASKS_HTTP_USER is missing from .env"
+[ "${#HTTP_PASSWORD}" -ge 16 ] || fail "DOTASKS_HTTP_PASSWORD in .env must contain at least 16 characters"
+[ -n "$AGENT_ID" ] || fail "DOTASKS_AGENT_ID is missing from .env"
+[ "${#AGENT_TOKEN}" -ge 24 ] || fail "DOTASKS_AGENT_TOKEN in .env must contain at least 24 characters"
+chmod 600 "$ENV_FILE"
+
+cd "$PROJECT_ROOT"
+docker compose config >/dev/null
+docker compose up -d --build
+
+HEALTH_URL="http://127.0.0.1:$PORT/api/health"
+HEALTH_BODY=
+attempt=0
+while [ "$attempt" -lt 30 ]; do
+  if HEALTH_BODY=$(curl -fsS \
+    -u "$HTTP_USER:$HTTP_PASSWORD" \
+    -H "Host: $PUBLIC_IP:$PORT" \
+    "$HEALTH_URL" 2>/dev/null); then
+    break
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+[ -n "$HEALTH_BODY" ] || fail "cloud service did not answer its authenticated health check within 30 seconds"
+
+echo
+echo "DoTasks Cloud is running: $PUBLIC_URL"
+echo "Browser username: $HTTP_USER"
+echo "Browser password: $HTTP_PASSWORD"
+echo
+echo "On the Mac that runs DoTasks, configure the Local Agent once:"
+printf '%s\n' './scripts/start-agent configure \'
+printf "  --cloud-url '%s' \\\n" "$PUBLIC_URL"
+printf "  --agent-id '%s' \\\n" "$AGENT_ID"
+printf "  --agent-token '%s'\n" "$AGENT_TOKEN"
+echo
+echo "Required Alibaba Cloud action: allow inbound TCP $PORT only from your own public IP."
+echo "This HTTP/IP setup is temporary; credentials are not encrypted in transit."

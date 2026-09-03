@@ -5,6 +5,7 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 .mcp.json
+.env
 .DS_Store
 dist/
 e2e-workspaces/
