@@ -733,6 +733,102 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertFalse(queued["controller_kickoff_required"])
         self.assertIsNone(self.service.claim_next_task("planner"))
 
+    def test_project_read_only_task_allows_optional_contract_fields_to_be_empty(self):
+        payload = {
+            "title": "检查页面标题",
+            "project": str(self.example_project),
+            "goal": "确认页面标题内容",
+            "auto_dispatch": True,
+        }
+        analysis = self.service.prepare_location_analysis(payload)
+        evidence = {
+            "tool": "codegraph_explore",
+            "query": "页面标题",
+            "files": ["index.html"],
+            "symbols": [],
+        }
+
+        created = self.service.finalize_task_intake({
+            "intake_kind": "task",
+            "analysis_id": analysis["analysis_id"],
+            **payload,
+            "location_evidence": evidence,
+            "quality_gates": {
+                "code_review": {
+                    "required": False,
+                    "reason": "只读取项目信息，不修改代码",
+                },
+            },
+            "acceptance_plan": [{
+                "criterion": "确认页面标题内容",
+                "method": "读取页面标题并核对",
+                "expected": "返回明确的页面标题",
+                "check_type": "static_review",
+            }],
+        })
+
+        task = self.service.get_task(created["task_id"])
+        self.assertEqual([], task["implementation_contract"]["targets"])
+        self.assertEqual([], task["review_contract"]["checks"])
+        self.assertFalse(
+            task["review_contract"]["quality_gates"]["code_review"]["required"]
+        )
+        self.assertEqual([], task["scope"])
+        self.assertEqual([], task["out_of_scope"])
+        self.assertNotIn("file", task["acceptance_plan"][0])
+
+        claimed = self.service.claim_next_task("read-only-worker", task["project"])
+        self.assertIn("请完成以下项目只读任务", claimed["dispatch_prompt"])
+        self.assertIn("changed_locations 必须传空数组", claimed["dispatch_prompt"])
+        run_context = json.loads(
+            claimed["dispatch_prompt"].split("RUN_CONTEXT_JSON=", 1)[1]
+        )
+        self.assertEqual({"requires_changes": False}, run_context["delivery"])
+        self.assertNotIn("targets", run_context)
+
+        run = claimed["run"]
+        self.service.bind_conversation(
+            task["id"], "execution", "read-only-thread", run["id"]
+        )
+        self.service.transition_task(task["id"], "implementing")
+        delivered = self.service.submit_delivery(
+            run["id"],
+            "已确认页面标题",
+            "只读核对完成，未修改项目文件",
+            [],
+            [{
+                "criterion": "确认页面标题内容",
+                "status": "passed",
+                "evidence": "已读取并返回明确标题",
+            }],
+        )
+        self.assertEqual("done", delivered["task"]["status"])
+        self.assertEqual([], delivered["run"]["changed_locations"])
+
+    def test_code_changing_task_still_requires_changed_locations(self):
+        task = self.create_ready_task()
+        claimed = self.service.claim_next_task("code-worker", task["project"])
+        run = claimed["run"]
+        self.service.bind_conversation(
+            task["id"], "execution", "code-thread", run["id"]
+        )
+        self.service.transition_task(task["id"], "implementing")
+
+        with self.assertRaisesRegex(
+            ValueError, "Code-changing deliveries require changed_locations"
+        ):
+            self.service.submit_delivery(
+                run["id"],
+                "完成代码修改",
+                "验证通过",
+                [],
+                [{
+                    "criterion": criterion,
+                    "status": "passed",
+                    "evidence": "验证通过",
+                } for criterion in task["acceptance_criteria"]],
+            )
+
     def test_page_task_dispatch_prompt_requires_one_direct_task(self):
         prompt = self.service._native_dispatch_prompt({
             "kind": "requirement_decomposition",
@@ -778,6 +874,7 @@ class TaskboardServiceTest(unittest.TestCase):
                 requirement_id, retry["run"]["id"],
                 [{"key": "invalid", "title": "不可执行子任务", "goal": "缺少定位契约"}],
             )
+
         incomplete = self.service.get_requirement(requirement_id)
         self.assertEqual("decomposing", incomplete["requirement"]["status"])
         self.assertEqual([], incomplete["tasks"])
@@ -875,6 +972,58 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertEqual(1, len(completed["relations"]))
         self.assertEqual("depends_on", completed["relations"][0]["relation_type"])
 
+    def test_requirement_decomposition_accepts_minimal_read_only_child(self):
+        intake = self.service.finalize_task_intake({
+            "intake_kind": "requirement",
+            "title": "核对页面信息",
+            "project": str(self.example_project),
+            "goal": "确认页面当前展示信息",
+        })
+        claimed = self.service.claim_next_task("planner", str(self.example_project))
+        analysis = self.service.prepare_location_analysis({
+            "title": "核对页面标题",
+            "project": str(self.example_project),
+            "goal": "读取并返回页面标题",
+        })
+        evidence = {
+            "tool": "codegraph_explore",
+            "query": "页面标题",
+            "files": ["index.html"],
+            "symbols": [],
+        }
+
+        decomposed = self.service.submit_requirement_decomposition(
+            intake["requirement_id"],
+            claimed["run"]["id"],
+            [{
+                "key": "read-title",
+                "title": "核对页面标题",
+                "goal": "读取并返回页面标题",
+                "analysis_id": analysis["analysis_id"],
+                "location_evidence": evidence,
+                "quality_gates": {
+                    "code_review": {
+                        "required": False,
+                        "reason": "只读取项目信息，不修改代码",
+                    },
+                },
+                "acceptance_plan": [{
+                    "criterion": "读取并返回页面标题",
+                    "method": "读取页面标题并核对",
+                    "expected": "返回明确标题",
+                    "check_type": "static_review",
+                }],
+            }],
+        )
+
+        child = decomposed["tasks"][0]
+        self.assertEqual([], child["implementation_contract"]["targets"])
+        self.assertEqual([], child["review_contract"]["checks"])
+        self.assertFalse(
+            child["review_contract"]["quality_gates"]["code_review"]["required"]
+        )
+        self.assertEqual("ready", child["status"])
+
     def test_requirement_board_exposes_latest_bound_decomposition_thread(self):
         intake = self.service.finalize_task_intake({
             "intake_kind": "requirement",
@@ -921,6 +1070,68 @@ class TaskboardServiceTest(unittest.TestCase):
         preserved = self.service.get_task(task["id"])
         self.assertIsNone(preserved["requirement_id"])
         self.assertIsNone(preserved["requirement_task_key"])
+
+    def test_completed_task_can_be_deleted_while_codex_thread_is_left_external(self):
+        queued = self.service.enqueue_task_intake({
+            "title": "删除已完成任务",
+            "goal": "验证完成任务删除",
+            "project": "",
+            "auto_dispatch": True,
+        })
+        task_id = queued["task_id"]
+        claim = self.service.claim_next_task("delete-test-worker")
+        run_id = claim["run"]["id"]
+        self.service.bind_conversation(
+            task_id, "execution", "external-codex-thread", run_id
+        )
+        self.service.transition_task(task_id, "implementing")
+        self.service.submit_delivery(
+            run_id,
+            "删除功能验证完成",
+            "结果已确认",
+            [],
+            [{
+                "criterion": "验证完成任务删除",
+                "status": "passed",
+                "evidence": "已完成",
+            }],
+        )
+
+        result = self.service.delete_task(task_id)
+
+        self.assertEqual({"status": "deleted", "task_id": task_id}, result)
+        with self.assertRaisesRegex(KeyError, "Task not found"):
+            self.service.get_task(task_id)
+        with self.service.db.connection() as connection:
+            self.assertEqual(
+                0,
+                connection.execute(
+                    "SELECT COUNT(*) FROM task_runs WHERE task_id=?", (task_id,)
+                ).fetchone()[0],
+            )
+            self.assertEqual(
+                0,
+                connection.execute(
+                    "SELECT COUNT(*) FROM task_conversations WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()[0],
+            )
+            self.assertEqual(
+                1,
+                connection.execute(
+                    """SELECT COUNT(*) FROM events
+                       WHERE entity_type='task' AND entity_id=?
+                         AND event_type='deleted'""",
+                    (task_id,),
+                ).fetchone()[0],
+            )
+
+    def test_non_completed_task_cannot_be_deleted(self):
+        task = self.create_ready_task()
+
+        with self.assertRaisesRegex(ValueError, "Only completed tasks"):
+            self.service.delete_task(task["id"])
+        self.assertEqual(task["id"], self.service.get_task(task["id"])["id"])
 
     def test_failed_requirement_can_be_manually_redecomposed(self):
         intake = self.service.finalize_task_intake({
@@ -1357,8 +1568,10 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertNotIn("static_review/manual_runtime", prompt)
         run_context = json.loads(prompt.split("RUN_CONTEXT_JSON=", 1)[1].split("\n\n", 1)[0])
         self.assertEqual(
-            {"execution_environment", "targets", "verify"}, set(run_context)
+            {"execution_environment", "targets", "verify", "delivery"},
+            set(run_context),
         )
+        self.assertEqual({"requires_changes": True}, run_context["delivery"])
         self.assertEqual(
             {"file", "mode", "symbols"}, set(run_context["targets"][0])
         )

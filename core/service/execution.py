@@ -1069,7 +1069,10 @@ class TaskLifecycleMixin:
             context["execution_profile"] = self._execution_profile(
                 task, context, run_type
             )
-            if context["execution_profile"]["risk"] == "low":
+            if (
+                context["execution_profile"]["risk"] == "low"
+                and context.get("targets")
+            ):
                 snippet = self._target_snippet(
                     task.get("project"), context["targets"][0]
                 )
@@ -1370,6 +1373,23 @@ class TaskLifecycleMixin:
                 f"- 类型：{run_type}\n\n"
                 "完成后调用 submit_task_delivery：changed_locations 必须传空数组，"
                 "并提供任务目标对应的验收证据。无法继续时调用 report_run_blocked。\n\n"
+                f"RUN_CONTEXT_JSON={prompt_context(context)}"
+            )
+        if (context.get("delivery") or {}).get("requires_changes") is False:
+            task_brief = cls._task_prompt_brief(
+                task, "请完成以下项目只读任务：", context.get("tasks") or []
+            )
+            return (
+                f"{task_brief}\n\n---\n\n"
+                "$dotasks-lifecycle\n\n"
+                "这是项目只读任务。可以读取项目文件并执行只读验证，但不要修改、创建或删除文件；"
+                "targets 为空时以任务目标和验收计划为准，targets 非空时仅将其作为允许读取的定位范围。\n\n"
+                "运行信息：\n"
+                f"- 任务 ID：{task['id']}\n"
+                f"- 运行 ID：{run_id}\n"
+                f"- 类型：{run_type}\n\n"
+                "完成后调用 submit_task_delivery：changed_locations 必须传空数组，"
+                "并提供逐条通过的验收证据。无法继续时调用 report_run_blocked。\n\n"
                 f"RUN_CONTEXT_JSON={prompt_context(context)}"
             )
         retry_note = ""

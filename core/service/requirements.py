@@ -87,6 +87,152 @@ class TaskRequirementMixin:
             "preserved_task_count": child_count,
         }
 
+    def delete_task(self, task_id: str) -> dict[str, Any]:
+        """Permanently remove one completed DoTasks record without deleting Codex sessions."""
+        with self.db.transaction() as connection:
+            task = connection.execute(
+                "SELECT id, title, status FROM tasks WHERE id=?", (task_id,),
+            ).fetchone()
+            if not task:
+                raise KeyError(f"Task not found: {task_id}")
+            if task["status"] != "done":
+                raise ValueError("Only completed tasks can be deleted")
+
+            run_ids = [
+                row["id"]
+                for row in connection.execute(
+                    "SELECT id FROM task_runs WHERE task_id=?", (task_id,),
+                ).fetchall()
+            ]
+            owned_batches = [
+                row["id"]
+                for row in connection.execute(
+                    "SELECT id FROM execution_batches WHERE owner_task_id=?",
+                    (task_id,),
+                ).fetchall()
+            ]
+            if owned_batches:
+                placeholders = ",".join("?" for _ in owned_batches)
+                unfinished_member = connection.execute(
+                    f"""SELECT member.task_id FROM execution_batch_tasks member
+                        JOIN tasks other ON other.id=member.task_id
+                        WHERE member.batch_id IN ({placeholders})
+                          AND member.task_id!=?
+                          AND other.status NOT IN ('done','cancelled') LIMIT 1""",
+                    (*owned_batches, task_id),
+                ).fetchone()
+                if unfinished_member:
+                    raise ValueError(
+                        "Completed task owns a batch with unfinished member tasks"
+                    )
+                connection.execute(
+                    f"DELETE FROM execution_batches WHERE id IN ({placeholders})",
+                    owned_batches,
+                )
+
+            change_ids = [
+                row["id"]
+                for row in connection.execute(
+                    "SELECT id FROM task_change_requests WHERE candidate_task_id=?",
+                    (task_id,),
+                ).fetchall()
+            ]
+            if change_ids:
+                placeholders = ",".join("?" for _ in change_ids)
+                connection.execute(
+                    f"UPDATE task_revisions SET change_request_id=NULL "
+                    f"WHERE change_request_id IN ({placeholders})",
+                    change_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM task_change_requests WHERE id IN ({placeholders})",
+                    change_ids,
+                )
+            connection.execute(
+                "UPDATE task_change_requests SET result_task_id=NULL WHERE result_task_id=?",
+                (task_id,),
+            )
+
+            connection.execute(
+                "DELETE FROM task_relations WHERE source_task_id=? OR target_task_id=?",
+                (task_id, task_id),
+            )
+            connection.execute("DELETE FROM reviews WHERE task_id=?", (task_id,))
+            connection.execute(
+                "DELETE FROM task_conversations WHERE task_id=?", (task_id,)
+            )
+            connection.execute(
+                "DELETE FROM location_analyses WHERE task_id=?", (task_id,)
+            )
+            connection.execute(
+                "DELETE FROM native_dispatches WHERE entity_type='task' AND entity_id=?",
+                (task_id,),
+            )
+            connection.execute(
+                "DELETE FROM integration_outbox WHERE entity_type='task' AND entity_id=?",
+                (task_id,),
+            )
+            connection.execute(
+                "DELETE FROM events WHERE entity_type='task' AND entity_id=?",
+                (task_id,),
+            )
+
+            if run_ids:
+                placeholders = ",".join("?" for _ in run_ids)
+                connection.execute(
+                    f"DELETE FROM location_analyses "
+                    f"WHERE delivery_run_id IN ({placeholders})",
+                    run_ids,
+                )
+                connection.execute(
+                    f"UPDATE task_conversations SET run_id=NULL "
+                    f"WHERE run_id IN ({placeholders})",
+                    run_ids,
+                )
+                connection.execute(
+                    f"UPDATE task_runs SET parent_run_id=NULL "
+                    f"WHERE parent_run_id IN ({placeholders}) AND task_id!=?",
+                    (*run_ids, task_id),
+                )
+                connection.execute(
+                    f"UPDATE task_runs SET delivery_run_id=NULL "
+                    f"WHERE delivery_run_id IN ({placeholders}) AND task_id!=?",
+                    (*run_ids, task_id),
+                )
+                connection.execute(
+                    f"UPDATE execution_batches SET owner_run_id=NULL "
+                    f"WHERE owner_run_id IN ({placeholders})",
+                    run_ids,
+                )
+                connection.execute(
+                    f"UPDATE execution_batches SET delivery_run_id=NULL "
+                    f"WHERE delivery_run_id IN ({placeholders})",
+                    run_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM native_dispatches WHERE run_id IN ({placeholders})",
+                    run_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM events WHERE entity_type='run' "
+                    f"AND entity_id IN ({placeholders})",
+                    run_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM task_runs WHERE id IN ({placeholders})",
+                    run_ids,
+                )
+
+            connection.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+            self._event(
+                connection,
+                "task",
+                task_id,
+                "deleted",
+                {"title": task["title"], "codex_sessions_preserved": True},
+            )
+        return {"status": "deleted", "task_id": task_id}
+
     def redecompose_requirement(self, requirement_id: str) -> dict[str, Any]:
         """Reset a requirement for a fresh decomposition without duplicating active work."""
         replaceable_statuses = {"draft", "ready", "failed", "cancelled"}
@@ -226,21 +372,32 @@ class TaskRequirementMixin:
             evidence = spec.get("location_evidence")
             if not isinstance(evidence, dict) or not evidence:
                 raise ValueError("Every decomposed task requires location_evidence")
-            targets = spec.get("targets")
-            if not isinstance(targets, list) or not targets:
-                raise ValueError("Every decomposed task requires non-empty targets")
-            if any(
-                not isinstance(target, dict) or not target.get("tasks") for target in targets
-            ):
-                raise ValueError("Every decomposed task target requires tasks")
+            targets = spec.get("targets") or []
+            if not isinstance(targets, list):
+                raise ValueError("Every decomposed task targets must be an array")
+            if any(not isinstance(target, dict) for target in targets):
+                raise ValueError("Every decomposed task target must be an object")
             if not isinstance(spec.get("acceptance_plan"), list) or not spec["acceptance_plan"]:
                 raise ValueError("Every decomposed task requires non-empty acceptance_plan")
             review_checks = spec.get("review_checks")
             if review_checks is not None and not isinstance(review_checks, list):
                 raise ValueError("Every decomposed task review_checks must be an array")
-            if spec.get("quality_gates") is None:
-                raise ValueError("Every decomposed task requires quality_gates")
-            self._normalize_quality_gates(spec["quality_gates"])
+            quality_gates = spec.get("quality_gates")
+            if quality_gates is None:
+                raise ValueError(
+                    "Every decomposed task requires quality_gates to classify the task"
+                )
+            normalized_gates = self._normalize_quality_gates(quality_gates)
+            if normalized_gates["code_review"]["required"] and not targets:
+                raise ValueError(
+                    "Code-changing decomposed tasks require non-empty targets"
+                )
+            if normalized_gates["code_review"]["required"] and any(
+                not target.get("tasks") for target in targets
+            ):
+                raise ValueError(
+                    "Every code-changing decomposed task target requires tasks"
+                )
             project = self._require_project_directory(
                 str(spec.get("project") or requirement_row["project"] or "")
             )
@@ -293,27 +450,40 @@ class TaskRequirementMixin:
             ).strip()
             if not title or not child_goal:
                 raise ValueError("Every decomposed task requires title and goal")
-            targets = spec.get("targets")
+            targets = spec.get("targets") or []
             acceptance_plan = spec.get("acceptance_plan")
-            review_checks = spec.get("review_checks") or default_code_review_checks()
             quality_gates = spec.get("quality_gates")
+            if quality_gates is None:
+                raise ValueError(
+                    "Every decomposed task requires quality_gates to classify the task"
+                )
+            normalized_gates = self._normalize_quality_gates(quality_gates)
+            requires_changes = normalized_gates["code_review"]["required"]
+            review_checks = (
+                spec["review_checks"]
+                if "review_checks" in spec
+                else (default_code_review_checks() if requires_changes else [])
+            )
             if not str(spec.get("analysis_id") or "").strip():
                 raise ValueError("Every decomposed task requires analysis_id")
             if not isinstance(spec.get("location_evidence"), dict) or not spec["location_evidence"]:
                 raise ValueError("Every decomposed task requires location_evidence")
-            if not isinstance(targets, list) or not targets:
-                raise ValueError("Every decomposed task requires non-empty targets")
-            if any(
-                not isinstance(target, dict) or not target.get("tasks") for target in targets
-            ):
-                raise ValueError("Every decomposed task target requires tasks")
+            if not isinstance(targets, list):
+                raise ValueError("Every decomposed task targets must be an array")
+            if any(not isinstance(target, dict) for target in targets):
+                raise ValueError("Every decomposed task target must be an object")
             if not isinstance(acceptance_plan, list) or not acceptance_plan:
                 raise ValueError("Every decomposed task requires non-empty acceptance_plan")
             if not isinstance(review_checks, list):
                 raise ValueError("Every decomposed task review_checks must be an array")
-            if quality_gates is None:
-                raise ValueError("Every decomposed task requires quality_gates")
-            self._normalize_quality_gates(quality_gates)
+            if requires_changes and not targets:
+                raise ValueError(
+                    "Code-changing decomposed tasks require non-empty targets"
+                )
+            if requires_changes and any(not target.get("tasks") for target in targets):
+                raise ValueError(
+                    "Every code-changing decomposed task target requires tasks"
+                )
             modules = list(dict.fromkeys([*requirement_modules, *(spec.get("modules") or [])]))
             scope = list(dict.fromkeys(spec.get("scope") or [child_goal]))
             out_of_scope = list(dict.fromkeys([*requirement_out_of_scope, *(spec.get("out_of_scope") or [])]))
@@ -343,7 +513,7 @@ class TaskRequirementMixin:
                 "location_evidence": spec["location_evidence"],
                 "targets": targets,
                 "review_checks": review_checks,
-                "quality_gates": quality_gates,
+                "quality_gates": normalized_gates,
                 "acceptance_plan": normalized_plan,
                 "dependency_analysis": {"decision": "independent"},
             }, existing_task_id=existing_task_id)

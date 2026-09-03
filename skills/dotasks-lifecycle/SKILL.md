@@ -16,8 +16,8 @@ description: Run only an explicitly invoked DoTasks requirement decomposition, d
 ## Requirement decomposition
 
 1. For a `REQ-*` / `RDRUN-*` prompt, call `get_requirement` and treat the returned requirement, existing child tasks, relations, and decomposition run as authoritative.
-2. Do not edit code, perform implementation, or create another requirement. Decompose only the claimed requirement into independently deliverable ready tasks with explicit dependency keys and complete location/implementation/review/acceptance contracts.
-3. Call `submit_requirement_decomposition` exactly once with the claimed IDs and stable child keys. If decomposition cannot be completed, call `report_requirement_decomposition_failed` with the concrete reason.
+2. Do not edit code, perform implementation, or create another requirement. For every planned child task, call `prepare_task_location`, execute exactly one returned bounded route, and persist the connected evidence with `report_location_status`. Retain each prepared `analysis_id` and its exact location evidence.
+3. Do not call `complete_location_analysis` during requirement decomposition: `submit_requirement_decomposition` atomically completes and consumes every prepared analysis while creating its child task. Decompose only the claimed requirement into independently deliverable ready tasks with explicit dependency keys, location evidence, and verifiable acceptance criteria. Code-changing children require exact targets and code-review gates; read-only children may omit targets, implementation steps, review checks, dependency declarations, and non-applicable acceptance file/symbol fields. Call `submit_requirement_decomposition` exactly once with the claimed IDs, stable child keys, and their prepared location analyses. If decomposition cannot be completed, call `report_requirement_decomposition_failed` with the concrete reason.
 4. After a successful callback, perform the **Event-driven native handoff** below. A failed decomposition callback stops without another claim.
 
 ## Execution and rework
@@ -28,6 +28,13 @@ the current Codex conversation, then call `submit_task_delivery` with
 `changed_locations=[]`, a compact result summary, and passing evidence for the saved
 criterion. The remaining file-target instructions in this section apply only to
 project-backed runs.
+
+For a project-backed run with `RUN_CONTEXT_JSON.delivery.requires_changes=false`,
+inspect only what the task and optional targets require, do not create, modify, or
+delete files, and submit `changed_locations=[]` with passing criterion-level evidence.
+Empty targets, implementation steps, and review checks are valid for this read-only
+task. The modification-lock instructions below apply only when
+`delivery.requires_changes=true`.
 
 1. Start directly from the natural-language task brief at the top of the prompt. Treat that brief as authoritative for the goal, scope, exclusions, and acceptance criteria. Use `RUN_CONTEXT_JSON` only for the immutable modification targets, verification commands, execution environment, and optional batch input; do not search the tool registry or refetch task details. If the snapshot or prompt IDs are missing, stop and report an invalid Taskboard prompt.
 2. Implement only the behavior described by the natural-language task brief. Treat `targets[].file`, `targets[].mode` and `targets[].symbols` only as immutable modification locks, never as another requirement source. Run each grouped item in `verify` once and retain criterion-level evidence for every nested criterion. Do not redo code location or search for additional implementation scope; read only the named targets and the direct dependencies strictly required for correctness.

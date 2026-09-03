@@ -269,6 +269,18 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
         self.assertIn('data-copy-thread=', app)
         self.assertIn("复制原生任务 ID", app)
 
+    def test_completed_tasks_expose_conversation_and_delete_actions(self):
+        app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")
+
+        completed_renderer = app.split("function renderCompletedTasks()", 1)[1].split(
+            "function renderTaskChangeConfirmations()", 1
+        )[0]
+        self.assertIn("taskConversationControl(task)", completed_renderer)
+        self.assertIn("deleteIcon()", completed_renderer)
+        self.assertIn("data-delete-completed-task", completed_renderer)
+        self.assertIn('api(`/api/tasks/${taskId}/delete`', app)
+        self.assertIn("Codex 会话会保留", app)
+
     def test_settings_button_opens_task_token_budget_configuration(self):
         html = (WEB_SOURCE / "App.jsx").read_text(encoding="utf-8")
         app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")

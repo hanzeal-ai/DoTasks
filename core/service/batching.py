@@ -268,6 +268,7 @@ class TaskBatchMixin:
         targets: list[dict[str, Any]] = []
         plans: list[dict[str, Any]] = []
         task_contexts = []
+        requires_changes = False
         for task in tasks:
             task_contexts.append({
                 key: task.get(key)
@@ -278,6 +279,9 @@ class TaskBatchMixin:
                 if task.get(key) not in (None, "", [], {})
             })
             targets.extend((task.get("location_context") or {}).get("targets") or [])
+            requires_changes = requires_changes or self._quality_gate_required(
+                task, "code_review"
+            )
             for item in task.get("acceptance_plan") or []:
                 plans.append({
                     **item,
@@ -285,10 +289,12 @@ class TaskBatchMixin:
                     "criterion": batch_item_label(task["id"], item.get("criterion") or ""),
                 })
         return {
+            **context,
             "batch": self._batch_metadata(batch),
             "tasks": task_contexts,
             "targets": self._merge_targets(targets),
             "verify": group_verification_checks(plans),
+            "delivery": {"requires_changes": requires_changes},
         }
 
     def _merge_batch_code_review_context(

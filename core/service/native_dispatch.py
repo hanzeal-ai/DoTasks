@@ -50,9 +50,16 @@ class NativeDispatchMixin:
         return f"[DoTaks] {entity_id} {role_label}"
 
     @staticmethod
-    def _lifecycle_skill_attachment() -> str:
+    def _lifecycle_skill_attachment(
+        runtime_home: str | Path | None = None,
+    ) -> str:
+        root = (
+            Path(runtime_home).expanduser().resolve()
+            if runtime_home
+            else Path(__file__).resolve().parents[2]
+        )
         skill_path = (
-            Path(__file__).resolve().parents[2]
+            root
             / "skills"
             / "dotasks-lifecycle"
             / "SKILL.md"
@@ -63,12 +70,23 @@ class NativeDispatchMixin:
         return f"[$dotasks:dotasks-lifecycle]({target})"
 
     @staticmethod
-    def _lifecycle_cli_fallback() -> str:
-        cli_path = Path(__file__).resolve().parents[2] / "scripts" / "mcp-server"
+    def _lifecycle_cli_fallback(
+        runtime_home: str | Path | None = None,
+    ) -> str:
+        root = (
+            Path(runtime_home).expanduser().resolve()
+            if runtime_home
+            else Path(__file__).resolve().parents[2]
+        )
+        cli_path = root / "scripts" / "mcp-server"
         return f"DoTasks lifecycle CLI fallback: `{cli_path}`"
 
     @classmethod
-    def _attach_lifecycle_skill(cls, prompt: str) -> str:
+    def _attach_lifecycle_skill(
+        cls,
+        prompt: str,
+        runtime_home: str | Path | None = None,
+    ) -> str:
         lines = prompt.strip().splitlines()
         if lines and lines[0].startswith("[$dotasks:dotasks-lifecycle]("):
             lines = lines[1:]
@@ -82,8 +100,8 @@ class NativeDispatchMixin:
             lines = lines[:-1]
         body = "\n".join(lines).strip()
         return (
-            f"{cls._lifecycle_skill_attachment()}\n\n"
-            f"{body}\n\n{cls._lifecycle_cli_fallback()}"
+            f"{cls._lifecycle_skill_attachment(runtime_home)}\n\n"
+            f"{body}\n\n{cls._lifecycle_cli_fallback(runtime_home)}"
         )
 
     @classmethod

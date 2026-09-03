@@ -189,12 +189,14 @@ class TaskReviewMixin:
             not str(task.get("project") or "").strip()
             and str(run.get("execution_environment") or "") == "projectless"
         )
+        requires_code_review = self._quality_gate_required(task, "code_review")
+        requires_changes = requires_code_review
         if not isinstance(changed_locations, list):
             raise ValueError("changed_locations is required")
-        if not projectless and not changed_locations:
-            raise ValueError("changed_locations is required")
-        if projectless and changed_locations:
-            raise ValueError("Projectless deliveries cannot report changed locations")
+        if requires_changes and not changed_locations:
+            raise ValueError("Code-changing deliveries require changed_locations")
+        if not requires_changes and changed_locations:
+            raise ValueError("Read-only deliveries cannot report changed_locations")
         for location in changed_locations:
             if not location.get("file"):
                 raise ValueError("Every changed location requires a file")
@@ -275,7 +277,6 @@ class TaskReviewMixin:
                 for item in task.get("acceptance_plan") or []
                 if isinstance(item, dict)
             }
-        requires_code_review = self._quality_gate_required(task, "code_review")
         normalized_evidence: list[dict[str, Any]] = []
         incomplete_automated: list[str] = []
         incomplete_without_review: list[str] = []
@@ -319,7 +320,7 @@ class TaskReviewMixin:
             or ((run.get("context_snapshot") or {}).get("workspace_baseline") or {}).get("revision")
             or ""
         )
-        if execution_environment == "worktree":
+        if execution_environment == "worktree" and changed_locations:
             artifact_path, artifact_sha256 = self._capture_delivery_patch(
                 run_id,
                 execution_workspace,
@@ -347,7 +348,11 @@ class TaskReviewMixin:
         if token_used:
             self.record_run_token_usage(run_id, token_used)
         integration_result: dict[str, Any] = {}
-        if execution_environment == "worktree" and not requires_code_review:
+        if (
+            execution_environment == "worktree"
+            and not requires_code_review
+            and changed_locations
+        ):
             integration_result = self._integrate_delivery_artifact(
                 task,
                 run_id,
@@ -360,6 +365,11 @@ class TaskReviewMixin:
                     "artifact_sha256": artifact_sha256,
                 },
             )
+        elif execution_environment == "worktree" and not changed_locations:
+            integration_result = {
+                "integration_status": "not_required",
+                "workspace_sync_status": "not_required",
+            }
         with self.db.transaction() as connection:
             if batch:
                 sealed = connection.execute(

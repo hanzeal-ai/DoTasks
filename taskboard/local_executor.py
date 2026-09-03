@@ -102,9 +102,17 @@ class LocalCodexExecutor:
             )
         launched = 0
         for dispatch in dispatches:
-            if self._launch(dispatch):
+            if self._launch(self._localize_dispatch_prompt(dispatch)):
                 launched += 1
         return launched
+
+    def _localize_dispatch_prompt(self, dispatch: dict[str, Any]) -> dict[str, Any]:
+        localized = dict(dispatch)
+        localized["dispatch_prompt"] = TaskboardService._attach_lifecycle_skill(
+            str(dispatch.get("dispatch_prompt") or ""),
+            runtime_home=self.runtime_home,
+        )
+        return localized
 
     def wait_for_workers(self) -> None:
         while True:

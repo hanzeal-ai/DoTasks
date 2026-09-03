@@ -7,8 +7,8 @@ from typing import Any
 from taskboard.version import VERSION
 
 
-RUN_CONTEXT_SCHEMA_VERSION = 13
-LIFECYCLE_TOOL_SCHEMA_REVISION = 13
+RUN_CONTEXT_SCHEMA_VERSION = 14
+LIFECYCLE_TOOL_SCHEMA_REVISION = 14
 
 LIFECYCLE_TOOL_NAMES = frozenset({
     "report_run_blocked",
@@ -196,6 +196,7 @@ def prompt_context(snapshot: dict[str, Any]) -> str:
                 "execution_environment",
                 "targets",
                 "verify",
+                "delivery",
                 "visual_references",
                 "batch",
                 "tasks",

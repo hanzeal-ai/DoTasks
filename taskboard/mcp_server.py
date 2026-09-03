@@ -38,7 +38,7 @@ TARGET_SCHEMA = {
     "type": "object",
     "properties": {
         "file": {"type": "string", "minLength": 1},
-        "mode": {"type": "string", "enum": ["modify", "create", "delete", "config"], "default": "modify"},
+        "mode": {"type": "string", "enum": ["modify", "create", "delete", "config", "inspect"], "default": "modify"},
         "symbols": {"type": "array", "items": {"type": "string", "minLength": 1}},
         "reason": {"type": "string"},
         "tasks": {"type": "array", "items": {
@@ -52,7 +52,7 @@ TARGET_SCHEMA = {
             "additionalProperties": False,
         }},
     },
-    "required": ["file", "mode", "symbols", "tasks"],
+    "required": ["file", "mode", "symbols"],
     "additionalProperties": False,
 }
 
@@ -218,15 +218,15 @@ TOOLS = [
     },
     {
         "name": "complete_location_analysis",
-        "description": "Persist bounded location evidence, exact file/symbol target tasks, review checks and criterion-level acceptance plan.",
+        "description": "Persist bounded location evidence, an explicit code-review decision, and a criterion-level acceptance plan. Exact targets and target tasks are required only for code-changing work; non-applicable read-only fields may be empty.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "analysis_id": {"type": "string"}, "location_evidence": LOCATION_EVIDENCE_SCHEMA,
-                "targets": {"type": "array", "minItems": 1, "items": TARGET_SCHEMA},
+                "targets": {"type": "array", "items": TARGET_SCHEMA},
                 "dependency_analysis": DEPENDENCY_ANALYSIS_SCHEMA,
-                "implementation_contract": {"type": "object", "description": "Targets and their tasks must match the completed location evidence exactly; verification belongs in acceptance_plan.", "properties": {
-                    "targets": {"type": "array", "minItems": 1, "items": TARGET_SCHEMA},
+                "implementation_contract": {"type": "object", "description": "For code-changing tasks, targets and their tasks must match the completed location evidence exactly. Read-only tasks may omit this contract or use an empty target array.", "properties": {
+                    "targets": {"type": "array", "items": TARGET_SCHEMA},
                 }, "required": ["targets"], "additionalProperties": False},
                 "review_contract": {
                     "type": "object",
@@ -234,8 +234,7 @@ TOOLS = [
                     "properties": {
                         "checks": {
                             "type": "array",
-                            "minItems": 1,
-                            "description": "Optional explicit code-quality checks; omit to use the default quality/security/cohesion checks.",
+                            "description": "Optional explicit code-quality checks. Read-only tasks may use an empty array; code-changing tasks may omit this field to use defaults.",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -259,9 +258,9 @@ TOOLS = [
                     "required": {"type": "boolean"}, "timeout_seconds": {"type": "integer"},
                     "failure_category": {"type": "string", "enum": ["project", "environment", "implementation"]},
                     "repair_command": {"type": "string"}, "repair_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 1800}
-                }, "required": ["criterion", "file", "method", "expected"]}},
+                }, "required": ["criterion", "method", "expected"]}},
             },
-            "required": ["analysis_id", "location_evidence", "targets", "dependency_analysis", "implementation_contract", "review_contract", "acceptance_plan"],
+            "required": ["analysis_id", "location_evidence", "review_contract", "acceptance_plan"],
         },
     },
     {
@@ -291,9 +290,9 @@ TOOLS = [
                 "location_summary": {"type": "string"},
                 "agent_id": {"type": "string"},
                 "location_evidence": LOCATION_EVIDENCE_SCHEMA,
-                "targets": {"type": "array", "minItems": 1, "items": TARGET_SCHEMA},
+                "targets": {"type": "array", "items": TARGET_SCHEMA},
                 "visual_references": {"type": "array", "description": "All requirement screenshots and visual references; each source path is copied immediately into DoTasks-managed storage.", "items": {"type": "object", "properties": {"path": {"type": "string", "minLength": 1}, "purpose": {"type": "string"}}, "required": ["path"]}},
-                "review_checks": {"type": "array", "minItems": 1, "description": "Optional explicit code-quality checks. Omit to use the defaults: code quality, security vulnerabilities, and high cohesion/low coupling. Never copy task acceptance criteria here.", "items": {"type": "object", "properties": {"id": {"type": "string", "minLength": 1}, "description": {"type": "string", "minLength": 1}, "kind": {"type": "string", "enum": ["code", "static"]}}, "required": ["id", "description", "kind"]}},
+                "review_checks": {"type": "array", "description": "Optional explicit code-quality checks. Read-only tasks may use an empty array; code-changing tasks may omit this field to use defaults. Never copy task acceptance criteria here.", "items": {"type": "object", "properties": {"id": {"type": "string", "minLength": 1}, "description": {"type": "string", "minLength": 1}, "kind": {"type": "string", "enum": ["code", "static"]}}, "required": ["id", "description", "kind"]}},
                 "quality_gates": QUALITY_GATES_SCHEMA,
                 "acceptance_plan": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
                     "criterion": {"type": "string"}, "file": {"type": "string"}, "symbol": {"type": "string"},
@@ -303,7 +302,7 @@ TOOLS = [
                     "failure_category": {"type": "string", "enum": ["project", "environment", "implementation"]},
                     "repair_command": {"type": "string"}, "repair_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 1800},
                     "artifact_refs": {"type": "array", "items": {"type": "string"}}
-                }, "required": ["criterion", "file", "symbol", "method", "expected", "check_type"]}},
+                }, "required": ["criterion", "method", "expected"]}},
                 "dependency_analysis": DEPENDENCY_ANALYSIS_SCHEMA,
                 "relations": {"type": "array", "items": {"type": "object"}},
                 "acceptance_criteria": {"type": "array", "items": {"type": "string"}, "description": "Requirement-level outcomes; direct task criteria continue to be derived from acceptance_plan."},
@@ -314,8 +313,7 @@ TOOLS = [
                 {"properties": {"intake_kind": {"const": "requirement"}}, "required": ["intake_kind"]},
                 {"properties": {"intake_kind": {"const": "task"}}, "required": [
                     "intake_kind",
-                    "analysis_id", "scope", "out_of_scope", "location_evidence",
-                    "targets", "quality_gates",
+                    "analysis_id", "location_evidence", "quality_gates",
                     "acceptance_plan"
                 ]}
             ],
@@ -339,15 +337,32 @@ TOOLS = [
                     "goal": {"type": "string", "minLength": 1},
                     "analysis_id": {"type": "string", "minLength": 1},
                     "location_evidence": LOCATION_EVIDENCE_SCHEMA,
-                    "targets": {"type": "array", "minItems": 1, "items": TARGET_SCHEMA},
-                    "review_checks": {"type": "array", "minItems": 1, "description": "Optional explicit code-quality checks; omit to use the default quality/security/cohesion checks."},
+                    "targets": {"type": "array", "items": TARGET_SCHEMA},
+                    "review_checks": {"type": "array", "description": "Optional explicit code-quality checks. Read-only tasks may use an empty array; code-changing tasks may omit this field to use defaults."},
                     "quality_gates": QUALITY_GATES_SCHEMA,
-                    "acceptance_plan": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+                    "acceptance_plan": {"type": "array", "minItems": 1, "items": {
+                        "type": "object",
+                        "properties": {
+                            "criterion": {"type": "string", "minLength": 1},
+                            "file": {"type": "string"},
+                            "symbol": {"type": "string"},
+                            "method": {"type": "string", "minLength": 1},
+                            "command": {"type": "string"},
+                            "expected": {"type": "string", "minLength": 1},
+                            "check_type": {"type": "string", "enum": ["automated", "static_review", "manual_runtime"]},
+                            "required": {"type": "boolean"},
+                            "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+                            "failure_category": {"type": "string", "enum": ["project", "environment", "implementation"]},
+                            "repair_command": {"type": "string"},
+                            "repair_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 1800},
+                            "artifact_refs": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["criterion", "method", "expected"],
+                    }},
                     "depends_on": {"type": "array", "items": {"type": "string"}},
                 }, "required": [
                     "key", "title", "goal", "analysis_id", "location_evidence",
-                    "targets", "quality_gates",
-                    "acceptance_plan",
+                    "quality_gates", "acceptance_plan",
                 ],
             }},
         }, "required": ["requirement_id", "run_id", "tasks"]},
@@ -497,7 +512,7 @@ TOOLS = [
     },
     {
         "name": "submit_task_delivery",
-        "description": "Submit an execution run's compact delivery summary and verification result, then move the task or sealed execution batch to review. When RUN_CONTEXT_JSON.batch has appended tasks, pass its exact batch_revision. Validation failures leave the run active: correct the payload and retry instead of reporting the run blocked.",
+        "description": "Submit an execution run's compact delivery summary and verification result. Code-changing runs must report exact changed_locations; read-only and projectless runs must pass changed_locations=[]. When RUN_CONTEXT_JSON.batch has appended tasks, pass its exact batch_revision. Validation failures leave the run active: correct the payload and retry instead of reporting the run blocked.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -584,11 +599,11 @@ def tool_handlers_for(
         "complete_location_analysis": lambda arguments: service.complete_location_analysis(
             arguments["analysis_id"],
             arguments["location_evidence"],
-            arguments["targets"],
+            arguments.get("targets", []),
             arguments["acceptance_plan"],
-            arguments["dependency_analysis"],
-            arguments["implementation_contract"],
-            arguments["review_contract"],
+            arguments.get("dependency_analysis"),
+            arguments.get("implementation_contract"),
+            arguments.get("review_contract"),
         ),
         "finalize_task_intake": service.finalize_task_intake,
         "get_requirement": lambda arguments: service.get_requirement(
@@ -733,7 +748,7 @@ def _compact_lifecycle_result(name: str, result: Any) -> Any:
     if not isinstance(result, dict):
         return result
     if name in {
-        "report_location_status", "complete_location_analysis",
+        "prepare_task_location", "report_location_status", "complete_location_analysis",
         "finalize_task_intake", "get_requirement",
         "submit_requirement_decomposition",
         "set_dispatcher_enabled", "complete_schedule_cycle",

@@ -124,6 +124,30 @@ class LocalCodexExecutorTest(unittest.TestCase):
         self.assertEqual([("RUN-0001", "cli-thread-1")], service.bindings)
         self.assertEqual([], service.failures)
 
+    def test_dispatch_rewrites_cloud_lifecycle_paths_to_local_runtime(self):
+        service = FakeService(None)
+        executor = self.build_executor(service, close_lifecycle=True)
+        dispatch = make_dispatch(
+            dispatch_prompt=(
+                "[$dotasks:dotasks-lifecycle](/app/skills/dotasks-lifecycle/SKILL.md)\n\n"
+                "$dotasks-lifecycle\nBuild it\n\n"
+                "DoTasks lifecycle CLI fallback: `/app/scripts/mcp-server`"
+            )
+        )
+
+        localized = executor._localize_dispatch_prompt(dispatch)
+
+        self.assertNotIn("/app/", localized["dispatch_prompt"])
+        self.assertIn(
+            str(executor.runtime_home / "skills/dotasks-lifecycle/SKILL.md"),
+            localized["dispatch_prompt"],
+        )
+        self.assertIn(
+            str(executor.runtime_home / "scripts/mcp-server"),
+            localized["dispatch_prompt"],
+        )
+        self.assertIn("/app/", dispatch["dispatch_prompt"])
+
     def test_completed_turn_without_callback_is_failed_and_wakes_next_cycle(self):
         service = FakeService(make_dispatch())
         executor = self.build_executor(service, close_lifecycle=False)

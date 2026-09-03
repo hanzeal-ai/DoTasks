@@ -205,7 +205,7 @@ class TaskboardMcpServerTest(unittest.TestCase):
         task_branch = tool["inputSchema"]["anyOf"][1]["required"]
 
         self.assertEqual(["requirement", "task"], properties["intake_kind"]["enum"])
-        self.assertIn("targets", task_branch)
+        self.assertNotIn("targets", task_branch)
         self.assertNotIn("ordered_steps", task_branch)
         self.assertIn("tasks", properties["targets"]["items"]["properties"])
         self.assertIn("mode", properties["targets"]["items"]["properties"])
@@ -214,6 +214,8 @@ class TaskboardMcpServerTest(unittest.TestCase):
         self.assertIn("default", properties["review_checks"]["description"])
         self.assertIn("quality_gates", task_branch)
         self.assertIn("acceptance_plan", task_branch)
+        self.assertNotIn("minItems", properties["targets"])
+        self.assertIn("inspect", TARGET_SCHEMA["properties"]["mode"]["enum"])
         gates = properties["quality_gates"]
         self.assertEqual(["code_review"], gates["required"])
         self.assertNotIn("acceptance", gates["properties"])
@@ -258,13 +260,18 @@ class TaskboardMcpServerTest(unittest.TestCase):
         task_items = tool["inputSchema"]["properties"]["tasks"]["items"]
         required = set(task_items["required"])
         self.assertTrue({
-            "analysis_id", "location_evidence", "targets",
-            "acceptance_plan",
+            "analysis_id", "location_evidence", "acceptance_plan",
         }.issubset(required))
+        self.assertNotIn("targets", required)
+        self.assertIn("quality_gates", required)
         self.assertNotIn("review_checks", required)
-        self.assertEqual(1, task_items["properties"]["targets"]["minItems"])
+        self.assertNotIn("minItems", task_items["properties"]["targets"])
         self.assertNotIn("ordered_steps", required)
         self.assertIn("tasks", task_items["properties"]["targets"]["items"]["properties"])
+        self.assertEqual(
+            ["criterion", "method", "expected"],
+            task_items["properties"]["acceptance_plan"]["items"]["required"],
+        )
 
     def test_get_requirement_preserves_authoritative_decomposition_context(self):
         result = {
@@ -286,6 +293,29 @@ class TaskboardMcpServerTest(unittest.TestCase):
         self.assertEqual(result, response["structuredContent"])
         self.assertEqual(result, json.loads(response["content"][0]["text"]))
         self.assertNotIn("task_id", response["structuredContent"])
+
+    def test_prepare_location_preserves_analysis_and_bounded_route(self):
+        result = {
+            "analysis_id": "LOC-0001",
+            "stage": "creation",
+            "project": "/tmp/project",
+            "location": {
+                "status": {"codegraph": {"available": True}},
+                "query_plan": [{"tool": "codegraph", "query": "Login title"}],
+            },
+            "instruction": "Run exactly one bounded route",
+        }
+        with patch("taskboard.mcp_server._call_tool", return_value=result):
+            response = handle({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {
+                    "name": "prepare_task_location",
+                    "arguments": {"project": "/tmp/project", "title": "Login title"},
+                },
+            })["result"]
+
+        self.assertEqual(result, response["structuredContent"])
+        self.assertEqual(result, json.loads(response["content"][0]["text"]))
 
     def test_mutation_results_are_compact(self):
         result = {

@@ -228,6 +228,10 @@ function conversationIcon() {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4.75h16v11.5H9.2L5.1 19.7v-3.45H4V4.75Zm2 2v7.5h1.1v1.15l1.4-1.15H18v-7.5H6Z"/></svg>';
 }
 
+function deleteIcon() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h8l.75 2H20v2H4V6h3.25L8 4Zm-1 6h2v8h6v-8h2v10H7V10Zm3 0h2v6h-2v-6Zm3 0h2v6h-2v-6Z"/></svg>';
+}
+
 function taskConversationControl(task) {
   const conversations = Array.isArray(task.conversations) ? [...task.conversations].reverse() : [];
   const conversation = selectTaskConversation(task);
@@ -450,7 +454,7 @@ function renderCompletedTasks() {
   document.querySelector("#completed-dialog-count").textContent = String(tasks.length);
   document.querySelector("#completed-tasks-content").innerHTML = tasks.length ? `<div class="attention-list">${tasks.map(task => {
     const taskId = escapeHtml(task.id);
-    return `<article class="attention-task completed-task"><div class="attention-task-head"><div class="attention-task-title"><span>${taskId}</span><strong title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</strong></div><span class="attention-task-status">${escapeHtml(statusLabels[task.status] || task.status)}</span></div><p>${escapeHtml(task.delivery_summary || task.goal || "任务已完成")}</p><div class="attention-task-meta"><span>${escapeHtml(task.priority || "")}</span><span>完成于 ${escapeHtml(formatTimestamp(task.updated_at || task.created_at))}</span><div class="attention-task-actions"><button class="small" type="button" data-details="${taskId}">查看详情</button></div></div></article>`;
+    return `<article class="attention-task completed-task"><div class="attention-task-head"><div class="attention-task-title"><span>${taskId}</span><strong title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</strong></div><span class="attention-task-status">${escapeHtml(statusLabels[task.status] || task.status)}</span></div><p>${escapeHtml(task.delivery_summary || task.goal || "任务已完成")}</p><div class="attention-task-meta"><span>${escapeHtml(task.priority || "")}</span><span>完成于 ${escapeHtml(formatTimestamp(task.updated_at || task.created_at))}</span><div class="attention-task-actions">${taskConversationControl(task)}<button class="small" type="button" data-details="${taskId}">查看详情</button><button class="small conversation-button danger" type="button" data-delete-completed-task="${taskId}" aria-label="删除完成任务" title="删除完成任务">${deleteIcon()}</button></div></div></article>`;
   }).join("")}</div>` : '<div class="trace-empty">当前没有完成任务</div>';
 }
 
@@ -629,6 +633,20 @@ async function handleTaskAction(event) {
       });
       await load();
       toast("任务已取消");
+    } catch (error) { toast(error.message); }
+    return true;
+  }
+  const deleteCompletedTask = event.target.closest("[data-delete-completed-task]");
+  if (deleteCompletedTask) {
+    const taskId = deleteCompletedTask.dataset.deleteCompletedTask;
+    const task = state.board?.tasks?.find(item => item.id === taskId);
+    const taskLabel = task ? `${task.id}《${task.title}》` : taskId;
+    if (!window.confirm(`确定删除完成任务 ${taskLabel} 吗？DoTasks 任务记录将永久删除，Codex 会话会保留。`)) return true;
+    try {
+      await api(`/api/tasks/${taskId}/delete`, {method: "POST", body: "{}"});
+      await load();
+      renderCompletedTasks();
+      toast("完成任务已删除；Codex 会话已保留");
     } catch (error) { toast(error.message); }
     return true;
   }

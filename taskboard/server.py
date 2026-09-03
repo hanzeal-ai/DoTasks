@@ -203,6 +203,8 @@ class TaskboardHandler(BaseDoTasksHandler):
                 )
             elif match := re.fullmatch(r"/api/tasks/([^/]+)/resume", parsed.path):
                 self._json(HTTPStatus.OK, self.service.resume_task(match.group(1)))
+            elif match := re.fullmatch(r"/api/tasks/([^/]+)/delete", parsed.path):
+                self._json(HTTPStatus.OK, self.service.delete_task(match.group(1)))
             elif match := re.fullmatch(r"/api/tasks/([^/]+)/transition", parsed.path):
                 updates = payload.get("updates", {})
                 self._json(

@@ -124,6 +124,24 @@ class TaskboardHTTPServerTest(unittest.TestCase):
         self.assertEqual(201, status)
         self.assertEqual("TASK-0001", payload["task_id"])
 
+    def test_completed_task_delete_route(self) -> None:
+        service = self.server.RequestHandlerClass.service
+        original_delete = service.delete_task
+        service.delete_task = lambda task_id: {
+            "status": "deleted", "task_id": task_id,
+        }
+        try:
+            status, _, payload = self.request(
+                "POST", "/api/tasks/TASK-0001/delete", b"{}",
+                Origin=self.origin, **{"Content-Type": "application/json"},
+            )
+        finally:
+            service.delete_task = original_delete
+        self.assertEqual(200, status)
+        self.assertEqual(
+            {"status": "deleted", "task_id": "TASK-0001"}, payload
+        )
+
     def test_requirement_delete_and_redecompose_routes(self) -> None:
         service = self.server.RequestHandlerClass.service
         original_delete = service.delete_requirement

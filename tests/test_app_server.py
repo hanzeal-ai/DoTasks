@@ -8,6 +8,7 @@ from pathlib import Path
 from taskboard.app_server import (
     AppServerError,
     CodexAppServerClient,
+    LIFECYCLE_TOOLS,
     sync_worker_thread_to_shared_home,
 )
 
@@ -92,6 +93,41 @@ class WorkerSessionVisibilityTest(unittest.TestCase):
         synchronized = list((self.shared / "sessions").glob("**/*.jsonl"))
         self.assertEqual(1, len(synchronized))
         self.assertEqual(self.session.read_bytes(), synchronized[0].read_bytes())
+
+
+class LifecycleApprovalTest(unittest.TestCase):
+    def test_location_analysis_tools_are_approved_for_dotasks_workers(self) -> None:
+        self.assertTrue(
+            {
+                "prepare_task_location",
+                "report_location_status",
+                "complete_location_analysis",
+            }.issubset(LIFECYCLE_TOOLS)
+        )
+        client = CodexAppServerClient(
+            tempfile.gettempdir(),
+            Path(__file__).resolve().parents[1],
+            executable="codex",
+        )
+        responses: list[dict] = []
+        client._write = responses.append  # type: ignore[method-assign]
+
+        client._respond_to_server_request(
+            {
+                "id": 9,
+                "method": "mcpServer/elicitation/request",
+                "params": {
+                    "serverName": "dotasks",
+                    "message": 'Allow MCP server "dotasks" to run tool "prepare_task_location"?',
+                    "_meta": {"codex_approval_kind": "mcp_tool_call"},
+                },
+            }
+        )
+
+        self.assertEqual(
+            {"id": 9, "result": {"action": "accept", "content": {}}},
+            responses[0],
+        )
 
 
 if __name__ == "__main__":

@@ -76,15 +76,20 @@ class WorkflowTest(unittest.TestCase):
         payload.update(overrides)
         return self.service.create_task({**payload, "status": "ready"})
 
-    def deliver(self, task, thread="dev", evidence_status=None):
+    def deliver(self, task, thread="dev", evidence_status=None, *, changed=True):
         claim = self.service.claim_next_task("worker")
         self.service.bind_conversation(task["id"], claim["run"]["run_type"], thread, claim["run"]["id"])
-        path = self.project / "src" / "APage.tsx"
-        path.write_text(path.read_text(encoding="utf-8") + "// delivery\n", encoding="utf-8")
+        changed_locations = []
+        if changed:
+            path = self.project / "src" / "APage.tsx"
+            path.write_text(path.read_text(encoding="utf-8") + "// delivery\n", encoding="utf-8")
+            changed_locations = [{"file": "src/APage.tsx", "symbols": ["APage"]}]
         evidence = {"criterion": "功能可用", "evidence": "测试通过"}
         if evidence_status:
             evidence["status"] = evidence_status
-        return self.service.submit_delivery(claim["run"]["id"], "完成", "测试通过", [{"file": "src/APage.tsx", "symbols": ["APage"]}], [evidence])
+        return self.service.submit_delivery(
+            claim["run"]["id"], "完成", "测试通过", changed_locations, [evidence]
+        )
 
     @staticmethod
     def review_contract(code_review: bool):
@@ -221,11 +226,15 @@ class WorkflowTest(unittest.TestCase):
         self.assertIsNone(self.service.claim_next_task("worker"))
         with self.service.db.transaction() as connection:
             connection.execute("UPDATE tasks SET auto_dispatch=1 WHERE id=?", (first["id"],))
-        self.deliver(first, "multi-first-thread", evidence_status="passed")
+        self.deliver(
+            first, "multi-first-thread", evidence_status="passed", changed=False
+        )
         self.assertIsNone(self.service.claim_next_task("worker"))
         with self.service.db.transaction() as connection:
             connection.execute("UPDATE tasks SET auto_dispatch=1 WHERE id=?", (second["id"],))
-        self.deliver(second, "multi-second-thread", evidence_status="passed")
+        self.deliver(
+            second, "multi-second-thread", evidence_status="passed", changed=False
+        )
         claim = self.service.claim_next_task("worker")
         self.assertEqual(dependent["id"], claim["task"]["id"])
         model_context = model_run_context(claim["run"]["context_snapshot"])
@@ -238,7 +247,7 @@ class WorkflowTest(unittest.TestCase):
             review_contract=self.review_contract(False),
         )
 
-        delivered = self.deliver(task, evidence_status="passed")
+        delivered = self.deliver(task, evidence_status="passed", changed=False)
 
         self.assertEqual("done", delivered["task"]["status"])
         self.assertEqual("done", delivered["next_stage"])
@@ -255,7 +264,7 @@ class WorkflowTest(unittest.TestCase):
         with self.assertRaisesRegex(
             ValueError, "must pass during development"
         ):
-            self.deliver(task)
+            self.deliver(task, changed=False)
 
     def test_finalize_task_intake_pauses_for_strong_dependency_candidate(self):
         existing = self.task("重复模块任务")
@@ -274,6 +283,9 @@ class WorkflowTest(unittest.TestCase):
             },
             "targets": [{"file": "src/APage.tsx", "mode": "modify", "symbols": ["APage"], "tasks": [{"symbol": "APage", "action": "修改组件"}]}],
             "review_checks": [{"id": "project-rules", "description": "遵守项目规范", "kind": "code"}],
+            "quality_gates": {
+                "code_review": {"required": True, "reason": "代码修改"},
+            },
             "acceptance_plan": [{
                 "criterion": "功能可用", "file": "src/APage.tsx", "symbol": "APage",
                 "method": "运行聚焦测试", "command": "test -f src/APage.tsx",

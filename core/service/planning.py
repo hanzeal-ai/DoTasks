@@ -285,6 +285,26 @@ class TaskPlanningMixin:
         return normalized
 
     @staticmethod
+    def _default_quality_gates_for_targets(
+        targets: list[dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        requires_code_review = any(
+            str(target.get("mode") or "modify").strip().lower() != "inspect"
+            for target in targets
+            if isinstance(target, dict)
+        )
+        return {
+            "code_review": {
+                "required": requires_code_review,
+                "reason": (
+                    "Repository changes require code review"
+                    if requires_code_review
+                    else "Read-only tasks do not change repository files"
+                ),
+            },
+        }
+
+    @staticmethod
     def _quality_gate_required(task: dict[str, Any], gate: str) -> bool:
         gates = (task.get("review_contract") or {}).get("quality_gates")
         if not isinstance(gates, dict) or not isinstance(gates.get(gate), dict):
@@ -360,7 +380,18 @@ class TaskPlanningMixin:
         unknown = set(contract) - {"checks", "quality_gates"}
         if unknown:
             raise ValueError(f"Unknown review_contract fields: {', '.join(sorted(unknown))}")
-        raw_checks = contract.get("checks") or default_code_review_checks()
+        quality_gates = TaskPlanningMixin._normalize_quality_gates(
+            contract.get("quality_gates")
+        )
+        raw_checks = contract.get("checks") if "checks" in contract else None
+        if raw_checks is None or (
+            raw_checks == [] and quality_gates["code_review"]["required"]
+        ):
+            raw_checks = (
+                default_code_review_checks()
+                if quality_gates["code_review"]["required"]
+                else []
+            )
         if not isinstance(raw_checks, list):
             raise ValueError("review_contract.checks must be an array")
         checks: list[dict[str, str]] = []
@@ -389,13 +420,15 @@ class TaskPlanningMixin:
             checks.append({"id": check_id, "description": description, "kind": kind})
         return {
             "checks": checks,
-            "quality_gates": TaskPlanningMixin._normalize_quality_gates(
-                contract.get("quality_gates")
-            ),
+            "quality_gates": quality_gates,
         }
 
     def _validate_implementation_contract(
-        self, contract: dict[str, Any], analysis_targets: list[dict[str, Any]] | None = None,
+        self,
+        contract: dict[str, Any],
+        analysis_targets: list[dict[str, Any]] | None = None,
+        *,
+        allow_empty: bool = False,
     ) -> dict[str, Any]:
         """Normalize one precise file-oriented execution plan."""
         if not isinstance(contract, dict):
@@ -405,8 +438,10 @@ class TaskPlanningMixin:
             raise ValueError(
                 f"Unknown implementation_contract fields: {', '.join(sorted(unknown))}"
             )
-        raw_targets = contract.get("targets")
-        if not isinstance(raw_targets, list) or not raw_targets:
+        raw_targets = contract.get("targets", [])
+        if not isinstance(raw_targets, list):
+            raise ValueError("implementation_contract.targets must be an array")
+        if not raw_targets and not allow_empty:
             raise ValueError("implementation_contract.targets is required")
         targets: list[dict[str, Any]] = []
         target_by_file: dict[str, dict[str, Any]] = {}
@@ -420,8 +455,10 @@ class TaskPlanningMixin:
                 )
             file_value = self._normalize_target_file(item.get("file"))
             mode = str(item.get("mode") or "modify").strip().lower()
-            if mode not in {"modify", "create", "delete", "config"}:
-                raise ValueError("Implementation target mode must be modify, create, delete or config")
+            if mode not in {"modify", "create", "delete", "config", "inspect"}:
+                raise ValueError(
+                    "Implementation target mode must be modify, create, delete, config or inspect"
+                )
             symbols = item.get("symbols") or []
             if not isinstance(symbols, list) or any(not isinstance(symbol, str) for symbol in symbols):
                 raise ValueError("Every implementation target requires a symbols array")
@@ -484,10 +521,10 @@ class TaskPlanningMixin:
                 )
                 for item in analysis_targets if isinstance(item, dict)
             }
-            if not located_keys or target_keys != located_keys:
+            if target_keys != located_keys:
                 raise ValueError("implementation_contract.targets must exactly match location analysis targets")
 
-        if any(not target["tasks"] for target in targets):
+        if not allow_empty and any(not target["tasks"] for target in targets):
             raise ValueError("Every implementation target requires at least one task")
 
         visual_references = contract.get("visual_references") or []
@@ -627,9 +664,22 @@ class TaskPlanningMixin:
                 raise ValueError("Location acceptance plan must exactly match the confirmed acceptance criteria")
             if payload.get("status", "draft") == "ready":
                 self._assert_ready_payload(payload, list_values)
-            dependency_analysis = payload.get("dependency_analysis")
-            implementation_contract = payload.get("implementation_contract")
-            review_contract = payload.get("review_contract")
+            dependency_analysis = payload.get("dependency_analysis") or {
+                "decision": "independent"
+            }
+            analysis_targets = location_analysis.get("targets") or []
+            review_contract = dict(payload.get("review_contract") or {})
+            review_contract.setdefault(
+                "quality_gates",
+                self._default_quality_gates_for_targets(analysis_targets),
+            )
+            review_contract = self._normalize_review_contract(review_contract)
+            requires_changes = review_contract["quality_gates"]["code_review"][
+                "required"
+            ]
+            implementation_contract = payload.get(
+                "implementation_contract"
+            ) or {"targets": analysis_targets}
             dependency_analysis = self._normalize_dependency_analysis(
                 dependency_analysis
             )
@@ -691,14 +741,15 @@ class TaskPlanningMixin:
             if declared_scheduling != expected_scheduling:
                 raise ValueError("dependency analysis and scheduling relations must match exactly")
             implementation_contract = self._validate_implementation_contract(
-                implementation_contract, location_analysis.get("targets") or [],
+                implementation_contract,
+                analysis_targets,
+                allow_empty=not requires_changes,
             )
-            if not isinstance(implementation_contract, dict) or not implementation_contract.get("targets"):
-                raise ValueError("implementation_contract.targets is required")
-            review_contract = self._normalize_review_contract(review_contract)
             targets = implementation_contract.get("targets")
-            if not isinstance(targets, list) or not targets:
-                raise ValueError("implementation_contract.targets must be non-empty")
+            if requires_changes and not targets:
+                raise ValueError(
+                    "Code-changing tasks require non-empty implementation targets"
+                )
             task_values = (
                 title, task_type, project,
                 json.dumps(list_values["modules"], ensure_ascii=False),
@@ -1036,8 +1087,9 @@ class TaskPlanningMixin:
                  json.dumps(payload.get("review_contract") or {}, ensure_ascii=False)),
             )
         instruction = (
-            "After one bounded location route, call finalize_task_intake once with unique targets, "
-            "target tasks, review checks and acceptance items."
+            "After one bounded location route, call finalize_task_intake once with location evidence, "
+            "an explicit code-review decision, and acceptance items. Code-changing tasks also require "
+            "exact targets and target tasks; read-only task fields that do not apply may be empty."
             if stage == "creation" else
             "Use the first usable bounded location route in order: CodeGraph, GitNexus, then direct "
             "source matching. Report that evidence, then complete the location analysis."
@@ -1391,19 +1443,30 @@ class TaskPlanningMixin:
                 raise ValueError(f"{field} must be an array of strings")
 
         evidence = payload.get("location_evidence")
-        targets = payload.get("targets")
+        targets = payload.get("targets", [])
         acceptance_plan = payload.get("acceptance_plan")
         if not isinstance(evidence, dict) or not evidence:
             raise ValueError("location_evidence is required")
-        if not isinstance(targets, list) or not targets:
-            raise ValueError("targets must be a non-empty array")
-        if any(
-            not isinstance(target, dict) or not target.get("tasks") for target in targets
-        ):
-            raise ValueError("Every target requires non-empty tasks")
+        if not isinstance(targets, list):
+            raise ValueError("targets must be an array")
+        if any(not isinstance(target, dict) for target in targets):
+            raise ValueError("Every target must be an object")
         if not isinstance(acceptance_plan, list) or not acceptance_plan:
             raise ValueError("acceptance_plan must be a non-empty array")
-        review_checks = payload.get("review_checks") or default_code_review_checks()
+        quality_gates = payload.get("quality_gates")
+        if quality_gates is None:
+            raise ValueError("quality_gates is required to classify the task")
+        normalized_gates = self._normalize_quality_gates(quality_gates)
+        requires_changes = normalized_gates["code_review"]["required"]
+        if requires_changes and not targets:
+            raise ValueError("Code-changing tasks require non-empty targets")
+        if requires_changes and any(not target.get("tasks") for target in targets):
+            raise ValueError("Every code-changing target requires non-empty tasks")
+        review_checks = (
+            payload["review_checks"]
+            if "review_checks" in payload
+            else (default_code_review_checks() if requires_changes else [])
+        )
         if not isinstance(review_checks, list):
             raise ValueError("review_checks must be an array")
 
@@ -1479,10 +1542,7 @@ class TaskPlanningMixin:
         }
         review_contract = self._normalize_review_contract({
             "checks": review_checks,
-            **(
-                {"quality_gates": payload["quality_gates"]}
-                if "quality_gates" in payload else {}
-            ),
+            "quality_gates": normalized_gates,
         })
         completed = self.complete_location_analysis(
             analysis_id, evidence, targets, acceptance_plan, dependency_analysis,
@@ -1517,8 +1577,9 @@ class TaskPlanningMixin:
 
     def complete_location_analysis(
         self, analysis_id: str, location_evidence: dict[str, Any], targets: list[dict[str, Any]],
-        acceptance_plan: list[dict[str, Any]], dependency_analysis: dict[str, Any],
-        implementation_contract: dict[str, Any], review_contract: dict[str, Any],
+        acceptance_plan: list[dict[str, Any]], dependency_analysis: dict[str, Any] | None,
+        implementation_contract: dict[str, Any] | None,
+        review_contract: dict[str, Any] | None,
     ) -> dict[str, Any]:
         analysis = self.get_location_analysis(analysis_id)
         location_status = self.location_status(analysis["project"])
@@ -1526,14 +1587,37 @@ class TaskPlanningMixin:
             raise ValueError("A connected location evidence report from CodeGraph, GitNexus, or source matching is required")
         if not location_evidence:
             raise ValueError("location_evidence is required")
-        if not isinstance(targets, list) or not targets or any(not isinstance(item, dict) for item in targets):
-            raise ValueError("At least one located target is required")
+        if not isinstance(targets, list) or any(
+            not isinstance(item, dict) for item in targets
+        ):
+            raise ValueError("targets must be an array of objects")
+        if isinstance(implementation_contract, dict):
+            raw_implementation_targets = implementation_contract.get("targets", [])
+            if isinstance(raw_implementation_targets, list) and any(
+                not isinstance(item, dict) for item in raw_implementation_targets
+            ):
+                raise ValueError("Every implementation target must be an object")
+        if not isinstance(review_contract, dict) or review_contract.get(
+            "quality_gates"
+        ) is None:
+            raise ValueError(
+                "review_contract.quality_gates is required to classify the task"
+            )
+        review_contract = dict(review_contract)
+        review_contract = self._normalize_review_contract(review_contract)
+        requires_changes = review_contract["quality_gates"]["code_review"][
+            "required"
+        ]
+        if requires_changes and not targets:
+            raise ValueError("Code-changing tasks require at least one located target")
         target_map: dict[str, set[str]] = {}
         for target in targets:
             file = self._normalize_target_file(target.get("file"))
             mode = str(target.get("mode") or "modify").strip().lower()
-            if mode not in {"modify", "create", "delete", "config"}:
-                raise ValueError("Target mode must be modify, create, delete or config")
+            if mode not in {"modify", "create", "delete", "config", "inspect"}:
+                raise ValueError(
+                    "Target mode must be modify, create, delete, config or inspect"
+                )
             symbols = target.get("symbols", [])
             if not isinstance(symbols, list) or any(not isinstance(symbol, str) for symbol in symbols):
                 raise ValueError("Target symbols must be an array of strings")
@@ -1549,10 +1633,21 @@ class TaskPlanningMixin:
         if not isinstance(acceptance_plan, list) or not acceptance_plan or any(not isinstance(item, dict) for item in acceptance_plan):
             raise ValueError("acceptance_plan is required")
         for item in acceptance_plan:
-            file = self._normalize_target_file(item.get("file"))
+            raw_file = str(item.get("file") or "").strip()
+            file = self._normalize_target_file(raw_file) if raw_file else ""
             symbol = str(item.get("symbol") or "").strip()
-            if not item.get("criterion") or not file or not item.get("method") or not item.get("expected"):
-                raise ValueError("Every acceptance plan item requires criterion, file, method and expected")
+            if (
+                not item.get("criterion")
+                or not item.get("method")
+                or not item.get("expected")
+            ):
+                raise ValueError(
+                    "Every acceptance plan item requires criterion, method and expected"
+                )
+            if requires_changes and not file:
+                raise ValueError(
+                    "Code-changing acceptance plan items require a target file"
+                )
             check_type = str(item.get("check_type") or ("automated" if item.get("command") else "static_review"))
             if check_type not in {"automated", "static_review", "manual_runtime"}:
                 raise ValueError("Acceptance check_type must be automated, static_review or manual_runtime")
@@ -1583,16 +1678,24 @@ class TaskPlanningMixin:
                         1800,
                     ),
                 )
-            if file not in target_map:
+            if file and file not in target_map:
                 raise ValueError(f"Acceptance plan points outside located targets: {file}")
-            if target_map[file] and (not symbol or symbol not in target_map[file]):
+            if file and target_map[file] and (
+                not symbol or symbol not in target_map[file]
+            ):
                 raise ValueError(f"Acceptance plan symbol is outside located targets: {file}#{symbol or '<missing>'}")
-            item["file"] = file
+            if file:
+                item["file"] = file
+            else:
+                item.pop("file", None)
         implementation_contract = self._validate_implementation_contract(
-            implementation_contract, targets,
+            implementation_contract or {"targets": targets},
+            targets,
+            allow_empty=not requires_changes,
         )
-        review_contract = self._normalize_review_contract(review_contract)
-        normalized_dependency = self._normalize_dependency_analysis(dependency_analysis)
+        normalized_dependency = self._normalize_dependency_analysis(
+            dependency_analysis or {"decision": "independent"}
+        )
         with self.db.transaction() as connection:
             cursor = connection.execute(
                 """UPDATE location_analyses SET location_evidence=?, targets=?,

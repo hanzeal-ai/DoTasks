@@ -175,6 +175,7 @@ class TaskReportingMixin:
             if task.get(key) not in (None, "", [], {})
         }
         verify = group_verification_checks(task.get("acceptance_plan") or [])
+        requires_changes = self._quality_gate_required(task, "code_review")
         return {
             "task": task_context,
             "targets": (
@@ -184,6 +185,7 @@ class TaskReportingMixin:
             ),
             "visual_references": implementation_contract.get("visual_references") or [],
             "verify": verify,
+            "delivery": {"requires_changes": requires_changes},
         }
 
     def build_code_review_context(

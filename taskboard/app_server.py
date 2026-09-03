@@ -26,6 +26,9 @@ class AppServerError(RuntimeError):
 
 LIFECYCLE_TOOLS = {
     "get_requirement",
+    "prepare_task_location",
+    "report_location_status",
+    "complete_location_analysis",
     "submit_requirement_decomposition",
     "report_requirement_decomposition_failed",
     "renew_dispatch_lease",
