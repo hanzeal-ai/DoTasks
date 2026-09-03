@@ -588,7 +588,9 @@ class TaskPlanningMixin:
         ):
             raise ValueError("connected location evidence must include non-empty files")
 
-    def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def create_task(
+        self, payload: dict[str, Any], existing_task_id: str | None = None,
+    ) -> dict[str, Any]:
         unknown = set(payload) - {
             "title", "type", "project", "modules", "status", "priority", "goal",
             "scope", "out_of_scope", "acceptance_criteria", "source_thread_id",
@@ -697,31 +699,51 @@ class TaskPlanningMixin:
             targets = implementation_contract.get("targets")
             if not isinstance(targets, list) or not targets:
                 raise ValueError("implementation_contract.targets must be non-empty")
-            task_id = self.db.next_id(connection, task_id_prefix)
-            connection.execute(
-                """INSERT INTO tasks(
-                    id, requirement_id, title, type, project, modules, status,
-                    priority, goal, scope, out_of_scope, acceptance_criteria,
-                    source_thread_id, token_budget, location_context, acceptance_plan,
-                    dependency_analysis, implementation_contract, review_contract,
-                    auto_dispatch
-                ) VALUES(?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    task_id, title, task_type, project,
-                    json.dumps(list_values["modules"], ensure_ascii=False), payload.get("status", "draft"),
-                    priority, payload.get("goal", ""),
-                    json.dumps(list_values["scope"], ensure_ascii=False),
-                    json.dumps(list_values["out_of_scope"], ensure_ascii=False),
-                    json.dumps(list_values["acceptance_criteria"], ensure_ascii=False),
-                    payload.get("source_thread_id"), token_budget,
-                    json.dumps(location_analysis, ensure_ascii=False),
-                    json.dumps(location_analysis.get("acceptance_plan", []), ensure_ascii=False),
-                    json.dumps(dependency_analysis, ensure_ascii=False),
-                    json.dumps(implementation_contract, ensure_ascii=False),
-                    json.dumps(review_contract, ensure_ascii=False),
-                    int(bool(payload.get("auto_dispatch", True))),
-                ),
+            task_values = (
+                title, task_type, project,
+                json.dumps(list_values["modules"], ensure_ascii=False),
+                payload.get("status", "draft"), priority, payload.get("goal", ""),
+                json.dumps(list_values["scope"], ensure_ascii=False),
+                json.dumps(list_values["out_of_scope"], ensure_ascii=False),
+                json.dumps(list_values["acceptance_criteria"], ensure_ascii=False),
+                payload.get("source_thread_id"), token_budget,
+                json.dumps(location_analysis, ensure_ascii=False),
+                json.dumps(location_analysis.get("acceptance_plan", []), ensure_ascii=False),
+                json.dumps(dependency_analysis, ensure_ascii=False),
+                json.dumps(implementation_contract, ensure_ascii=False),
+                json.dumps(review_contract, ensure_ascii=False),
+                int(bool(payload.get("auto_dispatch", True))),
             )
+            if existing_task_id:
+                existing = connection.execute(
+                    "SELECT status FROM tasks WHERE id=?", (existing_task_id,),
+                ).fetchone()
+                if not existing or existing["status"] != "draft":
+                    raise ValueError("A queued draft task is required for intake completion")
+                task_id = existing_task_id
+                connection.execute(
+                    """UPDATE tasks SET
+                         title=?, type=?, project=?, modules=?, status=?, priority=?,
+                         goal=?, scope=?, out_of_scope=?, acceptance_criteria=?,
+                         source_thread_id=COALESCE(?, source_thread_id), token_budget=?,
+                         location_context=?, acceptance_plan=?, dependency_analysis=?,
+                         implementation_contract=?, review_contract=?, auto_dispatch=?,
+                         last_failure_reason='', updated_at=CURRENT_TIMESTAMP
+                       WHERE id=?""",
+                    (*task_values, task_id),
+                )
+            else:
+                task_id = self.db.next_id(connection, task_id_prefix)
+                connection.execute(
+                    """INSERT INTO tasks(
+                        id, requirement_id, title, type, project, modules, status,
+                        priority, goal, scope, out_of_scope, acceptance_criteria,
+                        source_thread_id, token_budget, location_context, acceptance_plan,
+                        dependency_analysis, implementation_contract, review_contract,
+                        auto_dispatch
+                    ) VALUES(?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (task_id, *task_values),
+                )
             if payload.get("source_thread_id"):
                 connection.execute(
                     "INSERT OR IGNORE INTO task_conversations(task_id, role, thread_id, title) VALUES(?, 'source', ?, ?)",
@@ -1145,7 +1167,79 @@ class TaskPlanningMixin:
             ),
         }
 
-    def finalize_task_intake(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def enqueue_task_intake(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Place a page-created task in the queue while its location is prepared."""
+        title = str(payload.get("title") or "").strip()
+        goal = str(payload.get("goal") or "").strip()
+        if not title:
+            raise ValueError("title is required")
+        if not goal:
+            raise ValueError("goal is required")
+        priority = str(payload.get("priority") or "P2").strip()
+        if priority not in {"P0", "P1", "P2", "P3"}:
+            raise ValueError("priority must be P0, P1, P2 or P3")
+        task_type = str(payload.get("type") or "feature").strip().lower()
+        if task_type not in {"feature", "bug"}:
+            raise ValueError("type must be feature or bug")
+        raw_project = str(payload.get("project") or "").strip()
+        project = self._require_project_directory(raw_project) if raw_project else None
+        auto_dispatch = bool(payload.get("auto_dispatch", True)) and bool(project)
+        modules = self._string_list(payload, "modules")
+        scope = self._string_list(payload, "scope") or [goal]
+        out_of_scope = self._string_list(payload, "out_of_scope")
+        with self.db.transaction() as connection:
+            requirement_id = self.db.next_id(connection, "REQ")
+            task_id = self.db.next_id(
+                connection, "BUG" if task_type == "bug" else "TASK"
+            )
+            connection.execute(
+                """INSERT INTO requirements(
+                       id, title, original_content, description, source_type,
+                       project, status, priority, goal, modules, scope,
+                       out_of_scope, acceptance_criteria, auto_dispatch,
+                       decomposition_plan
+                   ) VALUES(?, ?, ?, ?, 'web_task', ?, 'ready', ?, ?, ?, ?, ?,
+                            '[]', ?, ?)""",
+                (
+                    requirement_id, title, goal, goal, project, priority, goal,
+                    json.dumps(modules, ensure_ascii=False),
+                    json.dumps(scope, ensure_ascii=False),
+                    json.dumps(out_of_scope, ensure_ascii=False),
+                    int(auto_dispatch),
+                    json.dumps([{"key": "direct", "title": title, "goal": goal}], ensure_ascii=False),
+                ),
+            )
+            connection.execute(
+                """INSERT INTO tasks(
+                       id, requirement_id, requirement_task_key, title, type,
+                       project, modules, status, priority, goal, scope,
+                       out_of_scope, acceptance_criteria, auto_dispatch
+                   ) VALUES(?, ?, 'direct', ?, ?, ?, ?, 'draft', ?, ?, ?, ?,
+                            '[]', 0)""",
+                (
+                    task_id, requirement_id, title, task_type, project,
+                    json.dumps(modules, ensure_ascii=False), priority, goal,
+                    json.dumps(scope, ensure_ascii=False),
+                    json.dumps(out_of_scope, ensure_ascii=False),
+                ),
+            )
+            self._event(
+                connection, "task", task_id, "intake_queued",
+                {"requirement_id": requirement_id, "auto_dispatch": auto_dispatch},
+            )
+            self._event(
+                connection, "requirement", requirement_id, "created",
+                {"intake_kind": "task", "task_id": task_id},
+            )
+        return {
+            "status": "queued", "intake_kind": "task", "task_id": task_id,
+            "task_status": "draft", "requirement_id": requirement_id,
+            **self._controller_kickoff_contract(auto_dispatch),
+        }
+
+    def finalize_task_intake(
+        self, payload: dict[str, Any], existing_task_id: str | None = None,
+    ) -> dict[str, Any]:
         """Persist a requirement or create a ready independently executable task."""
         intake_kind = str(payload.get("intake_kind") or "").strip().lower()
         if intake_kind not in {"requirement", "task"}:
@@ -1157,7 +1251,9 @@ class TaskPlanningMixin:
                 raise ValueError("title is required")
             if not goal:
                 raise ValueError("goal is required")
-            project = self._require_project_directory(payload.get("project"))
+            raw_project = str(payload.get("project") or "").strip()
+            project = self._require_project_directory(raw_project) if raw_project else None
+            auto_dispatch = bool(payload.get("auto_dispatch", True)) and bool(project)
             lists = {
                 field: self._string_list(payload, field)
                 for field in (
@@ -1194,7 +1290,7 @@ class TaskPlanningMixin:
                         json.dumps(lists["out_of_scope"], ensure_ascii=False),
                         json.dumps(lists["acceptance_criteria"], ensure_ascii=False),
                         payload.get("source_thread_id"),
-                        int(bool(payload.get("auto_dispatch", True))),
+                        int(auto_dispatch),
                         json.dumps(plan, ensure_ascii=False),
                     ),
                 )
@@ -1207,7 +1303,7 @@ class TaskPlanningMixin:
                 "requirement_id": requirement_id,
                 "requirement_status": "ready",
                 **self._controller_kickoff_contract(
-                    bool(payload.get("auto_dispatch", True))
+                    auto_dispatch
                 ),
             }
         analysis_id = str(payload.get("analysis_id") or "").strip()
@@ -1346,7 +1442,7 @@ class TaskPlanningMixin:
             "relations": relations,
         })
         task_payload["status"] = "ready"
-        task = self.create_task(task_payload)
+        task = self.create_task(task_payload, existing_task_id=existing_task_id)
         return {
             "status": "created", "intake_kind": "task", "analysis_id": analysis_id,
             "task_id": task["id"], "task_status": task["status"],

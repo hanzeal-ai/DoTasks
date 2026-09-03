@@ -95,6 +95,14 @@ export default function App() {
                 调度状态
               </button>
               <button
+                id="new-task-button"
+                className="primary"
+                type="button"
+                hidden
+              >
+                新增任务
+              </button>
+              <button
                 id="new-requirement-button"
                 className="primary"
                 type="button"
@@ -201,12 +209,11 @@ export default function App() {
             <input name="title" maxLength="120" required autoFocus />
           </label>
           <label>
-            Mac 项目绝对路径
+            Mac Codex 项目（可选）
             <input
               name="project"
               list="known-project-paths"
-              placeholder="/Users/you/Documents/project"
-              required
+              placeholder="不选择即无项目，也可输入绝对路径"
             />
             <datalist id="known-project-paths"></datalist>
           </label>
@@ -230,6 +237,60 @@ export default function App() {
           <div className="form-actions">
             <button type="button" className="ghost" data-close>取消</button>
             <button type="submit" className="primary">保存并调度</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="new-task-dialog">
+        <form id="new-task-form">
+          <div className="dialog-head">
+            <div>
+              <p className="eyebrow">NEW TASK</p>
+              <h2>新增任务</h2>
+            </div>
+            <button type="button" className="icon-button" data-close>
+              ×
+            </button>
+          </div>
+          <label>
+            标题
+            <input name="title" maxLength="120" required autoFocus />
+          </label>
+          <label>
+            类型
+            <select name="type" defaultValue="feature">
+              <option value="feature">任务</option>
+              <option value="bug">Bug</option>
+            </select>
+          </label>
+          <label>
+            Mac Codex 项目（可选）
+            <input
+              name="project"
+              list="known-project-paths"
+              placeholder="不选择即无项目，也可输入绝对路径"
+            />
+          </label>
+          <label>
+            任务目标
+            <textarea name="goal" rows="5" required></textarea>
+          </label>
+          <label>
+            优先级
+            <select name="priority" defaultValue="P2">
+              <option value="P0">P0</option>
+              <option value="P1">P1</option>
+              <option value="P2">P2</option>
+              <option value="P3">P3</option>
+            </select>
+          </label>
+          <label className="inline-checkbox">
+            <input name="auto_dispatch" type="checkbox" defaultChecked />
+            保存后自动定位并执行
+          </label>
+          <div className="form-actions">
+            <button type="button" className="ghost" data-close>取消</button>
+            <button type="submit" className="primary">加入任务队列</button>
           </div>
         </form>
       </dialog>

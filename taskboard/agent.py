@@ -24,6 +24,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .local_executor import LocalCodexExecutor
+from .codex_projects import discover_codex_projects
 from .remote_service import RemoteTaskboardService, RemoteToolClient
 from .version import VERSION
 from .websocket_transport import connect_websocket, encode_frame, read_frame
@@ -237,6 +238,7 @@ class RelayAgent:
             "hostname": socket.gethostname(),
             "platform": platform.system().lower(),
             "python": platform.python_version(),
+            "codex_projects": discover_codex_projects(),
         }
 
     def bootstrap_cloud_state(self) -> bool:

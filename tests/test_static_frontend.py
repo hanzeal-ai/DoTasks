@@ -196,6 +196,8 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
         for control_id in (
             "board-nav",
             "requirements-nav",
+            "new-task-button",
+            "new-task-dialog",
             "new-requirement-button",
             "new-requirement-dialog",
             "dispatcher-toggle",
@@ -207,6 +209,9 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
         self.assertNotIn('class="column column-requirements"', app)
         self.assertIn("renderRequirementsBoard", app)
         self.assertIn("requirementCard(requirement, tasks)", app)
+        self.assertIn("requirementConversationControl(requirement)", app)
+        self.assertIn('aria-label="打开需求拆解会话"', app)
+        self.assertIn('data-open-thread="${escapeHtml(threadId)}"', app)
         self.assertIn("task.requirement_id === requirement.id", app)
         self.assertIn("left.requirement_task_key", app)
         self.assertIn('class="requirement-task"', app)
@@ -227,6 +232,14 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
         self.assertIn('column.key === "attention"', app)
         self.assertIn('event.target.closest("#dispatcher-toggle")', app)
         self.assertIn('event.target.closest("#new-requirement-button")', app)
+        self.assertIn('event.target.closest("#new-task-button")', app)
+        self.assertIn('api("/api/codex/projects")', app)
+        self.assertIn('api("/api/task-intakes/enqueue"', app)
+        self.assertIn('id="new-task-form"', html)
+        self.assertIn("加入任务队列", html)
+        self.assertIn("Mac Codex 项目（可选）", html)
+        self.assertIn("不选择即无项目", html)
+        self.assertIn("未选择项目，未自动调度", app)
         self.assertIn('api("/api/task-intakes/finalize"', app)
         responsive = css.split("@media (max-width: 760px)", 1)[1].split(
             "@media (prefers-color-scheme: dark)", 1

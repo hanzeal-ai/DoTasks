@@ -155,6 +155,7 @@ function syncHeader() {
   document.querySelector("#task-change-count").textContent = String(taskChangeCount);
   document.querySelector("#task-change-confirmations").hidden = taskChangeCount === 0;
   document.querySelector("#dispatcher-toggle").hidden = false;
+  document.querySelector("#new-task-button").hidden = state.view !== "board";
   document.querySelector("#new-requirement-button").hidden = !requirementsView;
   const settingsButton = document.querySelector("#settings-button");
   settingsButton.hidden = false;
@@ -252,7 +253,8 @@ function taskRecoveryButton(task, options = {}) {
 function taskCard(task) {
   const needsAttention = taskNeedsAttention(task, attentionStatuses, attentionAutoDispatchStatuses);
   const actionButton = taskRecoveryButton(task, {restartWaitingConfirmation: needsAttention});
-  const cancelButton = needsAttention ? `<button class="small danger" type="button" data-cancel-task="${escapeHtml(task.id)}">取消任务</button>` : "";
+  const cancelButton = needsAttention || task.status === "draft" ? `<button class="small danger" type="button" data-cancel-task="${escapeHtml(task.id)}">取消任务</button>` : "";
+  const contextButton = task.status === "draft" ? "" : `<button class="small" data-context="${task.id}">查看上下文</button>`;
   const budgetToken = Number(task.effective_token_used ?? task.token_used) || 0;
   const token = task.token_budget ? Math.round((budgetToken / task.token_budget) * 100) : 0;
   const conflictTag = task.target_conflicts?.length ? `<span class="tag conflict">冲突 ${task.target_conflicts.length}</span>` : "";
@@ -263,7 +265,7 @@ function taskCard(task) {
   const dispatchReason = ["ready", "rework"].includes(task.status) && task.dispatch_blockers?.length ? `<p class="status-reason">${escapeHtml(task.dispatch_blockers[0].message)}</p>` : "";
   const attentionReason = task.status === "rework" && (task.last_review_reasons?.length || task.last_failure_reason) ? `<p class="status-reason">返工原因：${escapeHtml((task.last_review_reasons || []).join("；") || task.last_failure_reason)}</p>` : ["waiting_confirmation", "blocked", "failed"].includes(task.status) && task.last_failure_reason ? `<p class="status-reason">${task.status === "failed" ? "失败" : task.status === "blocked" ? "阻塞" : "待确认"}原因：${escapeHtml(task.last_failure_reason)}</p>` : dispatchReason;
   const bugTag = task.type === "bug" ? `<span class="tag conflict">BUG</span>` : "";
-  return `<article class="card"><div class="card-top"><span>${task.id}</span><span class="card-stage"><span>${escapeHtml(statusLabels[task.status] || task.status)}</span>${taskStageTimer(task)}</span></div><h3 title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</h3><p>${escapeHtml(task.goal || "尚未补充任务目标")}</p>${attentionReason}<div class="card-meta"><span class="tag priority-${task.priority}">${task.priority}</span>${bugTag}${(task.modules || []).slice(0,2).map(module => `<span class="tag">${escapeHtml(module)}</span>`).join("")}${reviewFailedTag}${dispatchPausedTag}${dispatchBlockerTag}${conflictTag}<span class="tag">Token ${token}%</span></div><div class="card-actions">${actionButton}${cancelButton}${taskConversationControl(task)}<button class="small" data-context="${task.id}">查看上下文</button></div></article>`;
+  return `<article class="card"><div class="card-top"><span>${task.id}</span><span class="card-stage"><span>${escapeHtml(statusLabels[task.status] || task.status)}</span>${taskStageTimer(task)}</span></div><h3 title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</h3><p>${escapeHtml(task.goal || "尚未补充任务目标")}</p>${attentionReason}<div class="card-meta"><span class="tag priority-${task.priority}">${task.priority}</span>${bugTag}${(task.modules || []).slice(0,2).map(module => `<span class="tag">${escapeHtml(module)}</span>`).join("")}${reviewFailedTag}${dispatchPausedTag}${dispatchBlockerTag}${conflictTag}<span class="tag">Token ${token}%</span></div><div class="card-actions">${actionButton}${cancelButton}${taskConversationControl(task)}${contextButton}</div></article>`;
 }
 
 const requirementStatusLabels = {
@@ -279,6 +281,12 @@ function requirementTaskItem(task) {
   return `<article class="requirement-task"><div class="requirement-task-main"><div class="requirement-task-heading"><span>${escapeHtml(task.id)}</span><strong title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</strong></div><p>${escapeHtml(task.goal || "尚未补充任务目标")}</p><div class="card-meta">${typeTag}<span class="tag priority-${escapeHtml(task.priority)}">${escapeHtml(task.priority)}</span>${(task.modules || []).slice(0, 2).map(module => `<span class="tag">${escapeHtml(module)}</span>`).join("")}</div></div><div class="requirement-task-side"><span class="requirement-task-status">${escapeHtml(statusLabels[task.status] || task.status)}</span><button class="small" type="button" data-context="${escapeHtml(task.id)}">查看上下文</button></div></article>`;
 }
 
+function requirementConversationControl(requirement) {
+  const threadId = String(requirement.codex_thread_id || "").trim();
+  if (!threadId) return `<button class="small conversation-button" type="button" aria-label="暂无可查看拆解会话" title="暂无可查看拆解会话" disabled>${conversationIcon()}</button>`;
+  return `<button class="small conversation-button" type="button" data-open-thread="${escapeHtml(threadId)}" aria-label="打开需求拆解会话" title="在 Codex 中打开需求拆解会话">${conversationIcon()}</button>`;
+}
+
 function requirementCard(requirement, tasks) {
   const status = requirementStatusLabels[requirement.status] || requirement.status;
   const summary = requirement.goal || requirement.description || requirement.original_content || "尚未补充需求目标";
@@ -291,7 +299,19 @@ function requirementCard(requirement, tasks) {
   const autoDispatchTag = !requirement.auto_dispatch && requirement.status === "ready"
     ? '<span class="tag conflict">自动拆解已暂停</span>'
     : "";
-  return `<article class="requirement-card"><div class="requirement-summary"><div class="card-top"><span>${escapeHtml(requirement.id)}</span><span>${escapeHtml(status)}</span></div><h2 title="${escapeHtml(requirement.title)}">${escapeHtml(requirement.title)}</h2><p>${escapeHtml(summary)}</p>${failure}<div class="card-meta"><span class="tag priority-${escapeHtml(requirement.priority)}">${escapeHtml(requirement.priority)}</span>${requirement.project ? `<span class="tag">${escapeHtml(projectLabel(requirement.project))}</span>` : ""}${(requirement.modules || []).slice(0, 2).map(module => `<span class="tag">${escapeHtml(module)}</span>`).join("")}${autoDispatchTag}<span class="tag">拆解 ${Number(requirement.decomposition_attempts) || 0} 次</span></div></div><section class="requirement-tasks"><div class="requirement-tasks-head"><h3>拆分任务</h3><span>${childTasks.length}</span></div><div class="requirement-task-list">${childTasks.length ? childTasks.map(requirementTaskItem).join("") : '<div class="empty requirement-task-empty">尚未拆分任务</div>'}</div></section></article>`;
+  const replaceableStatuses = new Set(["draft", "ready", "failed", "cancelled"]);
+  const canRedecompose = Boolean(requirement.project)
+    && requirement.status !== "decomposing"
+    && childTasks.every(task => replaceableStatuses.has(task.status));
+  const redecomposeReason = !requirement.project
+    ? "请先为需求选择项目"
+    : requirement.status === "decomposing"
+      ? "需求正在拆解中"
+      : canRedecompose
+        ? "重新拆解需求"
+        : "已有拆分任务进入执行，不能重新拆解";
+  const requirementActions = `<button class="small" type="button" data-redecompose-requirement="${escapeHtml(requirement.id)}" title="${redecomposeReason}"${canRedecompose ? "" : " disabled"}>重新拆解</button><button class="small danger" type="button" data-delete-requirement="${escapeHtml(requirement.id)}">删除</button>`;
+  return `<article class="requirement-card"><div class="requirement-summary"><div class="card-top"><span>${escapeHtml(requirement.id)}</span><span>${escapeHtml(status)}</span></div><h2 title="${escapeHtml(requirement.title)}">${escapeHtml(requirement.title)}</h2><p>${escapeHtml(summary)}</p>${failure}<div class="card-meta"><span class="tag priority-${escapeHtml(requirement.priority)}">${escapeHtml(requirement.priority)}</span>${requirement.project ? `<span class="tag">${escapeHtml(projectLabel(requirement.project))}</span>` : ""}${(requirement.modules || []).slice(0, 2).map(module => `<span class="tag">${escapeHtml(module)}</span>`).join("")}${autoDispatchTag}<span class="tag">拆解 ${Number(requirement.decomposition_attempts) || 0} 次</span>${requirementConversationControl(requirement)}${requirementActions}</div></div><section class="requirement-tasks"><div class="requirement-tasks-head"><h3>拆分任务</h3><span>${childTasks.length}</span></div><div class="requirement-task-list">${childTasks.length ? childTasks.map(requirementTaskItem).join("") : '<div class="empty requirement-task-empty">尚未拆分任务</div>'}</div></section></article>`;
 }
 
 function traceSection(title, items, renderItem) {
@@ -532,15 +552,34 @@ async function handleTaskAction(event) {
     } catch (error) { toast(error.message); }
     return true;
   }
-  if (event.target.closest("#new-requirement-button")) {
-    const projects = [
+  if (
+    event.target.closest("#new-task-button")
+    || event.target.closest("#new-requirement-button")
+  ) {
+    const historicProjects = [
       ...(state.board?.requirements || []).map(item => item.project),
       ...(state.board?.tasks || []).map(item => item.project),
-    ].filter(Boolean);
-    document.querySelector("#known-project-paths").innerHTML = [...new Set(projects)]
-      .map(project => `<option value="${escapeHtml(project)}"></option>`)
+    ].filter(Boolean).map(path => ({path, name: projectLabel(path)}));
+    let codexProjects = [];
+    try {
+      const result = await api("/api/codex/projects");
+      codexProjects = Array.isArray(result.projects) ? result.projects : [];
+    } catch (_error) {
+      // Keep the dialog usable with historical values while the Local Agent is offline.
+    }
+    const projects = new Map();
+    [...codexProjects, ...historicProjects].forEach(project => {
+      const path = String(project.path || "").trim();
+      if (path && !projects.has(path)) projects.set(path, String(project.name || projectLabel(path)));
+    });
+    document.querySelector("#known-project-paths").innerHTML = [...projects]
+      .map(([path, name]) => `<option value="${escapeHtml(path)}" label="${escapeHtml(name)}"></option>`)
       .join("");
-    document.querySelector("#new-requirement-dialog").showModal();
+    document.querySelector(
+      event.target.closest("#new-task-button")
+        ? "#new-task-dialog"
+        : "#new-requirement-dialog"
+    ).showModal();
     return true;
   }
   if (event.target.matches("[data-close]")) {
@@ -576,6 +615,40 @@ async function handleTaskAction(event) {
       });
       await load();
       toast("任务已取消");
+    } catch (error) { toast(error.message); }
+    return true;
+  }
+  const redecomposeRequirement = event.target.closest("[data-redecompose-requirement]");
+  if (redecomposeRequirement) {
+    const requirementId = redecomposeRequirement.dataset.redecomposeRequirement;
+    const requirement = state.board?.requirements?.find(item => item.id === requirementId);
+    const childCount = (state.board?.tasks || []).filter(
+      task => task.requirement_id === requirementId
+    ).length;
+    const warning = childCount
+      ? `当前 ${childCount} 个尚未执行的拆分任务会被取消并保留记录。`
+      : "";
+    if (!window.confirm(`确定重新拆解 ${requirementId}《${requirement?.title || ""}》吗？${warning}`)) return true;
+    try {
+      await api(`/api/requirements/${requirementId}/redecompose`, {
+        method: "POST", body: "{}",
+      });
+      await load();
+      toast("需求已重新加入拆解队列");
+    } catch (error) { toast(error.message); }
+    return true;
+  }
+  const deleteRequirement = event.target.closest("[data-delete-requirement]");
+  if (deleteRequirement) {
+    const requirementId = deleteRequirement.dataset.deleteRequirement;
+    const requirement = state.board?.requirements?.find(item => item.id === requirementId);
+    if (!window.confirm(`确定删除 ${requirementId}《${requirement?.title || ""}》吗？已拆分任务会保留在任务看板。`)) return true;
+    try {
+      await api(`/api/requirements/${requirementId}/delete`, {
+        method: "POST", body: "{}",
+      });
+      await load();
+      toast("需求已删除，关联任务已保留");
     } catch (error) { toast(error.message); }
     return true;
   }
@@ -651,11 +724,45 @@ document.addEventListener("click", async event => {
 });
 
 document.addEventListener("submit", async event => {
+  if (event.target.id === "new-task-form") {
+    event.preventDefault();
+    const form = event.target;
+    const button = form.querySelector('button[type="submit"]');
+    const values = new FormData(form);
+    const project = String(values.get("project") || "").trim();
+    button.disabled = true;
+    try {
+      const result = await api("/api/task-intakes/enqueue", {
+        method: "POST",
+        body: JSON.stringify({
+          title: String(values.get("title") || "").trim(),
+          type: String(values.get("type") || "feature"),
+          project,
+          goal: String(values.get("goal") || "").trim(),
+          priority: String(values.get("priority") || "P2"),
+          modules: [],
+          scope: [],
+          out_of_scope: [],
+          auto_dispatch: Boolean(project) && values.get("auto_dispatch") === "on",
+        }),
+      });
+      form.reset();
+      document.querySelector("#new-task-dialog").close();
+      await load();
+      toast(`${result.task_id} 已加入任务队列${project ? "，正在等待定位" : "；未选择项目，保持草稿"}`);
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      button.disabled = false;
+    }
+    return;
+  }
   if (event.target.id === "new-requirement-form") {
     event.preventDefault();
     const form = event.target;
     const button = form.querySelector('button[type="submit"]');
     const values = new FormData(form);
+    const project = String(values.get("project") || "").trim();
     button.disabled = true;
     try {
       const result = await api("/api/task-intakes/finalize", {
@@ -663,7 +770,7 @@ document.addEventListener("submit", async event => {
         body: JSON.stringify({
           intake_kind: "requirement",
           title: String(values.get("title") || "").trim(),
-          project: String(values.get("project") || "").trim(),
+          project,
           goal: String(values.get("goal") || "").trim(),
           description: String(values.get("goal") || "").trim(),
           priority: String(values.get("priority") || "P2"),
@@ -673,13 +780,13 @@ document.addEventListener("submit", async event => {
           out_of_scope: [],
           acceptance_criteria: [],
           decomposition_tasks: [],
-          auto_dispatch: values.get("auto_dispatch") === "on",
+          auto_dispatch: Boolean(project) && values.get("auto_dispatch") === "on",
         }),
       });
       form.reset();
       document.querySelector("#new-requirement-dialog").close();
       await load();
-      toast(`${result.requirement_id} 已保存到云端`);
+      toast(`${result.requirement_id} 已保存到云端${project ? "" : "；未选择项目，未自动调度"}`);
     } catch (error) {
       toast(error.message);
     } finally {

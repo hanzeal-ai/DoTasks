@@ -56,6 +56,109 @@ class TaskRequirementMixin:
             "decomposition_runs": decomposition_runs,
         }
 
+    def delete_requirement(self, requirement_id: str) -> dict[str, Any]:
+        """Delete a requirement while preserving its child tasks as standalone history."""
+        with self.db.transaction() as connection:
+            requirement = connection.execute(
+                "SELECT id, title FROM requirements WHERE id=?", (requirement_id,),
+            ).fetchone()
+            if not requirement:
+                raise KeyError(f"Requirement not found: {requirement_id}")
+            child_count = int(connection.execute(
+                "SELECT COUNT(*) FROM tasks WHERE requirement_id=?", (requirement_id,),
+            ).fetchone()[0])
+            connection.execute(
+                """UPDATE tasks SET requirement_id=NULL, requirement_task_key=NULL,
+                   updated_at=CURRENT_TIMESTAMP WHERE requirement_id=?""",
+                (requirement_id,),
+            )
+            connection.execute(
+                "DELETE FROM native_dispatches WHERE entity_type='requirement' AND entity_id=?",
+                (requirement_id,),
+            )
+            connection.execute("DELETE FROM requirements WHERE id=?", (requirement_id,))
+            self._event(
+                connection, "requirement", requirement_id, "deleted",
+                {"title": requirement["title"], "preserved_task_count": child_count},
+            )
+        return {
+            "status": "deleted",
+            "requirement_id": requirement_id,
+            "preserved_task_count": child_count,
+        }
+
+    def redecompose_requirement(self, requirement_id: str) -> dict[str, Any]:
+        """Reset a requirement for a fresh decomposition without duplicating active work."""
+        replaceable_statuses = {"draft", "ready", "failed", "cancelled"}
+        with self.db.transaction() as connection:
+            requirement = connection.execute(
+                "SELECT * FROM requirements WHERE id=?", (requirement_id,),
+            ).fetchone()
+            if not requirement:
+                raise KeyError(f"Requirement not found: {requirement_id}")
+            if requirement["source_type"] == "web_task":
+                raise ValueError("Page-created task intake cannot be redecomposed")
+            if requirement["status"] == "decomposing":
+                raise ValueError("Requirement decomposition is already running")
+            if not str(requirement["project"] or "").strip():
+                raise ValueError("Requirement project is required before redecomposition")
+
+            child_tasks = connection.execute(
+                "SELECT id, status FROM tasks WHERE requirement_id=? ORDER BY id",
+                (requirement_id,),
+            ).fetchall()
+            non_replaceable = [
+                row["id"] for row in child_tasks
+                if row["status"] not in replaceable_statuses
+            ]
+            if non_replaceable:
+                raise ValueError(
+                    "Requirement has child tasks that already started: "
+                    + ", ".join(non_replaceable)
+                )
+
+            child_ids = [row["id"] for row in child_tasks]
+            if child_ids:
+                placeholders = ",".join("?" for _ in child_ids)
+                active_run = connection.execute(
+                    f"""SELECT task_id FROM task_runs
+                        WHERE task_id IN ({placeholders})
+                          AND status IN ('awaiting_thread','running') LIMIT 1""",
+                    child_ids,
+                ).fetchone()
+                if active_run:
+                    raise ValueError(
+                        f"Requirement child task still has an active run: {active_run['task_id']}"
+                    )
+                connection.execute(
+                    f"""UPDATE tasks SET status='cancelled', status_started_at=CURRENT_TIMESTAMP,
+                        auto_dispatch=0, requirement_id=NULL, requirement_task_key=NULL,
+                        last_failure_reason='已由需求重新拆解替换',
+                        updated_at=CURRENT_TIMESTAMP
+                        WHERE id IN ({placeholders})""",
+                    child_ids,
+                )
+
+            connection.execute(
+                "DELETE FROM requirement_decomposition_runs WHERE requirement_id=?",
+                (requirement_id,),
+            )
+            connection.execute(
+                """UPDATE requirements SET status='ready', auto_dispatch=1,
+                   decomposition_plan='[]', decomposition_attempts=0,
+                   last_decomposition_error='', decomposed_at=NULL,
+                   updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                (requirement_id,),
+            )
+            self._event(
+                connection, "requirement", requirement_id, "redecomposition_requested",
+                {"replaced_task_ids": child_ids},
+            )
+        return {
+            **self.get_requirement(requirement_id),
+            **self._controller_kickoff_contract(True),
+        }
+
     def renew_requirement_decomposition(
         self, requirement_id: str, run_id: str, lease_seconds: int = 1800,
     ) -> dict[str, Any]:
@@ -95,6 +198,11 @@ class TaskRequirementMixin:
             not isinstance(item, dict) for item in specs
         ):
             raise ValueError("child_tasks must be a non-empty array of objects")
+        direct_task_intake = requirement_row["source_type"] == "web_task"
+        if direct_task_intake and (
+            len(specs) != 1 or str(specs[0].get("key") or "").strip() != "direct"
+        ):
+            raise ValueError("A page-created task must produce exactly the direct task")
         requirement_modules = json.loads(requirement_row["modules"] or "[]")
         requirement_out_of_scope = json.loads(requirement_row["out_of_scope"] or "[]")
 
@@ -155,17 +263,30 @@ class TaskRequirementMixin:
             if not key or key in seen_keys:
                 raise ValueError("Every decomposed task requires a unique non-empty key")
             seen_keys.add(key)
-            desired_auto_dispatch[key] = bool(spec.get("auto_dispatch", True))
+            desired_auto_dispatch[key] = (
+                bool(requirement_row["auto_dispatch"])
+                if direct_task_intake
+                else bool(spec.get("auto_dispatch", True))
+            )
             with self.db.connection() as connection:
                 existing = connection.execute(
-                    "SELECT id FROM tasks WHERE requirement_id=? AND requirement_task_key=?",
+                    "SELECT id, status, type FROM tasks WHERE requirement_id=? AND requirement_task_key=?",
                     (requirement_id, key),
                 ).fetchone()
-            if existing:
+            existing_task_id = (
+                str(existing["id"])
+                if existing and direct_task_intake and existing["status"] == "draft"
+                else None
+            )
+            if existing and not existing_task_id:
                 created[key] = existing["id"]
                 continue
-            title = str(spec.get("title") or "").strip()
-            child_goal = str(spec.get("goal") or "").strip()
+            title = str(
+                requirement_row["title"] if direct_task_intake else spec.get("title") or ""
+            ).strip()
+            child_goal = str(
+                requirement_row["goal"] if direct_task_intake else spec.get("goal") or ""
+            ).strip()
             if not title or not child_goal:
                 raise ValueError("Every decomposed task requires title and goal")
             targets = spec.get("targets")
@@ -208,7 +329,7 @@ class TaskRequirementMixin:
                 "out_of_scope": out_of_scope,
                 "priority": str(spec.get("priority") or requirement_row["priority"] or "P2"),
                 "source_thread_id": requirement_row["source_thread_id"],
-                "type": str(spec.get("type") or "feature"),
+                "type": str(spec.get("type") or (existing["type"] if existing else "feature")),
                 "token_budget": int(spec.get("token_budget") or self.task_token_budget()),
                 # Keep every child non-dispatchable until the whole dependency
                 # graph has passed validation and is committed below.
@@ -221,7 +342,7 @@ class TaskRequirementMixin:
                 "quality_gates": quality_gates,
                 "acceptance_plan": normalized_plan,
                 "dependency_analysis": {"decision": "independent"},
-            })
+            }, existing_task_id=existing_task_id)
             task_id = str(result.get("task_id") or "")
             if not task_id or result.get("task_status") != "ready":
                 raise ValueError("Decomposed task did not pass normal ready task intake")

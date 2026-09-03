@@ -26,6 +26,7 @@ from taskboard.http_base import MAX_JSON_BODY_BYTES
 from taskboard.http_security import HTTPRequestError
 from taskboard.mcp_server import tool_handlers_for
 from taskboard.project_guard import ProjectWorkspaceGuard
+from taskboard.codex_projects import sanitize_codex_projects
 from taskboard.server import TaskboardHandler
 from taskboard.websocket_transport import (
     WebSocketConnection,
@@ -192,6 +193,11 @@ class RelayHandler(TaskboardHandler):
             "running": bool(agent.get("online")),
             "last_seen_at": str(agent.get("last_seen_at") or ""),
         }
+
+    def _codex_projects(self) -> list[dict[str, str]]:
+        agent = self.store.agent_status(self.relay_config.agent_id)
+        metadata = agent.get("metadata") or {}
+        return sanitize_codex_projects(metadata.get("codex_projects"))
 
     def _require_agent(self) -> str:
         host = self.headers.get("Host", "").lower()

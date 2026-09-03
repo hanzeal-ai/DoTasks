@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from core.service import TaskboardService
+from .codex_projects import discover_codex_projects
 from .config import LOCAL_MODE, ServerConfig
 from .http_base import BaseDoTasksHandler, MAX_JSON_BODY_BYTES
 from .version import VERSION
@@ -17,6 +18,9 @@ from core.workflow import workflow_metadata
 
 class TaskboardHandler(BaseDoTasksHandler):
     service: TaskboardService
+
+    def _codex_projects(self) -> list[dict[str, str]]:
+        return discover_codex_projects()
 
     def _dispatcher_status(self) -> dict[str, Any]:
         return {
@@ -76,6 +80,8 @@ class TaskboardHandler(BaseDoTasksHandler):
                 self._json(HTTPStatus.OK, workflow_metadata())
             elif parsed.path == "/api/settings":
                 self._json(HTTPStatus.OK, self.service.task_settings())
+            elif parsed.path == "/api/codex/projects":
+                self._json(HTTPStatus.OK, {"projects": self._codex_projects()})
             elif parsed.path == "/api/events/stream":
                 self._serve_event_stream()
             elif parsed.path == "/api/board":
@@ -114,8 +120,24 @@ class TaskboardHandler(BaseDoTasksHandler):
             payload = self._read_json()
             if parsed.path == "/api/settings":
                 self._json(HTTPStatus.OK, self.service.update_task_settings(payload))
+            elif parsed.path == "/api/task-intakes/enqueue":
+                self._json(HTTPStatus.CREATED, self.service.enqueue_task_intake(payload))
             elif parsed.path == "/api/task-intakes/finalize":
                 self._json(HTTPStatus.OK, self.service.finalize_task_intake(payload))
+            elif match := re.fullmatch(
+                r"/api/requirements/([^/]+)/redecompose", parsed.path
+            ):
+                self._json(
+                    HTTPStatus.OK,
+                    self.service.redecompose_requirement(match.group(1)),
+                )
+            elif match := re.fullmatch(
+                r"/api/requirements/([^/]+)/delete", parsed.path
+            ):
+                self._json(
+                    HTTPStatus.OK,
+                    self.service.delete_requirement(match.group(1)),
+                )
             elif parsed.path == "/api/location-analyses":
                 self._json(
                     HTTPStatus.CREATED,

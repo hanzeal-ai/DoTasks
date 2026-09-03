@@ -5,6 +5,8 @@ import json
 import tempfile
 import threading
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from taskboard.server import MAX_JSON_BODY_BYTES, build_server
 
@@ -105,6 +107,23 @@ class TaskboardHTTPServerTest(unittest.TestCase):
         finally:
             service.finalize_task_intake = original_finalize
 
+    def test_page_task_can_be_enqueued(self) -> None:
+        service = self.server.RequestHandlerClass.service
+        original_enqueue = service.enqueue_task_intake
+        service.enqueue_task_intake = lambda payload: {
+            "status": "queued", "task_id": "TASK-0001", "title": payload["title"],
+        }
+        try:
+            status, _, payload = self.request(
+                "POST", "/api/task-intakes/enqueue",
+                json.dumps({"title": "From page"}).encode("utf-8"),
+                Origin=self.origin, **{"Content-Type": "application/json"},
+            )
+        finally:
+            service.enqueue_task_intake = original_enqueue
+        self.assertEqual(201, status)
+        self.assertEqual("TASK-0001", payload["task_id"])
+
     def test_untrusted_origin_cannot_mutate_dispatcher(self) -> None:
         service = self.server.RequestHandlerClass.service
         service.set_dispatcher_enabled(True)
@@ -172,10 +191,35 @@ class TaskboardHTTPServerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "loopback"):
             build_server("0.0.0.0", 0, self.temporary.name)
 
-    def test_project_and_chat_endpoints_are_removed(self) -> None:
+    def test_codex_projects_are_discovered_from_local_state(self) -> None:
+        with tempfile.TemporaryDirectory() as codex_home:
+            project = Path(codex_home) / "project"
+            project.mkdir()
+            Path(codex_home, ".codex-global-state.json").write_text(
+                json.dumps(
+                    {
+                        "local-projects": {
+                            "project-1": {
+                                "name": "Example",
+                                "rootPaths": [str(project)],
+                            }
+                        },
+                        "project-order": ["project-1"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict("os.environ", {"CODEX_HOME": codex_home}):
+                status, _, payload = self.request("GET", "/api/codex/projects")
+            self.assertEqual(200, status)
+            self.assertEqual(
+                [{"id": "project-1", "name": "Example", "path": str(project.resolve())}],
+                payload["projects"],
+            )
+
+    def test_chat_endpoints_are_removed(self) -> None:
         headers = {"Origin": self.origin, "Content-Type": "application/json"}
         for method, path in (
-            ("GET", "/api/codex/projects"),
             ("GET", "/api/codex/threads"),
             ("POST", "/api/codex/threads"),
             ("POST", "/api/chatkit"),

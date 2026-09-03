@@ -13,9 +13,16 @@ class TaskQueryMixin:
         with self.db.connection() as connection:
             rows = connection.execute(
                 """SELECT r.*,
-                          COUNT(t.id) AS child_task_count
+                          COUNT(t.id) AS child_task_count,
+                          (SELECT nd.thread_id FROM native_dispatches nd
+                           WHERE nd.entity_type='requirement'
+                             AND nd.entity_id=r.id
+                             AND trim(nd.thread_id) != ''
+                           ORDER BY nd.created_at DESC, nd.run_id DESC LIMIT 1)
+                            AS codex_thread_id
                    FROM requirements r
                    LEFT JOIN tasks t ON t.requirement_id=r.id
+                   WHERE r.source_type != 'web_task'
                    GROUP BY r.id
                    ORDER BY r.created_at DESC"""
             ).fetchall()

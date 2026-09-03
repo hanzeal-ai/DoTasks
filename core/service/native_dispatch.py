@@ -85,12 +85,23 @@ class NativeDispatchMixin:
         run = claim.get("run") or {}
         if claim.get("kind") == "requirement_decomposition":
             requirement = claim.get("requirement") or {}
+            direct_task = requirement.get("source_type") == "web_task"
+            introduction = (
+                "这是页面新增任务产生的定位运行。不要编辑代码，也不要创建新的需求。"
+                "必须只提交一个 key 为 direct 的任务，使现有草稿进入 ready 队列。\n"
+                if direct_task
+                else "这是 DoTasks 已领取的需求拆解运行，不是新任务 intake。不要编辑代码，也不要创建新的需求。\n"
+            )
+            instruction = (
+                "调用 get_requirement 获取完整内容，为 direct 任务完成代码定位、验收计划和执行契约。"
+                if direct_task
+                else "调用 get_requirement 获取完整内容，将需求拆成可独立执行、具备明确依赖且状态为 ready 的子任务。"
+            )
             prompt = (
-                "$dotasks-lifecycle\n\n"
-                "这是 DoTasks 已领取的需求拆解运行，不是新任务 intake。不要编辑代码，也不要创建新的需求。\n"
+                f"$dotasks-lifecycle\n\n{introduction}"
                 f"需求 ID：{requirement.get('id')}\n"
                 f"拆解运行 ID：{run.get('id')}\n"
-                "调用 get_requirement 获取完整内容，将需求拆成可独立执行、具备明确依赖且状态为 ready 的子任务。"
+                f"{instruction}"
                 "完成后调用 submit_requirement_decomposition；失败时调用 report_requirement_decomposition_failed。"
             )
             return cls._attach_lifecycle_skill(prompt)

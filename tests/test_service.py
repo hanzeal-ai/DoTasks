@@ -580,6 +580,111 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertFalse(paused["controller_kickoff_required"])
         self.assertIsNone(paused["controller_kickoff"])
 
+    def test_requirement_intake_allows_no_project(self):
+        result = self.service.finalize_task_intake({
+            "intake_kind": "requirement",
+            "title": "无项目需求",
+            "goal": "先记录需求，暂不归属代码项目",
+            "project": "",
+            "auto_dispatch": True,
+        })
+
+        requirement = self.service.get_requirement(result["requirement_id"])["requirement"]
+        self.assertIsNone(requirement["project"])
+        self.assertFalse(requirement["auto_dispatch"])
+        self.assertFalse(result["controller_kickoff_required"])
+        self.assertEqual([], self.service.board()["projects"])
+
+    def test_page_task_enters_queue_and_reuses_its_id_after_location(self):
+        queued = self.service.enqueue_task_intake({
+            "title": "页面新增任务",
+            "type": "feature",
+            "project": str(self.example_project),
+            "goal": "从页面加入任务队列",
+            "priority": "P1",
+            "auto_dispatch": True,
+        })
+        task_id = queued["task_id"]
+        requirement_id = queued["requirement_id"]
+        task = self.service.get_task(task_id)
+        self.assertEqual("draft", task["status"])
+        self.assertEqual(requirement_id, task["requirement_id"])
+        self.assertEqual([], self.service.board()["requirements"])
+        self.assertEqual([task_id], [item["id"] for item in self.service.board()["tasks"]])
+        self.assertTrue(queued["controller_kickoff_required"])
+
+        claim = self.service.claim_next_task("planner", str(self.example_project))
+        self.assertEqual(requirement_id, claim["requirement"]["id"])
+        self.assertEqual("web_task", claim["requirement"]["source_type"])
+        analysis = self.service.prepare_location_analysis({
+            "title": "页面新增任务",
+            "goal": "从页面加入任务队列",
+            "project": str(self.example_project),
+            "modules": [],
+        })
+        completed = self.service.submit_requirement_decomposition(
+            requirement_id,
+            claim["run"]["id"],
+            [{
+                "key": "direct",
+                "title": "模型不得改写此标题",
+                "goal": "模型不得改写此目标",
+                "analysis_id": analysis["analysis_id"],
+                "location_evidence": {
+                    "tool": "codegraph_explore",
+                    "query": "页面新增任务",
+                    "files": ["src/APage.tsx"],
+                    "symbols": ["APage"],
+                },
+                "targets": [{
+                    "file": "src/APage.tsx",
+                    "mode": "modify",
+                    "symbols": ["APage"],
+                    "tasks": [{"symbol": "APage", "action": "实现页面新增任务"}],
+                }],
+                "quality_gates": {
+                    "code_review": {"required": True, "reason": "code change"},
+                },
+                "acceptance_plan": [{
+                    "criterion": "页面任务可执行",
+                    "file": "src/APage.tsx",
+                    "symbol": "APage",
+                    "method": "focused test",
+                    "expected": "页面任务可执行",
+                }],
+            }],
+        )
+
+        self.assertEqual([task_id], [item["id"] for item in completed["tasks"]])
+        ready = self.service.get_task(task_id)
+        self.assertEqual("ready", ready["status"])
+        self.assertEqual("页面新增任务", ready["title"])
+        self.assertEqual("从页面加入任务队列", ready["goal"])
+        self.assertTrue(ready["auto_dispatch"])
+
+    def test_page_task_without_project_stays_as_a_draft_in_the_queue(self):
+        queued = self.service.enqueue_task_intake({
+            "title": "稍后归属项目",
+            "goal": "先记录到任务队列",
+            "project": "",
+            "auto_dispatch": True,
+        })
+
+        task = self.service.get_task(queued["task_id"])
+        self.assertEqual("draft", task["status"])
+        self.assertIsNone(task["project"])
+        self.assertFalse(queued["controller_kickoff_required"])
+        self.assertIsNone(self.service.claim_next_task("planner"))
+
+    def test_page_task_dispatch_prompt_requires_one_direct_task(self):
+        prompt = self.service._native_dispatch_prompt({
+            "kind": "requirement_decomposition",
+            "requirement": {"id": "REQ-0001", "source_type": "web_task"},
+            "run": {"id": "RDRUN-0001", "run_type": "requirement_decomposition"},
+        })
+        self.assertIn("只提交一个 key 为 direct 的任务", prompt)
+        self.assertIn("使现有草稿进入 ready 队列", prompt)
+
     def test_requirement_is_queryable_and_decomposition_is_idempotent(self):
         intake = self.service.finalize_task_intake({
             "intake_kind": "requirement",
@@ -712,6 +817,28 @@ class TaskboardServiceTest(unittest.TestCase):
             self.assertTrue(item["auto_dispatch"])
         self.assertEqual(1, len(completed["relations"]))
         self.assertEqual("depends_on", completed["relations"][0]["relation_type"])
+
+    def test_requirement_board_exposes_latest_bound_decomposition_thread(self):
+        intake = self.service.finalize_task_intake({
+            "intake_kind": "requirement",
+            "title": "打开拆解会话",
+            "project": str(self.example_project),
+            "goal": "从需求卡片跳转 Codex",
+        })
+        dispatch = self.service._claim_next_native_dispatch(
+            "codex-native-controller", stage="development"
+        )
+        self.assertEqual(intake["requirement_id"], dispatch["entity_id"])
+        self.service.bind_native_dispatch(
+            dispatch["run_id"], "thread-requirement-latest",
+            dispatch_attempt_id=dispatch["dispatch_attempt_id"],
+        )
+
+        requirement = next(
+            item for item in self.service.board()["requirements"]
+            if item["id"] == intake["requirement_id"]
+        )
+        self.assertEqual("thread-requirement-latest", requirement["codex_thread_id"])
 
     def test_requirement_decomposition_failures_stop_after_three_attempts(self):
         intake = self.service.finalize_task_intake({

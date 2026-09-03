@@ -260,6 +260,31 @@ class RelayHTTPServerTest(unittest.TestCase):
         self.assertEqual([], json.loads(body)["tasks"])
         self.assertIsNone(self.server.RequestHandlerClass.store.claim("mac"))
 
+    def test_cloud_codex_projects_come_from_local_agent_metadata(self) -> None:
+        projects = [
+            {
+                "id": "project-1",
+                "name": "Example",
+                "path": "/Users/example/project",
+            }
+        ]
+        status, _, _ = self.agent_post(
+            "/_agent/v1/claim",
+            {
+                "agent_id": "mac",
+                "board_hash": "",
+                "metadata": {"codex_projects": projects},
+                "wait_seconds": 0,
+            },
+        )
+        self.assertEqual(200, status)
+
+        status, _, body = self.request(
+            "GET", "/api/codex/projects", headers=self.browser_headers
+        )
+        self.assertEqual(200, status)
+        self.assertEqual(projects, json.loads(body)["projects"])
+
     def test_agent_tool_call_operates_on_cloud_database(self) -> None:
         status, _, body = self.agent_post(
             "/_agent/v1/tools/call",
