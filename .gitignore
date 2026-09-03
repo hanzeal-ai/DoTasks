@@ -4,7 +4,6 @@ __pycache__/
 data/*.db
 data/*.db-shm
 data/*.db-wal
-.mcp.json
 .env
 .dotasks-cloud/
 .DS_Store

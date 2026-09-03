@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "dotasks": {
+      "command": "./scripts/mcp-server",
+      "args": [],
+      "cwd": ".",
+      "env_vars": [
+        "DOTASKS_HOME",
+        "DOTASKS_OBSIDIAN_VAULT"
+      ]
+    },
+    "codegraph": {
+      "command": "codegraph",
+      "args": [
+        "serve",
+        "--mcp"
+      ],
+      "cwd": "."
+    }
+  }
+}

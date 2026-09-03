@@ -99,7 +99,11 @@ class SkillActivationTest(unittest.TestCase):
             self.assertFalse((ROOT / "skills" / retired / "SKILL.md").exists())
 
     def test_plugin_registers_codegraph_mcp_with_taskboard(self):
+        manifest = json.loads((ROOT / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual("./.mcp.json", manifest["mcpServers"])
         config = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
+        dotasks = config["mcpServers"]["dotasks"]
+        self.assertEqual("./scripts/mcp-server", dotasks["command"])
         codegraph = config["mcpServers"]["codegraph"]
         self.assertEqual("codegraph", codegraph["command"])
         self.assertEqual(["serve", "--mcp"], codegraph["args"])
