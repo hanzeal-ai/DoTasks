@@ -20,4 +20,12 @@ if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,
   exit 1
 fi
 
+if [ -z "${DOTASKS_REMOTE_SERVICE:-}" ]; then
+  DOTASKS_DATA_HOME=${DOTASKS_HOME:-$HOME/Library/Application Support/DoTasks}
+  DOTASKS_CLOUD_CONFIG=${DOTASKS_AGENT_CONFIG:-$DOTASKS_DATA_HOME/cloud-agent.json}
+  if [ -f "$DOTASKS_CLOUD_CONFIG" ]; then
+    export DOTASKS_REMOTE_SERVICE=1
+  fi
+fi
+
 exec "$PYTHON_BIN" -B -m taskboard.mcp_server "$@"

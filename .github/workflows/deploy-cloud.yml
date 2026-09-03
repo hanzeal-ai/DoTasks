@@ -101,9 +101,15 @@ jobs:
         shell: bash
         env:
           ECS_PUBLIC_IP: ${{ secrets.ECS_PUBLIC_IP }}
+          DOTASKS_PUBLIC_URL: ${{ secrets.DOTASKS_PUBLIC_URL }}
           IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
         run: |
-          : "${ECS_PUBLIC_IP:?Set ECS_PUBLIC_IP in GitHub Actions secrets}"
+          if [[ -n "$DOTASKS_PUBLIC_URL" ]]; then
+            endpoint=(--public-url "$DOTASKS_PUBLIC_URL")
+          else
+            : "${ECS_PUBLIC_IP:?Set ECS_PUBLIC_IP or DOTASKS_PUBLIC_URL in GitHub Actions secrets}"
+            endpoint=(--public-ip "$ECS_PUBLIC_IP")
+          fi
           deploy_root="$HOME/dotasks"
           mkdir -p "$deploy_root"
           install -m 755 \
@@ -113,7 +119,7 @@ jobs:
           reuse_env=()
           if test -f .env; then reuse_env=(--reuse-env); fi
           ./deploy-cloud-ip \
-            --public-ip "$ECS_PUBLIC_IP" \
+            "${endpoint[@]}" \
             --image "$IMAGE_TAG" \
             "${reuse_env[@]}" \
             --no-print-secrets

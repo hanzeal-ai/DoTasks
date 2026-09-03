@@ -102,6 +102,7 @@ def prepare_worker_codex_home(
         "",
         "[mcp_servers.dotasks.env]",
         f"DOTASKS_HOME = {json.dumps(str(data_path))}",
+        'DOTASKS_REMOTE_SERVICE = "1"',
         f"PYTHONPATH = {json.dumps(str(runtime_path))}",
         'PYTHONDONTWRITEBYTECODE = "1"',
         "",

@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import hmac
 import json
 import os
+import sqlite3
+import subprocess
 import threading
 import time
+import zlib
+from contextlib import closing
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import ThreadingHTTPServer
@@ -14,11 +19,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from core.workflow import workflow_metadata
+from core.db import Database
+from core.service import TaskboardService
 from taskboard.config import CLOUD_MODE, ServerConfig
-from taskboard.http_base import BaseDoTasksHandler, MAX_JSON_BODY_BYTES
+from taskboard.http_base import MAX_JSON_BODY_BYTES
 from taskboard.http_security import HTTPRequestError
-from taskboard.version import VERSION
+from taskboard.mcp_server import tool_handlers_for
+from taskboard.project_guard import ProjectWorkspaceGuard
+from taskboard.server import TaskboardHandler
 from taskboard.websocket_transport import (
     WebSocketConnection,
     read_frame,
@@ -29,6 +37,7 @@ from .store import RelayStore
 
 
 AGENT_BODY_LIMIT = MAX_JSON_BODY_BYTES * 8
+SNAPSHOT_BODY_LIMIT = 90 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -74,9 +83,115 @@ class RelayConfig:
         )
 
 
-class RelayHandler(BaseDoTasksHandler):
+class CloudProjectWorkspaceGuard(ProjectWorkspaceGuard):
+    """Keep Mac project paths as identifiers without reading them on the cloud host."""
+
+    @staticmethod
+    def require_project_directory(project: str | Path | None) -> str:
+        value = str(project or "").strip()
+        if not value:
+            raise ValueError("project is required")
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            raise ValueError("project must be an absolute path")
+        return str(path.resolve())
+
+    def workspace_state(self, project: str | None) -> dict[str, Any]:
+        return {
+            "available": False,
+            "reason": "workspace_owned_by_local_agent",
+            "project": self.normalize_project(project),
+        }
+
+    def workspace_diff(
+        self, project: str | None, baseline_revision: str, paths: list[str],
+        max_chars: int = 80000,
+    ) -> dict[str, Any]:
+        return {
+            "available": False,
+            "reason": "workspace_owned_by_local_agent",
+            "project": self.normalize_project(project),
+        }
+
+    @staticmethod
+    def git(project: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            ["git", "-C", project, *arguments], 1, "", "workspace is local"
+        )
+
+
+class CloudTaskboardService(TaskboardService):
+    def __init__(self, home: str | Path, public_url: str):
+        super().__init__(home, workspace_guard=CloudProjectWorkspaceGuard())
+        self.taskboard_url = public_url.rstrip("/")
+        self._import_lock = threading.Lock()
+
+    def _target_snippet(
+        self, project: str | None, target: dict[str, Any], line_count: int | None = None,
+    ) -> dict[str, Any] | None:
+        return None
+
+    def parallel_development_enabled(self) -> bool:
+        # Worktree creation belongs to the Local Agent. Until workspace RPC is
+        # available, cloud scheduling must never run concurrent workers in the
+        # same local checkout.
+        return False
+
+    def has_managed_state(self) -> bool:
+        with self.db.connection() as connection:
+            return bool(
+                connection.execute("SELECT 1 FROM requirements LIMIT 1").fetchone()
+                or connection.execute("SELECT 1 FROM tasks LIMIT 1").fetchone()
+            )
+
+    def import_initial_database(self, content: bytes, sha256: str) -> bool:
+        with self._import_lock:
+            if self.has_managed_state():
+                return False
+            if not content or len(content) > 64 * 1024 * 1024:
+                raise ValueError("Taskboard snapshot must contain at most 64 MiB")
+            if hashlib.sha256(content).hexdigest() != sha256:
+                raise ValueError("Taskboard snapshot SHA-256 does not match")
+            target = self.db.path
+            temporary = target.with_name(f".{target.name}.import")
+            migration_lock = temporary.with_suffix(temporary.suffix + ".migrate.lock")
+            temporary.write_bytes(content)
+            try:
+                Database(temporary)
+                with closing(sqlite3.connect(temporary)) as connection:
+                    if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                        raise ValueError("Taskboard snapshot failed SQLite integrity check")
+                    tables = {
+                        row[0]
+                        for row in connection.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'"
+                        )
+                    }
+                    if not {"requirements", "tasks", "scheduler_state"}.issubset(tables):
+                        raise ValueError("Taskboard snapshot schema is incomplete")
+                target.with_name(target.name + "-wal").unlink(missing_ok=True)
+                target.with_name(target.name + "-shm").unlink(missing_ok=True)
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
+                migration_lock.unlink(missing_ok=True)
+            return True
+
+
+class RelayHandler(TaskboardHandler):
     relay_config: RelayConfig
     store: RelayStore
+
+    def _dispatcher_status(self) -> dict[str, Any]:
+        agent = self.store.agent_status(self.relay_config.agent_id)
+        return {
+            "control_plane": "cloud",
+            "enabled": self.service.dispatcher_enabled(),
+            "execution_mode": "codex_cli_app_server",
+            "agent_configured": bool(agent.get("last_seen_at")),
+            "running": bool(agent.get("online")),
+            "last_seen_at": str(agent.get("last_seen_at") or ""),
+        }
 
     def _require_agent(self) -> str:
         host = self.headers.get("Host", "").lower()
@@ -90,8 +205,8 @@ class RelayHandler(BaseDoTasksHandler):
             raise HTTPRequestError(HTTPStatus.UNAUTHORIZED, "Invalid agent credentials")
         return self.relay_config.agent_id
 
-    def _read_agent_json(self) -> dict[str, Any]:
-        return self._read_json(AGENT_BODY_LIMIT)
+    def _read_agent_json(self, limit: int = AGENT_BODY_LIMIT) -> dict[str, Any]:
+        return self._read_json(limit)
 
     @property
     def relay_server(self) -> "RelayHTTPServer":
@@ -222,32 +337,7 @@ class RelayHandler(BaseDoTasksHandler):
             if parsed.path.startswith("/_agent/"):
                 self._json(HTTPStatus.NOT_FOUND, {"error": "Agent route not found"})
                 return
-            if parsed.path.startswith("/api/"):
-                self._validate_api_request()
-            if parsed.path == "/api/health":
-                agent = self.store.agent_status(self.relay_config.agent_id)
-                self._json(
-                    HTTPStatus.OK,
-                    {
-                        "ok": bool(agent["online"]),
-                        "version": VERSION,
-                        "mode": "cloud_relay",
-                        "agent": agent,
-                        "dispatcher": {
-                            "enabled": None,
-                            "execution_mode": "codex_cli_app_server",
-                            "running": None,
-                        },
-                    },
-                )
-            elif parsed.path == "/api/workflow":
-                self._json(HTTPStatus.OK, workflow_metadata())
-            elif parsed.path == "/api/events/stream":
-                self._serve_relay_events()
-            elif parsed.path.startswith("/api/"):
-                self._proxy("GET")
-            else:
-                self._serve_static(parsed.path)
+            super().do_GET()
         except (BrokenPipeError, ConnectionResetError):
             return
         except Exception as exc:
@@ -318,8 +408,62 @@ class RelayHandler(BaseDoTasksHandler):
                 self.store.apply_vault_manifest(agent_id, payload.get("paths") or [])
                 self._json(HTTPStatus.OK, {"ok": True})
                 return
-            self._validate_api_request()
-            self._proxy("POST")
+            if parsed.path == "/_agent/v1/bootstrap/status":
+                agent_id = self._require_agent()
+                payload = self._read_agent_json()
+                if payload.get("agent_id") != agent_id:
+                    raise HTTPRequestError(HTTPStatus.FORBIDDEN, "Agent ID mismatch")
+                self._json(
+                    HTTPStatus.OK,
+                    {"accept_snapshot": not self.service.has_managed_state()},
+                )
+                return
+            if parsed.path == "/_agent/v1/bootstrap":
+                agent_id = self._require_agent()
+                payload = self._read_agent_json(SNAPSHOT_BODY_LIMIT)
+                if payload.get("agent_id") != agent_id:
+                    raise HTTPRequestError(HTTPStatus.FORBIDDEN, "Agent ID mismatch")
+                if payload.get("encoding") != "zlib+base64":
+                    raise ValueError("Unsupported taskboard snapshot encoding")
+                compressed = base64.b64decode(
+                    str(payload.get("content") or ""), validate=True
+                )
+                decompressor = zlib.decompressobj()
+                content = decompressor.decompress(compressed, 64 * 1024 * 1024 + 1)
+                if len(content) > 64 * 1024 * 1024 or decompressor.unconsumed_tail:
+                    raise ValueError("Taskboard snapshot expands beyond 64 MiB")
+                content += decompressor.flush()
+                if (
+                    len(content) > 64 * 1024 * 1024
+                    or not decompressor.eof
+                    or decompressor.unused_data
+                ):
+                    raise ValueError("Taskboard snapshot compression is invalid")
+                imported = self.service.import_initial_database(
+                    content, str(payload.get("sha256") or "")
+                )
+                self._json(HTTPStatus.OK, {"imported": imported})
+                if imported:
+                    self.relay_server.notify_agent(agent_id, "state_changed")
+                return
+            if parsed.path == "/_agent/v1/tools/call":
+                agent_id = self._require_agent()
+                payload = self._read_agent_json()
+                if payload.get("agent_id") != agent_id:
+                    raise HTTPRequestError(HTTPStatus.FORBIDDEN, "Agent ID mismatch")
+                name = str(payload.get("name") or "")
+                handlers = tool_handlers_for(self.service)
+                handler = handlers.get(name)
+                if handler is None:
+                    raise ValueError(f"Unknown tool: {name}")
+                result = handler(payload.get("arguments") or {})
+                self._json(HTTPStatus.OK, {"result": result})
+                self.relay_server.notify_agent(agent_id, "state_changed")
+                return
+            super().do_POST()
+            self.relay_server.notify_agent(
+                self.relay_config.agent_id, "state_changed"
+            )
         except (BrokenPipeError, ConnectionResetError):
             return
         except Exception as exc:
@@ -327,8 +471,10 @@ class RelayHandler(BaseDoTasksHandler):
 
     def do_PATCH(self) -> None:  # noqa: N802
         try:
-            self._validate_api_request()
-            self._proxy("PATCH")
+            super().do_PATCH()
+            self.relay_server.notify_agent(
+                self.relay_config.agent_id, "state_changed"
+            )
         except Exception as exc:
             self._handle_error(exc)
 
@@ -386,6 +532,7 @@ def build_relay_server(config: RelayConfig) -> RelayHTTPServer:
         Path.home() / ".local" / "share" / "DoTasks"
     )
     store = RelayStore(data_home)
+    service = CloudTaskboardService(data_home, server_config.public_url)
     static_root = Path(__file__).resolve().parents[2] / "static"
     handler = type(
         "ConfiguredRelayHandler",
@@ -394,6 +541,7 @@ def build_relay_server(config: RelayConfig) -> RelayHTTPServer:
             "config": server_config,
             "relay_config": config,
             "store": store,
+            "service": service,
             "static_root": static_root,
         },
     )

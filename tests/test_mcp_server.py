@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import unittest
 from unittest.mock import patch
 
@@ -176,6 +178,26 @@ class TaskboardMcpServerTest(unittest.TestCase):
             })
         set_enabled.assert_called_once_with(False)
 
+    def test_cloud_tool_routing_requires_explicit_remote_mode(self):
+        remote = unittest.mock.MagicMock()
+        remote.call.return_value = {"remote": True}
+        with (
+            patch.dict(os.environ, {"DOTASKS_REMOTE_SERVICE": "1"}, clear=False),
+            patch(
+                "taskboard.mcp_server.RemoteToolClient.from_environment",
+                return_value=remote,
+            ),
+        ):
+            response = handle({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "list_board", "arguments": {}},
+            })["result"]
+
+        remote.call.assert_called_once_with("list_board", {})
+        self.assertTrue(response["structuredContent"]["ok"])
+
     def test_finalize_intake_schema_contains_each_authored_fact_once(self):
         tool = next(item for item in TOOLS if item["name"] == "finalize_task_intake")
         properties = tool["inputSchema"]["properties"]
@@ -243,6 +265,27 @@ class TaskboardMcpServerTest(unittest.TestCase):
         self.assertEqual(1, task_items["properties"]["targets"]["minItems"])
         self.assertNotIn("ordered_steps", required)
         self.assertIn("tasks", task_items["properties"]["targets"]["items"]["properties"])
+
+    def test_get_requirement_preserves_authoritative_decomposition_context(self):
+        result = {
+            "intake_kind": "requirement",
+            "requirement": {"id": "REQ-0002", "status": "decomposing"},
+            "tasks": [{"id": "TASK-0001", "status": "ready"}],
+            "relations": [{"source_task_id": "TASK-0001", "target_task_id": "TASK-0002"}],
+            "decomposition_runs": [{"id": "RDRUN-0001", "status": "running"}],
+        }
+        with patch("taskboard.mcp_server._call_tool", return_value=result):
+            response = handle({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {
+                    "name": "get_requirement",
+                    "arguments": {"requirement_id": "REQ-0002"},
+                },
+            })["result"]
+
+        self.assertEqual(result, response["structuredContent"])
+        self.assertEqual(result, json.loads(response["content"][0]["text"]))
+        self.assertNotIn("task_id", response["structuredContent"])
 
     def test_mutation_results_are_compact(self):
         result = {

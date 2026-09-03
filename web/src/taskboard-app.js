@@ -155,6 +155,7 @@ function syncHeader() {
   document.querySelector("#task-change-count").textContent = String(taskChangeCount);
   document.querySelector("#task-change-confirmations").hidden = taskChangeCount === 0;
   document.querySelector("#dispatcher-toggle").hidden = false;
+  document.querySelector("#new-requirement-button").hidden = !requirementsView;
   const settingsButton = document.querySelector("#settings-button");
   settingsButton.hidden = false;
   settingsButton.classList.toggle("selected", settingsView);
@@ -170,7 +171,15 @@ async function load({refreshAuxiliary = true} = {}) {
       state.settings = await api("/api/settings");
     }
     const dispatcher = state.board.dispatcher || {};
-    document.querySelector("#health").textContent = dispatcher.enabled && dispatcher.running === false ? "本地服务已连接 · 调度未运行" : "本地服务已连接";
+    document.querySelector("#health").textContent = dispatcher.control_plane === "cloud"
+      ? !dispatcher.enabled
+        ? "云端已连接 · 调度已暂停"
+        : dispatcher.running
+          ? "云端与本地 Agent 已连接"
+          : "云端已连接 · 本地 Agent 离线"
+      : dispatcher.enabled
+        ? "本地服务已连接"
+        : "本地服务已连接 · 调度已暂停";
     document.querySelector("#health").title = dispatcher.last_error || "";
     document.querySelector("#health").classList.add("ok");
     const dispatcherToggle = document.querySelector("#dispatcher-toggle");
@@ -508,6 +517,10 @@ async function handleTaskAction(event) {
   const dispatcherToggle = event.target.closest("#dispatcher-toggle");
   if (dispatcherToggle) {
     const action = dispatcherToggle.dataset.action;
+    if (!new Set(["pause", "resume"]).has(action)) {
+      toast("调度状态尚未加载完成");
+      return true;
+    }
     try {
       const result = await api(`/api/dispatcher/${action}`, {method:"POST", body:JSON.stringify({reason:"用户从任务看板暂停"})});
       await load();
@@ -517,6 +530,17 @@ async function handleTaskAction(event) {
           ? "调度已恢复；已发送 Local Agent 信号"
           : "调度已恢复，但 Local Agent 尚未配置云端连接");
     } catch (error) { toast(error.message); }
+    return true;
+  }
+  if (event.target.closest("#new-requirement-button")) {
+    const projects = [
+      ...(state.board?.requirements || []).map(item => item.project),
+      ...(state.board?.tasks || []).map(item => item.project),
+    ].filter(Boolean);
+    document.querySelector("#known-project-paths").innerHTML = [...new Set(projects)]
+      .map(project => `<option value="${escapeHtml(project)}"></option>`)
+      .join("");
+    document.querySelector("#new-requirement-dialog").showModal();
     return true;
   }
   if (event.target.matches("[data-close]")) {
@@ -627,6 +651,42 @@ document.addEventListener("click", async event => {
 });
 
 document.addEventListener("submit", async event => {
+  if (event.target.id === "new-requirement-form") {
+    event.preventDefault();
+    const form = event.target;
+    const button = form.querySelector('button[type="submit"]');
+    const values = new FormData(form);
+    button.disabled = true;
+    try {
+      const result = await api("/api/task-intakes/finalize", {
+        method: "POST",
+        body: JSON.stringify({
+          intake_kind: "requirement",
+          title: String(values.get("title") || "").trim(),
+          project: String(values.get("project") || "").trim(),
+          goal: String(values.get("goal") || "").trim(),
+          description: String(values.get("goal") || "").trim(),
+          priority: String(values.get("priority") || "P2"),
+          source_type: "web",
+          modules: [],
+          scope: [],
+          out_of_scope: [],
+          acceptance_criteria: [],
+          decomposition_tasks: [],
+          auto_dispatch: values.get("auto_dispatch") === "on",
+        }),
+      });
+      form.reset();
+      document.querySelector("#new-requirement-dialog").close();
+      await load();
+      toast(`${result.requirement_id} 已保存到云端`);
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      button.disabled = false;
+    }
+    return;
+  }
   if (event.target.id === "task-settings-form") {
     event.preventDefault();
     const input = document.querySelector("#task-token-budget");

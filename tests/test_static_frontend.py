@@ -196,6 +196,8 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
         for control_id in (
             "board-nav",
             "requirements-nav",
+            "new-requirement-button",
+            "new-requirement-dialog",
             "dispatcher-toggle",
             "completed-tasks",
             "settings-button",
@@ -224,10 +226,14 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
         self.assertIn('event.target.closest("#completed-tasks")', app)
         self.assertIn('column.key === "attention"', app)
         self.assertIn('event.target.closest("#dispatcher-toggle")', app)
+        self.assertIn('event.target.closest("#new-requirement-button")', app)
+        self.assertIn('api("/api/task-intakes/finalize"', app)
         responsive = css.split("@media (max-width: 760px)", 1)[1].split(
             "@media (prefers-color-scheme: dark)", 1
         )[0]
-        self.assertEqual("182px", declaration_value(responsive, ".sidebar", "flex-basis"))
+        self.assertEqual("column", declaration_value(responsive, ".app-shell", "flex-direction"))
+        self.assertEqual("100%", declaration_value(responsive, ".sidebar", "width"))
+        self.assertEqual("auto", declaration_value(responsive, ".sidebar", "height"))
         self.assertEqual(
             "12px",
             declaration_value(responsive, "#content.board-columns > .board", "padding"),

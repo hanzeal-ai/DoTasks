@@ -26,6 +26,7 @@ class LocalCodexExecutor:
         data_home: str | Path,
         runtime_home: str | Path | None = None,
         client_factory: Callable[..., CodexAppServerClient] = CodexAppServerClient,
+        service: Any | None = None,
     ):
         self.data_home = Path(data_home).expanduser().resolve()
         self.runtime_home = (
@@ -33,7 +34,7 @@ class LocalCodexExecutor:
             if runtime_home
             else Path(__file__).resolve().parents[1]
         )
-        self.service = TaskboardService(self.data_home)
+        self.service = service or TaskboardService(self.data_home)
         self.client_factory = client_factory
         self._wake_event = threading.Event()
         self._stop_event = threading.Event()

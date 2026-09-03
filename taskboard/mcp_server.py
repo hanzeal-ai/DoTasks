@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Any, Callable
 
 from core.service import TaskboardService
+from .remote_service import RemoteToolClient
 from .version import VERSION
 
 
@@ -552,82 +554,126 @@ TOOLS = [
 ]
 
 
-def _report_location(arguments: dict[str, Any]) -> Any:
-    return SERVICE.report_location_status(
-        arguments["project"], arguments["available"], arguments["state"],
-        arguments.get("summary", ""), arguments["evidence"], arguments.get("agent_id", ""),
-    )
+def tool_handlers_for(
+    service: TaskboardService,
+) -> dict[str, Callable[[dict[str, Any]], Any]]:
+    return {
+        "list_board": lambda _arguments: service.board(),
+        "prepare_task_location": lambda arguments: service.prepare_location_analysis(
+            arguments, "creation"
+        ),
+        "detect_task_change": service.detect_task_change,
+        "prepare_task_change_location": lambda arguments: service.prepare_location_analysis(
+            arguments, "change", arguments["candidate_task_id"]
+        ),
+        "prepare_task_change_confirmation": service.prepare_task_change_confirmation,
+        "resolve_task_change_confirmation": lambda arguments: service.resolve_task_change_confirmation(
+            arguments["change_request_id"], arguments["decision"]
+        ),
+        "get_task_change_confirmation": lambda arguments: service.get_task_change_request(
+            arguments["change_request_id"]
+        ),
+        "report_location_status": lambda arguments: service.report_location_status(
+            arguments["project"],
+            arguments["available"],
+            arguments["state"],
+            arguments.get("summary", ""),
+            arguments["evidence"],
+            arguments.get("agent_id", ""),
+        ),
+        "complete_location_analysis": lambda arguments: service.complete_location_analysis(
+            arguments["analysis_id"],
+            arguments["location_evidence"],
+            arguments["targets"],
+            arguments["acceptance_plan"],
+            arguments["dependency_analysis"],
+            arguments["implementation_contract"],
+            arguments["review_contract"],
+        ),
+        "finalize_task_intake": service.finalize_task_intake,
+        "get_requirement": lambda arguments: service.get_requirement(
+            arguments["requirement_id"]
+        ),
+        "submit_requirement_decomposition": lambda arguments: service.submit_requirement_decomposition(
+            arguments["requirement_id"], arguments["run_id"], arguments["tasks"]
+        ),
+        "report_requirement_decomposition_failed": lambda arguments: service.fail_requirement_decomposition(
+            arguments["requirement_id"], arguments["run_id"], arguments["error"]
+        ),
+        "set_dispatcher_enabled": lambda arguments: service.set_dispatcher_enabled(
+            arguments["enabled"]
+        ),
+        "claim_schedule_cycle": lambda arguments: service.claim_schedule_cycle(
+            arguments["worker_id"],
+            arguments.get("project"),
+            arguments.get("lease_seconds", 1800),
+            force=bool(arguments.get("force", False)),
+        ),
+        "complete_schedule_cycle": lambda arguments: service.complete_schedule_cycle(
+            arguments["worker_id"], arguments["generation"]
+        ),
+        "mark_dispatch_pending": lambda arguments: service.mark_native_dispatch_pending(
+            arguments["run_id"],
+            arguments["client_thread_id"],
+            arguments.get("host_id", ""),
+            arguments.get("codex_project_id", ""),
+            dispatch_attempt_id=arguments["dispatch_attempt_id"],
+        ),
+        "bind_native_dispatch": lambda arguments: service.bind_native_dispatch(
+            arguments["run_id"],
+            arguments["thread_id"],
+            arguments.get("host_id", ""),
+            arguments.get("codex_project_id", ""),
+            resume_fallback_reason=arguments.get("resume_fallback_reason", ""),
+            dispatch_attempt_id=arguments["dispatch_attempt_id"],
+        ),
+        "renew_dispatch_lease": lambda arguments: service.renew_native_dispatch(
+            arguments["run_id"], arguments.get("lease_seconds", 1800)
+        ),
+        "get_dispatch_status": lambda arguments: service.get_native_dispatch(
+            arguments["run_id"]
+        ),
+        "report_dispatch_failed": lambda arguments: service.fail_native_dispatch(
+            arguments["run_id"], arguments["reason"]
+        ),
+        "submit_task_delivery": lambda arguments: service.submit_delivery(
+            arguments["run_id"],
+            arguments["delivery_summary"],
+            arguments["verification_result"],
+            arguments["changed_locations"],
+            arguments["acceptance_evidence"],
+            batch_revision=arguments.get("batch_revision"),
+            workspace_path=arguments.get("workspace_path"),
+        ),
+        "report_run_blocked": lambda arguments: service.report_run_blocked(
+            arguments["task_id"],
+            arguments["run_id"],
+            arguments["status"],
+            arguments["reason"],
+            arguments.get("failure_category"),
+            arguments.get("failure_locations"),
+        ),
+        "review_code": lambda arguments: service.review_code(
+            arguments["task_id"],
+            arguments["run_id"],
+            arguments["verdict"],
+            arguments.get("reasons"),
+            arguments.get("passed_items"),
+            arguments.get("failed_criteria"),
+            arguments.get("failure_category"),
+            arguments.get("failure_locations"),
+        ),
+        "get_task_details": lambda arguments: service.task_details(
+            arguments["task_id"]
+        ),
+        "open_taskboard": lambda _arguments: {
+            "url": getattr(service, "taskboard_url", "http://127.0.0.1:8765"),
+            "startup": "./scripts/start",
+        },
+    }
 
 
-def _complete_location(arguments: dict[str, Any]) -> Any:
-    return SERVICE.complete_location_analysis(
-        arguments["analysis_id"], arguments["location_evidence"], arguments["targets"],
-        arguments["acceptance_plan"], arguments["dependency_analysis"],
-        arguments["implementation_contract"], arguments["review_contract"],
-    )
-
-
-TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
-    "list_board": lambda _arguments: SERVICE.board(),
-    "prepare_task_location": lambda arguments: SERVICE.prepare_location_analysis(arguments, "creation"),
-    "detect_task_change": SERVICE.detect_task_change,
-    "prepare_task_change_location": lambda arguments: SERVICE.prepare_location_analysis(
-        arguments, "change", arguments["candidate_task_id"],
-    ),
-    "prepare_task_change_confirmation": SERVICE.prepare_task_change_confirmation,
-    "resolve_task_change_confirmation": lambda arguments: SERVICE.resolve_task_change_confirmation(
-        arguments["change_request_id"], arguments["decision"],
-    ),
-    "get_task_change_confirmation": lambda arguments: SERVICE.get_task_change_request(arguments["change_request_id"]),
-    "report_location_status": _report_location,
-    "complete_location_analysis": _complete_location,
-    "finalize_task_intake": SERVICE.finalize_task_intake,
-    "get_requirement": lambda arguments: SERVICE.get_requirement(
-        arguments["requirement_id"],
-    ),
-    "submit_requirement_decomposition": lambda arguments: SERVICE.submit_requirement_decomposition(
-        arguments["requirement_id"], arguments["run_id"], arguments["tasks"],
-    ),
-    "report_requirement_decomposition_failed": lambda arguments: SERVICE.fail_requirement_decomposition(
-        arguments["requirement_id"], arguments["run_id"], arguments["error"],
-    ),
-    "set_dispatcher_enabled": lambda arguments: SERVICE.set_dispatcher_enabled(
-        arguments["enabled"]
-    ),
-    "claim_schedule_cycle": lambda arguments: SERVICE.claim_schedule_cycle(
-        arguments["worker_id"], arguments.get("project"),
-        arguments.get("lease_seconds", 1800), force=bool(arguments.get("force", False)),
-    ),
-    "complete_schedule_cycle": lambda arguments: SERVICE.complete_schedule_cycle(
-        arguments["worker_id"], arguments["generation"],
-    ),
-    "mark_dispatch_pending": lambda arguments: SERVICE.mark_native_dispatch_pending(
-        arguments["run_id"], arguments["client_thread_id"], arguments.get("host_id", ""),
-        arguments.get("codex_project_id", ""),
-        dispatch_attempt_id=arguments["dispatch_attempt_id"],
-    ),
-    "bind_native_dispatch": lambda arguments: SERVICE.bind_native_dispatch(
-        arguments["run_id"], arguments["thread_id"], arguments.get("host_id", ""),
-        arguments.get("codex_project_id", ""),
-        resume_fallback_reason=arguments.get("resume_fallback_reason", ""),
-        dispatch_attempt_id=arguments["dispatch_attempt_id"],
-    ),
-    "renew_dispatch_lease": lambda arguments: SERVICE.renew_native_dispatch(
-        arguments["run_id"], arguments.get("lease_seconds", 1800),
-    ),
-    "get_dispatch_status": lambda arguments: SERVICE.get_native_dispatch(arguments["run_id"]),
-    "report_dispatch_failed": lambda arguments: SERVICE.fail_native_dispatch(
-        arguments["run_id"], arguments["reason"],
-    ),
-    "submit_task_delivery": lambda arguments: SERVICE.submit_delivery(arguments["run_id"], arguments["delivery_summary"], arguments["verification_result"], arguments["changed_locations"], arguments["acceptance_evidence"], batch_revision=arguments.get("batch_revision"), workspace_path=arguments.get("workspace_path")),
-    "report_run_blocked": lambda arguments: SERVICE.report_run_blocked(
-        arguments["task_id"], arguments["run_id"], arguments["status"], arguments["reason"],
-        arguments.get("failure_category"), arguments.get("failure_locations"),
-    ),
-    "review_code": lambda arguments: SERVICE.review_code(arguments["task_id"], arguments["run_id"], arguments["verdict"], arguments.get("reasons"), arguments.get("passed_items"), arguments.get("failed_criteria"), arguments.get("failure_category"), arguments.get("failure_locations")),
-    "get_task_details": lambda arguments: SERVICE.task_details(arguments["task_id"]),
-    "open_taskboard": lambda _arguments: {"url": "http://127.0.0.1:8765", "startup": "./scripts/start"},
-}
+TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = tool_handlers_for(SERVICE)
 
 
 def _visible_tools() -> list[dict[str, Any]]:
@@ -635,6 +681,11 @@ def _visible_tools() -> list[dict[str, Any]]:
 
 
 def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
+    if os.environ.get("DOTASKS_REMOTE_SERVICE") == "1":
+        remote = RemoteToolClient.from_environment()
+        if remote is None:
+            raise RuntimeError("DOTASKS_REMOTE_SERVICE requires Cloud Agent configuration")
+        return remote.call(name, arguments)
     handler = TOOL_HANDLERS.get(name)
     if handler is None:
         raise ValueError(f"Unknown tool: {name}")
@@ -683,7 +734,8 @@ def _compact_lifecycle_result(name: str, result: Any) -> Any:
         return result
     if name in {
         "report_location_status", "complete_location_analysis",
-        "finalize_task_intake", "submit_requirement_decomposition",
+        "finalize_task_intake", "get_requirement",
+        "submit_requirement_decomposition",
         "set_dispatcher_enabled", "complete_schedule_cycle",
     }:
         return result

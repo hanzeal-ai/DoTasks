@@ -20,6 +20,7 @@ class TaskboardHandler(BaseDoTasksHandler):
 
     def _dispatcher_status(self) -> dict[str, Any]:
         return {
+            "control_plane": "local",
             "enabled": self.service.dispatcher_enabled(),
             "execution_mode": "codex_cli_app_server",
             "agent_configured": (self.service.data_home / "cloud-agent.json").is_file(),
@@ -173,9 +174,9 @@ class TaskboardHandler(BaseDoTasksHandler):
                     {
                         **result,
                         "agent_signal": "pending",
-                        "agent_configured": (
-                            self.service.data_home / "cloud-agent.json"
-                        ).is_file(),
+                        "agent_configured": bool(
+                            self._dispatcher_status().get("agent_configured")
+                        ),
                     },
                 )
             elif match := re.fullmatch(r"/api/tasks/([^/]+)/resume", parsed.path):

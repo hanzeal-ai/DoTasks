@@ -91,6 +91,33 @@ class DeployCloudIpScriptTest(unittest.TestCase):
         self.assertIn("DoTasks Cloud is running: http://203.0.113.10:8765", result.stdout)
         self.assertIn("allow inbound TCP 8765", result.stdout)
 
+    def test_https_url_binds_backend_to_loopback_for_reverse_proxy(self) -> None:
+        result = subprocess.run(
+            [
+                "/bin/sh",
+                str(SCRIPT),
+                "--public-url",
+                "https://tasks.example.com",
+                "--image",
+                "registry.example.com/team/dotasks:2026.09.03",
+                "--http-password",
+                "browser-password-123456",
+                "--agent-token",
+                "agent-token-12345678901234567890",
+            ],
+            cwd=self.project,
+            env=self.environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        environment = (self.project / ".env").read_text(encoding="utf-8")
+        self.assertIn("DOTASKS_PUBLIC_URL=https://tasks.example.com", environment)
+        self.assertIn("DOTASKS_BIND_ADDRESS=127.0.0.1", environment)
+        self.assertIn("allow inbound TCP 80 and 443", result.stdout)
+        self.assertIn("with WebSocket support", result.stdout)
+
     def test_requires_explicit_choice_for_existing_env(self) -> None:
         self.run_script()
 

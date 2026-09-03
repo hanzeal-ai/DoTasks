@@ -5,13 +5,17 @@ import hashlib
 import http.client
 import json
 import os
+import sqlite3
 import socket
 import tempfile
 import threading
 import unittest
+import zlib
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from core.service import TaskboardService
 from taskboard.agent import AgentConfig, RelayAgent, load_agent_config, save_agent_config
 from taskboard.cloud.server import RelayConfig, build_relay_server
 from taskboard.cloud.store import RelayStore
@@ -160,43 +164,32 @@ class RelayHTTPServerTest(unittest.TestCase):
         self.assertIn("Basic", headers.get("WWW-Authenticate", ""))
         self.assertIn("Authentication", json.loads(body)["error"])
 
-    def test_browser_request_round_trips_through_local_agent(self) -> None:
-        received: dict[str, object] = {}
-
-        def browser_request() -> None:
-            received["response"] = self.request(
-                "GET", "/api/board?view=all", headers=self.browser_headers
-            )
-
-        browser = threading.Thread(target=browser_request)
-        browser.start()
-        status, _, body = self.agent_post(
-            "/_agent/v1/claim",
-            {"agent_id": "mac", "board_hash": "abc", "metadata": {"version": "1"}},
+    def test_browser_manages_cloud_board_while_agent_is_offline(self) -> None:
+        payload = {
+            "intake_kind": "requirement",
+            "title": "Phone requirement",
+            "goal": "Persist this on the cloud",
+            "project": "/Users/example/project",
+            "priority": "P2",
+            "auto_dispatch": True,
+        }
+        status, _, body = self.request(
+            "POST",
+            "/api/task-intakes/finalize",
+            json.dumps(payload).encode(),
+            {**self.browser_headers, "Content-Type": "application/json"},
         )
         self.assertEqual(200, status)
-        command = json.loads(body)["command"]
-        self.assertEqual("GET", command["method"])
-        self.assertEqual("/api/board?view=all", command["path"])
-
-        status, _, _ = self.agent_post(
-            "/_agent/v1/complete",
-            {
-                "agent_id": "mac",
-                "command_id": command["id"],
-                "status": 200,
-                "headers": {"Content-Type": "application/json; charset=utf-8"},
-                "body": base64.b64encode(b'{"tasks":[]}').decode("ascii"),
-            },
+        requirement_id = json.loads(body)["requirement_id"]
+        status, _, body = self.request(
+            "GET", "/api/board?view=all", headers=self.browser_headers
         )
         self.assertEqual(200, status)
-        browser.join(timeout=4)
-        self.assertFalse(browser.is_alive())
-        response_status, _, response_body = received["response"]
-        self.assertEqual(200, response_status)
-        self.assertEqual({"tasks": []}, json.loads(response_body))
+        board = json.loads(body)
+        self.assertEqual([requirement_id], [item["id"] for item in board["requirements"]])
+        self.assertFalse(board["dispatcher"]["running"])
 
-    def test_websocket_notifies_agent_before_https_claim(self) -> None:
+    def test_websocket_notifies_agent_after_cloud_state_change(self) -> None:
         connection = socket.create_connection(("127.0.0.1", self.port), timeout=2)
         key = base64.b64encode(b"0123456789abcdef").decode("ascii")
         connection.sendall(
@@ -225,45 +218,20 @@ class RelayHTTPServerTest(unittest.TestCase):
         self.assertEqual(0x1, opcode)
         self.assertEqual("connected", json.loads(payload)["type"])
 
-        received: dict[str, object] = {}
-
-        def browser_request() -> None:
-            received["response"] = self.request(
-                "GET", "/api/board?view=all", headers=self.browser_headers
-            )
-
-        browser = threading.Thread(target=browser_request)
-        browser.start()
-        opcode, payload = read_frame(stream)
-        self.assertEqual(0x1, opcode)
-        self.assertEqual("command_available", json.loads(payload)["type"])
-
-        status, _, body = self.agent_post(
-            "/_agent/v1/claim",
-            {
-                "agent_id": "mac",
-                "board_hash": "abc",
-                "metadata": {"version": "1"},
-                "wait_seconds": 0,
-            },
+        status, _, _ = self.request(
+            "POST",
+            "/api/dispatcher/resume",
+            b"{}",
+            {**self.browser_headers, "Content-Type": "application/json"},
         )
         self.assertEqual(200, status)
-        command = json.loads(body)["command"]
-        self.agent_post(
-            "/_agent/v1/complete",
-            {
-                "agent_id": "mac",
-                "command_id": command["id"],
-                "status": 200,
-                "headers": {"Content-Type": "application/json"},
-                "body": base64.b64encode(b'{"tasks":[]}').decode("ascii"),
-            },
-        )
-        browser.join(timeout=4)
-        self.assertFalse(browser.is_alive())
+        opcode, payload = read_frame(stream)
+        self.assertEqual(0x1, opcode)
+        self.assertEqual("state_changed", json.loads(payload)["type"])
         connection.sendall(encode_frame(b"", opcode=0x8, masked=True))
         stream.close()
         connection.close()
+
     def test_agent_token_cannot_be_replaced_by_browser_credentials(self) -> None:
         status, _, body = self.request(
             "POST",
@@ -274,7 +242,7 @@ class RelayHTTPServerTest(unittest.TestCase):
         self.assertEqual(401, status)
         self.assertIn("agent credentials", json.loads(body)["error"])
 
-    def test_offline_agent_timeout_cancels_unclaimed_command(self) -> None:
+    def test_offline_agent_does_not_block_cloud_reads(self) -> None:
         self.config = RelayConfig(
             server=self.config.server,
             agent_id=self.config.agent_id,
@@ -288,9 +256,75 @@ class RelayHTTPServerTest(unittest.TestCase):
             "GET", "/api/board", headers=self.browser_headers
         )
 
-        self.assertEqual(504, status)
-        self.assertEqual("cancelled", json.loads(body)["command_status"])
+        self.assertEqual(200, status)
+        self.assertEqual([], json.loads(body)["tasks"])
         self.assertIsNone(self.server.RequestHandlerClass.store.claim("mac"))
+
+    def test_agent_tool_call_operates_on_cloud_database(self) -> None:
+        status, _, body = self.agent_post(
+            "/_agent/v1/tools/call",
+            {
+                "agent_id": "mac",
+                "name": "set_dispatcher_enabled",
+                "arguments": {"enabled": True},
+            },
+        )
+        self.assertEqual(200, status)
+        self.assertEqual({"enabled": True}, json.loads(body)["result"])
+        status, _, body = self.request("GET", "/api/board", headers=self.browser_headers)
+        self.assertEqual(200, status)
+        self.assertTrue(json.loads(body)["dispatcher"]["enabled"])
+
+    def test_empty_cloud_imports_one_compressed_local_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as local_home:
+            project = Path(local_home) / "project"
+            project.mkdir()
+            local = TaskboardService(local_home)
+            local.finalize_task_intake({
+                "intake_kind": "requirement",
+                "title": "Existing local requirement",
+                "goal": "Move the source of truth to cloud",
+                "project": str(project),
+                "priority": "P2",
+                "auto_dispatch": False,
+            })
+            snapshot = Path(local_home) / "snapshot.db"
+            with closing(
+                sqlite3.connect(Path(local_home) / "data" / "taskboard.db")
+            ) as source:
+                with closing(sqlite3.connect(snapshot)) as target:
+                    source.backup(target)
+            content = snapshot.read_bytes()
+
+        status, _, body = self.agent_post(
+            "/_agent/v1/bootstrap/status", {"agent_id": "mac"}
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(json.loads(body)["accept_snapshot"])
+
+        status, _, body = self.agent_post(
+            "/_agent/v1/bootstrap",
+            {
+                "agent_id": "mac",
+                "encoding": "zlib+base64",
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "content": base64.b64encode(zlib.compress(content)).decode("ascii"),
+            },
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(json.loads(body)["imported"])
+
+        status, _, body = self.request("GET", "/api/board", headers=self.browser_headers)
+        self.assertEqual(200, status)
+        self.assertEqual(
+            ["Existing local requirement"],
+            [item["title"] for item in json.loads(body)["requirements"]],
+        )
+        status, _, body = self.agent_post(
+            "/_agent/v1/bootstrap/status", {"agent_id": "mac"}
+        )
+        self.assertEqual(200, status)
+        self.assertFalse(json.loads(body)["accept_snapshot"])
 
 
 class WebSocketTransportTest(unittest.TestCase):
@@ -319,6 +353,7 @@ class RelayAgentTest(unittest.TestCase):
             )
             executor = MagicMock()
             agent = RelayAgent(config, executor=executor)
+            agent.bootstrap_cloud_state = lambda: False
             agent.sync_vault = lambda: None
             agent.drain_commands = MagicMock(return_value=0)
             connection = MagicMock()

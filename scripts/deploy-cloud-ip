@@ -7,6 +7,7 @@ RUNTIME_DIR="$DEPLOY_ROOT/.dotasks-cloud"
 COMPOSE_FILE="$RUNTIME_DIR/compose.yaml"
 
 PUBLIC_IP=
+PUBLIC_URL_INPUT=
 PORT=8765
 IMAGE=
 HTTP_USER=dotasks
@@ -20,7 +21,8 @@ PRINT_SECRETS=1
 usage() {
   cat <<'EOF'
 Usage:
-  ./deploy-cloud-ip --public-ip <IPv4> --image <GHCR image:tag> [options]
+  ./deploy-cloud-ip (--public-ip <IPv4> | --public-url <HTTPS URL>) \
+    --image <GHCR image:tag> [options]
 
 First deployment:
   ./deploy-cloud-ip \
@@ -28,6 +30,7 @@ First deployment:
     --image ghcr.io/hanzeal-ai/dotasks:2026.09.03
 
 Options:
+  --public-url <URL>        HTTPS URL when a reverse proxy terminates TLS
   --port <port>              Public TCP port (default: 8765)
   --image <image:tag>        GHCR image; optional only with --reuse-env
   --http-user <user>         Browser login user (default: dotasks)
@@ -48,10 +51,11 @@ fail() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --public-ip|--port|--image|--http-user|--http-password|--agent-id|--agent-token)
+    --public-ip|--public-url|--port|--image|--http-user|--http-password|--agent-id|--agent-token)
       [ "$#" -ge 2 ] || fail "$1 requires a value"
       case "$1" in
         --public-ip) PUBLIC_IP=$2 ;;
+        --public-url) PUBLIC_URL_INPUT=$2 ;;
         --port) PORT=$2 ;;
         --image) IMAGE=$2 ;;
         --http-user) HTTP_USER=$2 ;;
@@ -83,10 +87,11 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-[ -n "$PUBLIC_IP" ] || fail "--public-ip is required"
+[ -z "$PUBLIC_IP" ] || [ -z "$PUBLIC_URL_INPUT" ] || fail "use either --public-ip or --public-url, not both"
+[ -n "$PUBLIC_IP$PUBLIC_URL_INPUT" ] || fail "--public-ip or --public-url is required"
 [ "$FORCE_ENV" -eq 0 ] || [ "$REUSE_ENV" -eq 0 ] || fail "--force-env and --reuse-env cannot be combined"
 
-if ! printf '%s\n' "$PUBLIC_IP" | awk -F. '
+if [ -n "$PUBLIC_IP" ] && ! printf '%s\n' "$PUBLIC_IP" | awk -F. '
   NF != 4 { exit 1 }
   {
     for (i = 1; i <= 4; i++) {
@@ -128,7 +133,7 @@ write_env() {
     printf 'DOTASKS_HTTP_PASSWORD=%s\n' "$HTTP_PASSWORD"
     printf 'DOTASKS_AGENT_ID=%s\n' "$AGENT_ID"
     printf 'DOTASKS_AGENT_TOKEN=%s\n' "$AGENT_TOKEN"
-    printf 'DOTASKS_BIND_ADDRESS=0.0.0.0\n'
+    printf 'DOTASKS_BIND_ADDRESS=%s\n' "$BIND_ADDRESS"
     printf 'DOTASKS_BIND_PORT=%s\n' "$PORT"
   } > "$ENV_TMP"
   mv "$ENV_TMP" "$ENV_FILE"
@@ -148,14 +153,31 @@ generate_secret() {
   fail "openssl or od with /dev/urandom is required to generate credentials"
 }
 
-PUBLIC_URL="http://$PUBLIC_IP:$PORT"
+if [ -n "$PUBLIC_URL_INPUT" ]; then
+  PUBLIC_URL=${PUBLIC_URL_INPUT%/}
+  case "$PUBLIC_URL" in
+    https://*) ;;
+    *) fail "--public-url must begin with https://" ;;
+  esac
+  PUBLIC_HOST=${PUBLIC_URL#https://}
+  case "$PUBLIC_HOST" in
+    ''|*/*|*:*|*[!A-Za-z0-9.-]*|.*|*.|*..*) fail "--public-url must contain one public DNS name without a path or port" ;;
+    *.*) ;;
+    *) fail "--public-url must contain a public DNS name" ;;
+  esac
+  BIND_ADDRESS=127.0.0.1
+else
+  PUBLIC_URL="http://$PUBLIC_IP:$PORT"
+  PUBLIC_HOST="$PUBLIC_IP:$PORT"
+  BIND_ADDRESS=0.0.0.0
+fi
 if [ -f "$ENV_FILE" ] && [ "$FORCE_ENV" -eq 0 ]; then
   [ "$REUSE_ENV" -eq 1 ] || fail ".env already exists; use --reuse-env to keep it or --force-env to replace it"
   EXISTING_PUBLIC_URL=$(read_env DOTASKS_PUBLIC_URL)
   EXISTING_BIND_ADDRESS=$(read_env DOTASKS_BIND_ADDRESS)
   EXISTING_PORT=$(read_env DOTASKS_BIND_PORT)
   [ "$EXISTING_PUBLIC_URL" = "$PUBLIC_URL" ] || fail "existing DOTASKS_PUBLIC_URL does not match $PUBLIC_URL"
-  [ "$EXISTING_BIND_ADDRESS" = "0.0.0.0" ] || fail "existing DOTASKS_BIND_ADDRESS must be 0.0.0.0"
+  [ "$EXISTING_BIND_ADDRESS" = "$BIND_ADDRESS" ] || fail "existing DOTASKS_BIND_ADDRESS does not match $BIND_ADDRESS"
   [ "$EXISTING_PORT" = "$PORT" ] || fail "existing DOTASKS_BIND_PORT does not match $PORT"
   EXISTING_IMAGE=$(read_env DOTASKS_IMAGE)
   [ -n "$IMAGE" ] || IMAGE=$EXISTING_IMAGE
@@ -239,7 +261,7 @@ attempt=0
 while [ "$attempt" -lt 30 ]; do
   if HEALTH_BODY=$(curl -fsS \
     -u "$HTTP_USER:$HTTP_PASSWORD" \
-    -H "Host: $PUBLIC_IP:$PORT" \
+    -H "Host: $PUBLIC_HOST" \
     "$HEALTH_URL" 2>/dev/null); then
     break
   fi
@@ -264,5 +286,9 @@ else
   echo "Credentials remain only in $ENV_FILE"
 fi
 echo
-echo "Required Alibaba Cloud action: allow inbound TCP $PORT only from your own public IP."
-echo "This HTTP/IP setup is temporary; credentials are not encrypted in transit."
+if [ -n "$PUBLIC_URL_INPUT" ]; then
+  echo "Required Alibaba Cloud action: allow inbound TCP 80 and 443, then proxy $PUBLIC_HOST to 127.0.0.1:$PORT with WebSocket support."
+else
+  echo "Required Alibaba Cloud action: allow inbound TCP $PORT only from your own public IP."
+  echo "This HTTP/IP setup is temporary; credentials are not encrypted in transit."
+fi

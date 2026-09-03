@@ -62,17 +62,14 @@ class TaskboardService(
         self.location = LocationAdapter()
         self.workspace_guard = workspace_guard or ProjectWorkspaceGuard()
 
-    @staticmethod
-    def _normalize_project(project: str | Path | None) -> str:
-        return ProjectWorkspaceGuard.normalize_project(project)
+    def _normalize_project(self, project: str | Path | None) -> str:
+        return self.workspace_guard.normalize_project(project)
 
-    @staticmethod
-    def _require_project_directory(project: str | Path | None) -> str:
-        return ProjectWorkspaceGuard.require_project_directory(project)
+    def _require_project_directory(self, project: str | Path | None) -> str:
+        return self.workspace_guard.require_project_directory(project)
 
-    @staticmethod
-    def _normalize_target_file(value: Any) -> str:
-        return ProjectWorkspaceGuard.normalize_target_file(value)
+    def _normalize_target_file(self, value: Any) -> str:
+        return self.workspace_guard.normalize_target_file(value)
 
     @staticmethod
     def _string_list(payload: dict[str, Any], field: str) -> list[str]:
@@ -81,9 +78,8 @@ class TaskboardService(
             raise ValueError(f"{field} must be an array of strings")
         return [item.strip() for item in value if item.strip()]
 
-    @staticmethod
-    def _git(project: str, *arguments: str) -> subprocess.CompletedProcess[str]:
-        return ProjectWorkspaceGuard.git(project, *arguments)
+    def _git(self, project: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return self.workspace_guard.git(project, *arguments)
 
     def _workspace_state(self, project: str | None) -> dict[str, Any]:
         return self.workspace_guard.workspace_state(project)

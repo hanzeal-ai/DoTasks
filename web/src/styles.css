@@ -124,6 +124,9 @@ h2 { font-size: 15px; font-weight: 600; }
 dialog { width: min(520px, calc(100vw - 32px)); padding: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); color: var(--text); box-shadow: 0 20px 50px rgba(0, 0, 0, .17), 0 2px 10px rgba(0, 0, 0, .08); }
 dialog::backdrop { background: rgba(0, 0, 0, .24); backdrop-filter: blur(2px); }
 dialog form { display: grid; gap: 13px; padding: 20px; }
+.inline-checkbox { display: flex; align-items: center; gap: 8px; }
+.inline-checkbox input { width: auto; }
+.form-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .detail-dialog { width: min(720px, calc(100vw - 32px)); }
 .detail-shell { display: grid; max-height: min(720px, calc(100vh - 48px)); gap: 14px; padding: 20px; }
 .detail-content { display: grid; min-height: 120px; gap: 16px; overflow-y: auto; }
@@ -257,8 +260,17 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
 #view-title { max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 @media (max-width: 760px) {
-  .sidebar { flex-basis: 182px; }
-  header { padding-inline: 12px; }
+  .app-shell { flex-direction: column; }
+  .app-shell > main { min-height: 0; }
+  .sidebar { width: 100%; height: auto; flex: 0 0 auto; border-right: 0; border-bottom: 1px solid var(--border); }
+  .sidebar-brand, .sidebar-footer { display: none; }
+  .sidebar-nav { flex: 0 0 auto; padding: 6px; overflow: visible; }
+  .sidebar-primary-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .sidebar-item { justify-content: center; padding-inline: 6px; }
+  .sidebar-count { margin-left: 0; }
+  header { min-height: 52px; height: auto; padding: 8px 10px; gap: 8px; }
+  .header-actions { justify-content: flex-end; flex-wrap: wrap; gap: 5px; }
+  .header-actions .ghost, .header-actions .primary { height: 28px; padding-inline: 8px; }
   .health { display: none; }
   .integration-status { font-size: 0; gap: 0; }
   .integration-statuses { gap: 7px; }
@@ -268,6 +280,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
   .requirement-tasks { border-top: 1px solid var(--border); border-left: 0; }
   .requirement-task { align-items: flex-start; flex-direction: column; }
   .requirement-task-side { width: 100%; justify-content: space-between; }
+  dialog form { padding: 16px; }
 }
 
 @media (prefers-color-scheme: dark) {

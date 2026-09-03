@@ -52,7 +52,7 @@ Codex Skill 充当编排器，本地服务作为任务系统记录：
 ```text
 core/       任务创建、调度、工作流与生命周期等核心业务
 taskboard/  HTTP、MCP 与本地集成适配层
-taskboard/cloud/  云端安全入口、持久消息中继与 Obsidian 图谱镜像
+taskboard/cloud/  云端任务控制面、安全入口、WSS 通知与 Obsidian 图谱镜像
 web/        React + Vite 前端源码
 static/     Vite 生成的生产静态资源
 macos/      隐藏 Helper 的 Swift 源码与 Info.plist
@@ -62,8 +62,9 @@ macos/      隐藏 Helper 的 Swift 源码与 Info.plist
 
 ## 全新 Mac 安装与首次使用
 
-本地服务、Codex 原生任务、Git/Worktree 和 Helper 运行在 Mac 上；云端服务器只提供页面、
-消息中继和图谱镜像，不能替代本机 Codex。因此，一台全新的电脑至少需要完成下面五步。
+Codex 工作线程、Git/Worktree 和 Helper 运行在 Mac 上；启用云端后，任务数据库、状态机和
+调度器由云端持有，Mac 通过 Local Agent 领取任务并执行。云端不能替代本机 Codex，因此
+一台全新的执行电脑至少需要完成下面五步。
 
 ### 1. 准备运行环境
 
@@ -167,8 +168,8 @@ curl -fsS http://127.0.0.1:8765/api/health
 3. 显式输入 `$dotasks` 或提及 DoTasks 创建需求，也可以输入“打开任务看板”；
 4. 首次数据库默认暂停调度，在看板右上角点击“恢复调度”后再执行队列。
 
-不使用云端时，到这里即可完整使用 DoTasks。若已有云端 Relay，再按下方“云端部署与本地
-Agent”配置连接；云端断开不影响这个本地流程。
+不使用云端时，到这里即可完整使用本地模式。若已有云端服务，再按下方“云端部署与本地
+Agent”配置连接；配置后以云端数据为准，网络中断期间已有云端任务会等待 Agent 重连。
 
 ### 更新已有安装
 
@@ -227,19 +228,23 @@ HTTP 服务只允许绑定 `localhost` 或回环 IP。API 会校验 `Host` 与�
 
 ### 云端部署与本地 Agent
 
-云端模式沿用同一套页面和 `/api` 交互。云端 Relay 保存 Dispatch Outbox、Agent 在线状态和
-Obsidian Markdown 镜像；命令入队后通过 WSS 向 Local DoTasks Agent 发送轻量通知，Agent
-再通过 HTTPS 领取命令并提交回调。Local Agent 只建立出站连接，并把命令转发给现有的本地
-服务，不在云端执行项目代码。
+云端模式沿用同一套页面和 `/api` 交互，并由云端 SQLite（后续可替换 PostgreSQL）保存需求、
+任务、状态机、调度状态和 Dispatch Outbox。浏览器或手机直接读写云端数据，不再把 `/api`
+请求转发到 Mac，因此 Local Agent 离线时仍可新增需求和管理任务；待执行项会保留在云端队列。
 
-本地服务收到恢复调度或任务状态变更命令后，持久化 `scheduler_state.pending`。Local Agent
-在同一个 WSS 事件回合消费该信号，并使用 Codex CLI/App Server 的 `thread/start`、
-`thread/resume` 和 `turn/start` 创建、续接开发与 Review 工作线程；成功取得真实 `threadId`
-后才绑定 Dispatch。任务数据库、Git/Worktree、Diff、MCP 和 Codex 执行器都留在本机。
+每次会影响调度的状态变化都会持久化唤醒信号，并通过 WSS 向 Local DoTasks Agent 发送轻量
+通知。Agent 收到通知后通过 HTTPS 调用云端调度接口领取需求拆解、开发、返工或 Review，
+再使用本地 Codex CLI/App Server 的 `thread/start`、`thread/resume` 和 `turn/start` 创建或
+续接工作线程；生命周期 MCP 回调同样写回云端。Git、Worktree、Diff、项目源码和 Codex
+执行器仍只在 Mac 上。WSS 仅作事件唤醒，不使用周期性模型任务，空队列不会消耗模型 Token。
+
+首次连接新版空云端时，Agent 会把本地 SQLite 做一致性快照并上传一次；云端已有需求或任务
+后不会再覆盖。配置了 Cloud Agent 的普通 DoTasks MCP 和工作线程 MCP 都会访问云端权威数据。
 
 ```text
-浏览器 -> DoTasks Cloud / Dispatch Outbox
-                     | WSS 通知 + HTTPS 命令/回调
+浏览器/手机/MCP -> DoTasks Cloud
+                   任务数据库 / 状态机 / Dispatch Outbox
+                     | WSS 通知 + HTTPS 领取/回调
                      v
             Local DoTasks Agent
                      | event wake
@@ -268,6 +273,8 @@ Self-hosted Runner 使用 GitHub 默认标签 `self-hosted`、`Linux`、`X64`，
 出站 HTTPS 连接。GitHub 仓库的 Actions Secrets 只需配置：
 
 - `ECS_PUBLIC_IP`：浏览器访问 DoTasks 使用的公网 IPv4。
+- `DOTASKS_PUBLIC_URL`：可选；启用反向代理后填写 `https://tasks.example.com`，流水线会优先
+  使用它并把应用端口收回到 `127.0.0.1`。
 
 服务器只需 Runner、Docker、Docker Compose 和 `curl`，不需要代码仓库。两个流水线阶段
 分别使用当次短期 `GITHUB_TOKEN` 发布和拉取 GHCR 私有镜像，不保存长期 GHCR Token。
@@ -304,6 +311,12 @@ chmod +x ./deploy-cloud-ip
 自己的出口公网 IP，不要对 `0.0.0.0/0` 开放。脚本结尾会输出网页地址、登录信息和 Mac
 端 Agent 配置命令。IP 方案使用明文 HTTP，只适合短期联调；正式长期使用时应恢复仅本机
 监听，并通过 HTTPS 反向代理暴露域名。网页密码与 Agent Token 不能复用。
+
+切换 HTTPS 时，先让域名的 A 记录指向 ECS，并在安全组开放 TCP `80`、`443`。反向代理需
+把域名转发到 `127.0.0.1:8765` 且支持 WebSocket。随后将服务器 `.env` 中的
+`DOTASKS_PUBLIC_URL` 改为完整 HTTPS 地址、`DOTASKS_BIND_ADDRESS` 改为 `127.0.0.1`，在 GitHub
+Actions Secrets 新增同值的 `DOTASKS_PUBLIC_URL`，再用 `--reuse-env` 部署。最后把 Mac Agent 的
+`--cloud-url` 重新配置成 HTTPS 地址，并删除公网 `8765` 安全组规则。
 
 在运行 DoTasks 的 Mac 上执行一次配置：
 

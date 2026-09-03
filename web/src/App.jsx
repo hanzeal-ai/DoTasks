@@ -95,6 +95,14 @@ export default function App() {
                 调度状态
               </button>
               <button
+                id="new-requirement-button"
+                className="primary"
+                type="button"
+                hidden
+              >
+                新增需求
+              </button>
+              <button
                 id="task-change-confirmations"
                 className="primary change-confirmation-button"
                 type="button"
@@ -175,6 +183,55 @@ export default function App() {
             className="attention-tasks-content"
           ></div>
         </div>
+      </dialog>
+
+      <dialog id="new-requirement-dialog">
+        <form id="new-requirement-form">
+          <div className="dialog-head">
+            <div>
+              <p className="eyebrow">NEW REQUIREMENT</p>
+              <h2>新增需求</h2>
+            </div>
+            <button type="button" className="icon-button" data-close>
+              ×
+            </button>
+          </div>
+          <label>
+            标题
+            <input name="title" maxLength="120" required autoFocus />
+          </label>
+          <label>
+            Mac 项目绝对路径
+            <input
+              name="project"
+              list="known-project-paths"
+              placeholder="/Users/you/Documents/project"
+              required
+            />
+            <datalist id="known-project-paths"></datalist>
+          </label>
+          <label>
+            需求目标
+            <textarea name="goal" rows="5" required></textarea>
+          </label>
+          <label>
+            优先级
+            <select name="priority" defaultValue="P2">
+              <option value="P0">P0</option>
+              <option value="P1">P1</option>
+              <option value="P2">P2</option>
+              <option value="P3">P3</option>
+            </select>
+          </label>
+          <label className="inline-checkbox">
+            <input name="auto_dispatch" type="checkbox" defaultChecked />
+            保存后自动调度拆解
+          </label>
+          <div className="form-actions">
+            <button type="button" className="ghost" data-close>取消</button>
+            <button type="submit" className="primary">保存并调度</button>
+          </div>
+        </form>
       </dialog>
 
       <div id="toast" className="toast"></div>

@@ -9,10 +9,14 @@ import os
 import platform
 import signal
 import socket
+import sqlite3
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
+import zlib
+from contextlib import closing
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
@@ -20,6 +24,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .local_executor import LocalCodexExecutor
+from .remote_service import RemoteTaskboardService, RemoteToolClient
 from .version import VERSION
 from .websocket_transport import connect_websocket, encode_frame, read_frame
 
@@ -119,7 +124,16 @@ class RelayAgent:
         self.uploaded_vault_files: dict[str, str] = {}
         self.next_vault_sync_at = 0.0
         self.pending_result = self._load_pending_result()
-        self.executor = executor or LocalCodexExecutor(self.config.data_home)
+        self.executor = executor or LocalCodexExecutor(
+            self.config.data_home,
+            service=RemoteTaskboardService(
+                RemoteToolClient(
+                    self.config.cloud_url,
+                    self.config.agent_id,
+                    self.config.agent_token,
+                )
+            ),
+        )
 
     @property
     def pending_result_path(self) -> Path:
@@ -225,6 +239,37 @@ class RelayAgent:
             "python": platform.python_version(),
         }
 
+    def bootstrap_cloud_state(self) -> bool:
+        try:
+            status = self._cloud_request(
+                "/_agent/v1/bootstrap/status", {"agent_id": self.config.agent_id}
+            )
+        except urllib.error.HTTPError as exc:
+            if exc.code == HTTPStatus.NOT_FOUND:
+                return False
+            raise
+        if not status.get("accept_snapshot"):
+            return False
+        source = Path(self.config.data_home) / "data" / "taskboard.db"
+        if not source.is_file():
+            return False
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = Path(temporary) / "taskboard.db"
+            with closing(sqlite3.connect(source)) as source_connection:
+                with closing(sqlite3.connect(snapshot)) as target_connection:
+                    source_connection.backup(target_connection)
+            content = snapshot.read_bytes()
+        response = self._cloud_request(
+            "/_agent/v1/bootstrap",
+            {
+                "agent_id": self.config.agent_id,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "content": base64.b64encode(zlib.compress(content, level=9)).decode("ascii"),
+                "encoding": "zlib+base64",
+            },
+        )
+        return bool(response.get("imported"))
+
     def execute_command(self, command: dict[str, Any]) -> None:
         command_id = str(command["id"])
         path = str(command.get("path") or "")
@@ -309,6 +354,7 @@ class RelayAgent:
         if self.pending_result is not None:
             self._cloud_request("/_agent/v1/complete", self.pending_result)
             self._clear_pending_result()
+        self.bootstrap_cloud_state()
         if time.monotonic() >= self.next_vault_sync_at:
             self.sync_vault()
             self.next_vault_sync_at = time.monotonic() + 60
@@ -326,7 +372,11 @@ class RelayAgent:
                 if opcode != 0x1:
                     continue
                 event = json.loads(payload.decode("utf-8"))
-                if event.get("type") in {"connected", "command_available"}:
+                if event.get("type") in {
+                    "connected",
+                    "command_available",
+                    "state_changed",
+                }:
                     self.drain_commands()
                     self.executor.wake()
         finally:
