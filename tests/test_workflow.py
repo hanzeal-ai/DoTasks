@@ -861,8 +861,9 @@ class WorkflowTest(unittest.TestCase):
         )
         self.assertNotIn("artifact_path", review_context["diff_scope"])
         self.assertNotIn("artifact_sha256", review_context["diff_scope"])
-        self.assertLess(prompt.index("请审查以下代码变更："), prompt.index("$dotasks-lifecycle"))
-        self.assertLess(prompt.index("$dotasks-lifecycle"), prompt.index("RUN_CONTEXT_JSON="))
+        self.assertNotIn("$dotasks-lifecycle", prompt)
+        self.assertNotIn("dotasks:dotasks-lifecycle", prompt)
+        self.assertLess(prompt.index("请审查以下代码变更："), prompt.index("RUN_CONTEXT_JSON="))
 
     def test_missing_review_callback_retries_immediately_and_uses_latest_thread(self):
         task = self.task("missing-review-callback")

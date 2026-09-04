@@ -44,31 +44,11 @@ class NativeDispatchMixin:
             "execution": "开发",
             "rework": "返工",
             "bugfix": "Bug 修复",
-            "code_review": "Code Review",
+            "code_review": "Review",
             "requirement_decomposition": "需求拆解",
         }.get(role, "任务")
         entity_id = str(entity.get("id") or "UNKNOWN")
-        return f"[DoTaks] {entity_id} {role_label}"
-
-    @staticmethod
-    def _lifecycle_skill_attachment(
-        runtime_home: str | Path | None = None,
-    ) -> str:
-        root = (
-            Path(runtime_home).expanduser().resolve()
-            if runtime_home
-            else Path(__file__).resolve().parents[2]
-        )
-        skill_path = (
-            root
-            / "skills"
-            / "dotasks-lifecycle"
-            / "SKILL.md"
-        )
-        target = str(skill_path)
-        if " " in target:
-            target = f"<{target}>"
-        return f"[$dotasks:dotasks-lifecycle]({target})"
+        return f"[DoTasks] {entity_id} {role_label}"
 
     @staticmethod
     def _lifecycle_cli_fallback(
@@ -83,27 +63,24 @@ class NativeDispatchMixin:
         return f"DoTasks lifecycle CLI fallback: `{cli_path}`"
 
     @classmethod
-    def _attach_lifecycle_skill(
+    def _prepare_direct_dispatch_prompt(
         cls,
         prompt: str,
         runtime_home: str | Path | None = None,
     ) -> str:
         lines = prompt.strip().splitlines()
-        if lines and lines[0].startswith("[$dotasks:dotasks-lifecycle]("):
-            lines = lines[1:]
         lines = [
             line for line in lines
-            if not line.startswith("DoTasks lifecycle CLI fallback:")
+            if not line.startswith("[$dotasks:dotasks-lifecycle](")
+            and line.strip() != "$dotasks-lifecycle"
+            and not line.startswith("DoTasks lifecycle CLI fallback:")
         ]
         while lines and not lines[0].strip():
             lines = lines[1:]
         while lines and not lines[-1].strip():
             lines = lines[:-1]
         body = "\n".join(lines).strip()
-        return (
-            f"{cls._lifecycle_skill_attachment(runtime_home)}\n\n"
-            f"{body}\n\n{cls._lifecycle_cli_fallback(runtime_home)}"
-        )
+        return f"{body}\n\n{cls._lifecycle_cli_fallback(runtime_home)}"
 
     @classmethod
     def _native_dispatch_prompt(cls, claim: dict[str, Any]) -> str:
@@ -131,24 +108,22 @@ class NativeDispatchMixin:
                 if visual_references else ""
             )
             prompt = (
-                f"$dotasks-lifecycle\n\n{introduction}"
+                f"{introduction}"
                 f"需求 ID：{requirement.get('id')}\n"
                 f"拆解运行 ID：{run.get('id')}\n"
                 f"{visual_section}{instruction}"
                 "完成后调用 submit_requirement_decomposition；失败时调用 report_requirement_decomposition_failed。"
             )
-            return cls._attach_lifecycle_skill(prompt)
+            return cls._prepare_direct_dispatch_prompt(prompt)
         prompt = str(claim.get("dispatch_prompt") or "").strip()
-        if "$dotasks-lifecycle" not in prompt:
-            prompt = "$dotasks-lifecycle\n\n" + prompt
-        return cls._attach_lifecycle_skill(prompt)
+        return cls._prepare_direct_dispatch_prompt(prompt)
 
     def _decode_native_dispatch(self, row: Any) -> dict[str, Any]:
         item = dict(row)
         item["dispatch_attempt_id"] = str(item.get("dispatch_attempt_id") or "")
         if not item["dispatch_attempt_id"]:
             raise RuntimeError("Native dispatch is missing dispatch_attempt_id")
-        item["dispatch_prompt"] = self._attach_lifecycle_skill(
+        item["dispatch_prompt"] = self._prepare_direct_dispatch_prompt(
             str(item.get("dispatch_prompt") or "")
         )
         item["resume_required"] = bool(item.get("resume_thread_id"))

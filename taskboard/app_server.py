@@ -98,22 +98,17 @@ def sync_worker_thread_to_shared_home(
             same_file = source.samefile(destination)
         except OSError:
             same_file = False
+    temporary: Path | None = None
     if not same_file:
         temporary = destination.with_name(
             f".{destination.name}.{os.getpid()}.{threading.get_ident()}.tmp"
         )
         try:
             shutil.copy2(source, temporary)
-            os.replace(temporary, destination)
         except OSError as exc:
             raise AppServerError(
                 f"Cannot sync Codex worker session {normalized_id}: {exc}"
             ) from exc
-        finally:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
 
     worker_record = _latest_session_index_record(
         worker / "session_index.jsonl", normalized_id
@@ -148,9 +143,28 @@ def sync_worker_thread_to_shared_home(
             finally:
                 os.close(descriptor)
         except OSError as exc:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
             raise AppServerError(
                 f"Cannot update shared Codex session index: {shared_index}: {exc}"
             ) from exc
+    if temporary is not None:
+        try:
+            # Publish the visible rollout only after its title is indexed. The
+            # desktop may cache a title-less task as soon as this path appears.
+            os.replace(temporary, destination)
+        except OSError as exc:
+            raise AppServerError(
+                f"Cannot sync Codex worker session {normalized_id}: {exc}"
+            ) from exc
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
     return destination
 
 
@@ -160,7 +174,7 @@ def prepare_worker_codex_home(
     python_executable: str | Path | None = None,
     shared_codex_home: str | Path | None = None,
 ) -> Path:
-    """Prepare an isolated Codex store with only the DoTasks lifecycle MCP."""
+    """Prepare an isolated Codex store with only the DoTasks callback MCP."""
     data_path = Path(data_home).expanduser().resolve()
     runtime_path = Path(runtime_home).expanduser().resolve()
     target = data_path / "codex-worker-home"
@@ -179,16 +193,11 @@ def prepare_worker_codex_home(
         except FileExistsError:
             pass
 
-    skill_source = runtime_path / "skills" / "dotasks-lifecycle"
-    if not (skill_source / "SKILL.md").is_file():
-        raise AppServerError(f"DoTasks lifecycle skill not found: {skill_source}")
     skills = target / "skills"
     skills.mkdir(exist_ok=True)
     skill_target = skills / "dotasks-lifecycle"
-    if skill_target.is_symlink() and skill_target.resolve() != skill_source:
+    if skill_target.is_symlink():
         skill_target.unlink()
-    if not skill_target.exists():
-        skill_target.symlink_to(skill_source, target_is_directory=True)
 
     base_lines: list[str] = []
     source_config = shared / "config.toml"
@@ -390,9 +399,10 @@ class CodexAppServerClient:
                 },
                 "sandbox": "danger-full-access",
                 "baseInstructions": (
-                    "You are an autonomous DoTasks worker. Follow the persisted task prompt, "
-                    "preserve unrelated changes, verify the result, and finish through the "
-                    "DoTasks lifecycle callback."
+                    "You are an autonomous DoTasks worker. Treat the persisted task prompt as "
+                    "the authoritative stage contract, preserve unrelated changes, and verify "
+                    "the result. Submit the prompt's required DoTasks MCP callback exactly once, "
+                    "then finish this turn. Never claim or create another task from this worker."
                 ),
                 "developerInstructions": (
                     "Follow repository AGENTS.md instructions. Do not broaden scope, publish, "
@@ -407,12 +417,14 @@ class CodexAppServerClient:
         self._threads_to_sync[thread_id] = title
         return thread_id
 
-    def resume_thread(self, thread_id: str) -> str:
+    def resume_thread(self, thread_id: str, title: str = "") -> str:
         result = self.request("thread/resume", {"threadId": thread_id})
         resumed_id = str((result.get("thread") or {}).get("id") or "")
         if not resumed_id:
             raise AppServerError("thread/resume did not return a thread id")
-        self._threads_to_sync.setdefault(resumed_id, "")
+        if title:
+            self.request("thread/name/set", {"threadId": resumed_id, "name": title})
+        self._threads_to_sync[resumed_id] = title
         return resumed_id
 
     def _sync_completed_threads(self) -> None:
@@ -430,12 +442,23 @@ class CodexAppServerClient:
             except AppServerError as exc:
                 print(f"[dotasks-agent] session visibility sync failed: {exc}", file=sys.stderr)
 
-    def start_turn(self, thread_id: str, prompt: str) -> str:
+    def start_turn(
+        self,
+        thread_id: str,
+        prompt: str,
+        image_paths: list[str] | None = None,
+    ) -> str:
+        turn_input: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for value in image_paths or []:
+            path = Path(value).expanduser().resolve()
+            if not path.is_file():
+                raise AppServerError(f"Turn image input does not exist: {path}")
+            turn_input.append({"type": "localImage", "path": str(path)})
         result = self.request(
             "turn/start",
             {
                 "threadId": thread_id,
-                "input": [{"type": "text", "text": prompt}],
+                "input": turn_input,
                 "approvalPolicy": {
                     "granular": {
                         "mcp_elicitations": True,

@@ -57,22 +57,14 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertTrue(dispatch["dispatch_attempt_id"])
         self.assertEqual("claimed", self.service.get_task(task["id"])["status"])
         self.assertEqual("awaiting_thread", self.service.get_run(dispatch["run_id"])["status"])
-        self.assertEqual(f"[DoTaks] {task['id']} 开发", dispatch["dispatch_title"])
-        self.assertTrue(
-            dispatch["dispatch_prompt"].startswith(
-                "[$dotasks:dotasks-lifecycle]("
-            )
-        )
-        self.assertIn("/skills/dotasks-lifecycle/SKILL.md)", dispatch["dispatch_prompt"])
+        self.assertEqual(f"[DoTasks] {task['id']} 开发", dispatch["dispatch_title"])
+        self.assertTrue(dispatch["dispatch_prompt"].startswith("请完成以下任务："))
+        self.assertNotIn("dotasks:dotasks-lifecycle", dispatch["dispatch_prompt"])
         self.assertIn(
             "DoTasks lifecycle CLI fallback:", dispatch["dispatch_prompt"]
         )
         self.assertIn("/scripts/mcp-server`", dispatch["dispatch_prompt"])
-        self.assertIn("$dotasks-lifecycle", dispatch["dispatch_prompt"])
-        self.assertLess(
-            dispatch["dispatch_prompt"].index("请完成以下任务："),
-            dispatch["dispatch_prompt"].index("$dotasks-lifecycle"),
-        )
+        self.assertNotIn("$dotasks-lifecycle", dispatch["dispatch_prompt"])
         self.assertGreater(
             dispatch["dispatch_prompt"].index("DoTasks lifecycle CLI fallback:"),
             dispatch["dispatch_prompt"].index("RUN_CONTEXT_JSON="),
@@ -138,11 +130,11 @@ class TaskboardServiceTest(unittest.TestCase):
     def test_native_dispatch_titles_use_entity_id_and_stage_label(self):
         title = self.service._native_dispatch_title
         cases = (
-            ("execution", "TASK-0001", "[DoTaks] TASK-0001 开发"),
-            ("rework", "TASK-0001", "[DoTaks] TASK-0001 返工"),
-            ("bugfix", "BUG-0001", "[DoTaks] BUG-0001 Bug 修复"),
-            ("code_review", "TASK-0001", "[DoTaks] TASK-0001 Code Review"),
-            ("requirement_decomposition", "REQ-0001", "[DoTaks] REQ-0001 需求拆解"),
+            ("execution", "TASK-0001", "[DoTasks] TASK-0001 开发"),
+            ("rework", "TASK-0001", "[DoTasks] TASK-0001 返工"),
+            ("bugfix", "BUG-0001", "[DoTasks] BUG-0001 Bug 修复"),
+            ("code_review", "TASK-0001", "[DoTasks] TASK-0001 Review"),
+            ("requirement_decomposition", "REQ-0001", "[DoTasks] REQ-0001 需求拆解"),
         )
         for role, entity_id, expected in cases:
             entity_key = "requirement" if role == "requirement_decomposition" else "task"
@@ -1564,7 +1556,7 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertEqual(200, next(item["token_used"] for item in analytics["daily"] if item["date"] == "2026-08-20"))
         self.assertEqual(100, analytics["daily"][-1]["token_used"])
 
-    def test_execution_prompt_explicitly_invokes_lifecycle_skill(self):
+    def test_execution_prompt_uses_direct_lifecycle_callbacks(self):
         task = self.create_ready_task()
 
         claimed = self.service.claim_next_task("test-worker", task["project"])
@@ -1574,8 +1566,9 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertIn(f"标题：{task['title']}", prompt)
         self.assertIn(f"目标：{task['goal']}", prompt)
         self.assertIn("验收标准：", prompt)
-        self.assertLess(prompt.index("请完成以下任务："), prompt.index("$dotasks-lifecycle"))
-        self.assertLess(prompt.index("$dotasks-lifecycle"), prompt.index("RUN_CONTEXT_JSON="))
+        self.assertNotIn("$dotasks-lifecycle", prompt)
+        self.assertNotIn("dotasks:dotasks-lifecycle", prompt)
+        self.assertLess(prompt.index("请完成以下任务："), prompt.index("RUN_CONTEXT_JSON="))
         self.assertIn(task["id"], prompt)
         self.assertIn(claimed["run"]["id"], prompt)
         self.assertIn("完成：调用 submit_task_delivery", prompt)

@@ -234,6 +234,14 @@ function deleteIcon() {
 
 function taskConversationControl(task) {
   const conversations = Array.isArray(task.conversations) ? [...task.conversations].reverse() : [];
+  if (task.status === "done") {
+    const options = conversations.map(item => {
+      const role = conversationRoleLabels[item.role] || item.role || "会话";
+      const title = item.title && item.title !== role ? ` · ${item.title}` : "";
+      return `<option value="${escapeHtml(item.thread_id)}">${escapeHtml(role + title)}</option>`;
+    }).join("");
+    return `<label class="conversation-select${options ? "" : " disabled"}" title="选择要打开的会话">${conversationIcon()}<select data-thread-select aria-label="选择要打开的会话"${options ? "" : " disabled"}><option value="">${options ? "选择会话" : "暂无会话"}</option>${options}</select></label>`;
+  }
   const conversation = selectTaskConversation(task);
   if (!conversation) return `<button class="small conversation-button" type="button" aria-label="暂无可查看会话" title="暂无可查看会话" disabled>${conversationIcon()}</button>`;
   const label = conversationRoleLabels[conversation.role] || "会话";
@@ -756,6 +764,13 @@ document.addEventListener("click", async event => {
 });
 
 document.addEventListener("change", event => {
+  const threadSelect = event.target.closest("[data-thread-select]");
+  if (threadSelect?.value) {
+    const threadId = threadSelect.value;
+    threadSelect.value = "";
+    window.location.href = `codex://threads/${encodeURIComponent(threadId)}`;
+    return;
+  }
   const select = event.target.closest("[data-project-select]");
   if (!select) return;
   const manual = select.closest("form").querySelector("[data-manual-project]");

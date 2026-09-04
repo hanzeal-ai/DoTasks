@@ -1,12 +1,12 @@
 # Taskboard Management and Review
 
-Read this reference only for explicit dispatch, review, rework, traceability, relation, or board-management requests. DoTasks-generated lifecycle conversations use `$dotasks-lifecycle` instead.
+Read this reference only for explicit dispatch, review, rework, traceability, relation, or board-management requests. DoTasks-generated workers use a self-contained stage prompt instead.
 
 ## Dispatch and execution
 
 - Do not implement a queued task in the intake or dispatcher conversation.
 - The Local DoTasks Agent calls `claim_schedule_cycle` as the only automatic scheduling entry. One event-driven cycle fills the independent `code_review` and `development` lanes: Code Review has one slot and development uses the configured parallel slot count. All claims preserve dependency, project-exclusive, target-lock and isolated-Worktree gates. Requirement decomposition shares a development slot.
-- A new or resumed Codex CLI/App Server worker must use the persisted `$dotasks-lifecycle` prompt and be bound with `bind_native_dispatch` only after a real CLI thread ID exists.
+- A new or resumed Codex CLI/App Server worker must use the persisted self-contained stage prompt and be bound with `bind_native_dispatch` only after a real CLI thread ID exists.
 - Execution starts from saved targets, location evidence, acceptance plan and `RUN_CONTEXT_JSON`. Current code is authoritative; expand location only when a saved target is missing or contradicted.
 - Only `submit_task_delivery` moves implementation into code review. It requires exact in-lock changed locations and criterion-level evidence. Store a compact conversation summary after delivery.
 - A material new product decision moves the task to `waiting_confirmation`; an external blocker is reported concretely.

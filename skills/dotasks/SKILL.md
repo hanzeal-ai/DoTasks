@@ -10,7 +10,7 @@ description: Manually invoke DoTasks to clarify, create, relate, and inspect tra
 - Treat DoTasks intake as opt-in. Do not call DoTasks MCP tools or create DoTasks records for ordinary development requests.
 - Activate only through an explicit `$dotasks` invocation, plugin selection, or a user request that explicitly names DoTasks and asks to use, open, or manage it.
 - Do not infer activation from the current repository, task-like wording, or general requests such as “清空任务”, “增加需求”, “实现这个功能”, or “开始验收”. Ask which task system the user means when the target is ambiguous.
-- Do not use this manual skill in DoTasks-generated execution, rework, or review conversations. Those prompts must explicitly invoke `$dotasks-lifecycle`.
+- Do not use this manual skill in DoTasks-generated execution, rework, or review conversations. Those workers receive a self-contained stage prompt and call the allowed DoTasks MCP completion tool directly.
 - After activation, use the DoTasks MCP tools as the task system of record for that task only.
 - A successful `finalize_task_intake` for `auto_dispatch=true` with
   `controller_kickoff_required=true` is

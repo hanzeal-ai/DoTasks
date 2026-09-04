@@ -1367,7 +1367,6 @@ class TaskLifecycleMixin:
             )
             return (
                 f"{task_brief}\n\n---\n\n"
-                "$dotasks-lifecycle\n\n"
                 "这是无项目 Codex 任务。不要进行代码定位，不要修改或创建文件；"
                 "直接完成任务目标并在当前会话中给出结果。\n\n"
                 "运行信息：\n"
@@ -1384,7 +1383,6 @@ class TaskLifecycleMixin:
             )
             return (
                 f"{task_brief}\n\n---\n\n"
-                "$dotasks-lifecycle\n\n"
                 "这是项目只读任务。可以读取项目文件并执行只读验证，但不要修改、创建或删除文件；"
                 "targets 为空时以任务目标和验收计划为准，targets 非空时仅将其作为允许读取的定位范围。\n\n"
                 "运行信息：\n"
@@ -1429,7 +1427,6 @@ class TaskLifecycleMixin:
         retry_section = f"返工或重试要求：{retry_note}\n\n" if retry_note else ""
         return (
             f"{task_brief}\n\n---\n\n"
-            "$dotasks-lifecycle\n\n"
             "运行信息：\n"
             f"- 任务 ID：{task['id']}\n"
             f"- 运行 ID：{run_id}\n"
@@ -1457,7 +1454,6 @@ class TaskLifecycleMixin:
         )
         return (
             f"{task_brief}\n\n---\n\n"
-            "$dotasks-lifecycle\n\n"
             "Code Review 阶段只使用提示内的 RUN_CONTEXT_JSON，不要搜索工具目录、数据库或任务详情。\n"
             "Diff 必须且只能通过现成 Git 命令获取：以 diff_scope.workspace_path 为工作区，先执行 "
             "git -C <workspace_path> status --short -- <changed_files>，再执行 "

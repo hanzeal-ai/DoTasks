@@ -214,7 +214,7 @@ npm --prefix web run dev
 npm --prefix web run build
 ```
 
-新建运行数据库默认关闭调度。需要执行队列时，在看板中点击“恢复调度”；HTTP 层会同时开启调度并写入持久化 Agent 信号。恢复操作及之后每个任务/Run 状态流转都会写入 `scheduler_state`。云端通过 WSS 通知常驻 Local Agent，Agent 只在收到真实事件或已有工作线程结束时领取需求拆解、开发、返工和 Code Review；没有周期性 heartbeat，也不会在空队列上消耗模型 Token。工作线程通过 `$dotasks-lifecycle` 完成当前阶段并将结果回调 MCP。
+新建运行数据库默认关闭调度。需要执行队列时，在看板中点击“恢复调度”；HTTP 层会同时开启调度并写入持久化 Agent 信号。恢复操作及之后每个任务/Run 状态流转都会写入 `scheduler_state`。云端通过 WSS 通知常驻 Local Agent，Agent 只在收到真实事件或已有工作线程结束时领取需求拆解、开发、返工和 Code Review；没有周期性 heartbeat，也不会在空队列上消耗模型 Token。工作线程使用阶段自包含 Prompt，并通过限定的 DoTasks MCP 回调完成当前阶段。
 
 Local Agent 通过 `codex app-server` 的 `thread/start`、`thread/resume` 和 `turn/start` 创建或续接工作线程；拿到真实 `threadId` 后才调用 `bind_native_dispatch`，因此任务领取状态不会领先于真实执行会话。Worker 继续使用只暴露生命周期 MCP 的隔离 `CODEX_HOME`；进程停止并完成会话落盘后，Agent 会将对应会话文件原子同步到主 `CODEX_HOME` 并合并会话索引，使看板中的 `codex://threads/...` 链接可由 Codex 桌面端读取，同时避免两个 App Server 并发写同一会话。生命周期回调产生的新唤醒在当前工作线程结束后立即由 Agent 消费；线程异常退出且没有提交回调时，Agent 回写派发失败并交给现有重试/熔断策略。设置页可开启并行开发并配置 1–8 个开发槽位（默认关闭、默认并发数 2）；Worktree 模式仍从固定 `base_ref` 创建隔离工作区。每个派发保留独立 `dispatch_attempt_id`，过期回调不能绑定到新的派发尝试。
 
@@ -379,7 +379,7 @@ skills/dotasks-lifecycle/SKILL.md
 把TASK-0012标记为TASK-0004的变更任务。
 ```
 
-Local Agent 生成的需求拆解、执行、返工和 Code Review 提示会显式调用 `$dotasks-lifecycle`。该内部 Skill 同样禁止语义自动调用，并要求提示包含对应的实体 ID 与运行 ID。Agent 会等待已绑定的 CLI 工作线程结束并复核持久化 Dispatch；若线程已经结束却没有提交生命周期回调，会中断未提交的 Run 并按现有重试策略恢复，而不是让任务永久停留在执行或 Code Review 状态。
+Local Agent 生成的需求拆解、执行、返工和 Code Review 提示均为自包含阶段契约，不再附加或调用 lifecycle Skill；Prompt 直接给出实体 ID、运行 ID、允许的完成工具和回调要求。Agent 会等待已绑定的 CLI 工作线程结束并复核持久化 Dispatch；若线程已经结束却没有提交生命周期回调，会中断未提交的 Run 并按现有重试策略恢复，而不是让任务永久停留在执行或 Code Review 状态。
 
 插件只提供 Skill、MCP 与会话工具，不再向 Codex 左侧面板注入入口。生产方式使用隐藏的签名 Helper 启动 DoTasks 服务：
 

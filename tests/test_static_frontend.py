@@ -279,6 +279,13 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
             "function renderTaskChangeConfirmations()", 1
         )[0]
         self.assertIn("taskConversationControl(task)", completed_renderer)
+        conversation_control = app.split("function taskConversationControl(task)", 1)[1].split(
+            "function taskRecoveryButton", 1
+        )[0]
+        self.assertIn('task.status === "done"', conversation_control)
+        self.assertIn("data-thread-select", conversation_control)
+        self.assertIn("选择会话", conversation_control)
+        self.assertIn('event.target.closest("[data-thread-select]")', app)
         self.assertIn("deleteIcon()", completed_renderer)
         self.assertIn("data-delete-completed-task", completed_renderer)
         self.assertIn('api(`/api/tasks/${taskId}/delete`', app)

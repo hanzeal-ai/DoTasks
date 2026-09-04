@@ -107,38 +107,58 @@ class LocalCodexExecutor:
             )
         launched = 0
         for dispatch in dispatches:
+            run_id = str(dispatch.get("run_id") or "")
+            with self._active_lock:
+                if run_id and run_id in self._active_runs:
+                    continue
             localized = self._localize_dispatch_prompt(dispatch)
             if self._launch(localized):
                 launched += 1
-            else:
-                self._cleanup_dispatch_visuals(localized)
         return launched
 
     def _localize_dispatch_prompt(self, dispatch: dict[str, Any]) -> dict[str, Any]:
         localized = dict(dispatch)
-        prompt = TaskboardService._attach_lifecycle_skill(
+        prompt = TaskboardService._prepare_direct_dispatch_prompt(
             str(dispatch.get("dispatch_prompt") or ""),
             runtime_home=self.runtime_home,
         )
+        if (
+            str(localized.get("execution_environment") or "local") != "projectless"
+            and str(localized.get("entity_id") or "").strip()
+        ):
+            entity_key = (
+                "requirement"
+                if str(localized.get("role") or "") == "requirement_decomposition"
+                else "task"
+            )
+            localized["dispatch_title"] = TaskboardService._native_dispatch_title(
+                {
+                    "run": {"run_type": str(localized.get("role") or "")},
+                    entity_key: {"id": str(localized["entity_id"])},
+                }
+            )
         local_paths: list[str] = []
+        input_image_paths: list[str] = []
         for marker in (
             "RUN_CONTEXT_JSON=",
             "REQUIREMENT_VISUAL_REFERENCES_JSON=",
         ):
-            prompt, paths = self._localize_prompt_visuals(
+            prompt, paths, image_paths = self._localize_prompt_visuals(
                 prompt, marker, str(dispatch.get("run_id") or "")
             )
             local_paths.extend(paths)
+            input_image_paths.extend(image_paths)
         localized["dispatch_prompt"] = prompt
-        localized["local_visual_paths"] = local_paths
+        localized["local_visual_paths"] = list(dict.fromkeys(local_paths))
+        localized["input_image_paths"] = list(dict.fromkeys(input_image_paths))
         return localized
 
     def _localize_prompt_visuals(
         self, prompt: str, marker: str, run_id: str,
-    ) -> tuple[str, list[str]]:
+    ) -> tuple[str, list[str], list[str]]:
         offset = prompt.find(marker)
         if offset < 0:
-            return prompt, []
+            return prompt, [], []
         start = offset + len(marker)
         try:
             payload, length = json.JSONDecoder().raw_decode(prompt[start:])
@@ -150,21 +170,24 @@ class LocalCodexExecutor:
             else payload
         )
         if not isinstance(references, list) or not references:
-            return prompt, []
+            return prompt, [], []
         localized_references: list[dict[str, Any]] = []
         local_paths: list[str] = []
+        input_image_paths: list[str] = []
         for item in references:
             if not isinstance(item, dict):
                 raise ValueError("Dispatch visual reference must be an object")
             reference = dict(item)
-            existing = Path(str(reference.get("path") or "")).expanduser()
+            existing = Path(str(reference.get("path") or "")).expanduser().resolve()
             if existing.is_file():
                 expected = str(reference.get("sha256") or "").strip()
                 if not expected or hashlib.sha256(existing.read_bytes()).hexdigest() != expected:
                     raise ValueError(
                         f"Dispatch visual artifact checksum failed: {reference.get('artifact_id') or existing}"
                     )
+                reference["path"] = str(existing)
                 localized_references.append(reference)
+                input_image_paths.append(str(existing))
                 continue
             artifact_id = str(reference.get("artifact_id") or "").strip()
             if not artifact_id or not hasattr(self.service, "read_visual_artifact"):
@@ -206,13 +229,18 @@ class LocalCodexExecutor:
             })
             localized_references.append(reference)
             local_paths.append(str(target))
+            input_image_paths.append(str(target))
         if isinstance(payload, dict):
             payload = dict(payload)
             payload["visual_references"] = localized_references
         else:
             payload = localized_references
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        return prompt[:start] + encoded + prompt[start + length:], local_paths
+        return (
+            prompt[:start] + encoded + prompt[start + length:],
+            local_paths,
+            input_image_paths,
+        )
 
     def _cleanup_dispatch_visuals(self, dispatch: dict[str, Any]) -> None:
         paths = [Path(path) for path in dispatch.get("local_visual_paths") or []]
@@ -273,7 +301,11 @@ class LocalCodexExecutor:
                 resume_fallback_reason=fallback_reason,
                 dispatch_attempt_id=str(dispatch.get("dispatch_attempt_id") or ""),
             )
-            turn_id = client.start_turn(thread_id, str(dispatch["dispatch_prompt"]))
+            turn_id = client.start_turn(
+                thread_id,
+                str(dispatch["dispatch_prompt"]),
+                image_paths=list(dispatch.get("input_image_paths") or []),
+            )
             status, error = self._wait_for_turn(client, thread_id, turn_id, run_id)
             if self._stop_event.is_set():
                 return
@@ -317,7 +349,9 @@ class LocalCodexExecutor:
         resume_id = existing_bound or str(dispatch.get("resume_thread_id") or "")
         if resume_id:
             try:
-                return client.resume_thread(resume_id), ""
+                return client.resume_thread(
+                    resume_id, str(dispatch["dispatch_title"])
+                ), ""
             except AppServerError as exc:
                 if existing_bound:
                     raise

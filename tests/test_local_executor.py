@@ -60,6 +60,7 @@ class FakeClient:
         self.connected = True
         self.last_error = ""
         self.started_prompt = ""
+        self.started_image_paths = []
 
     def start(self):
         pass
@@ -71,12 +72,13 @@ class FakeClient:
         self.created = (project_path, title)
         return "cli-thread-1"
 
-    def resume_thread(self, thread_id):
-        self.resumed = thread_id
+    def resume_thread(self, thread_id, title=""):
+        self.resumed = (thread_id, title)
         return thread_id
 
-    def start_turn(self, thread_id, prompt):
+    def start_turn(self, thread_id, prompt, image_paths=None):
         self.started_prompt = prompt
+        self.started_image_paths = list(image_paths or [])
         if self.close_lifecycle:
             self.service.status = "completed"
         return "turn-1"
@@ -94,10 +96,12 @@ class FakeClient:
 def make_dispatch(**overrides):
     dispatch = {
         "run_id": "RUN-0001",
+        "entity_id": "TASK-0001",
+        "role": "execution",
         "dispatch_attempt_id": "attempt-1",
         "project_path": "/tmp/project",
-        "dispatch_title": "[DoTasks] TASK-0001 开发",
-        "dispatch_prompt": "$dotasks-lifecycle\nBuild it",
+        "dispatch_title": "[DoTaks] TASK-0001 开发",
+        "dispatch_prompt": "Build it",
         "thread_id": "",
         "resume_thread_id": "",
     }
@@ -130,7 +134,7 @@ class LocalCodexExecutorTest(unittest.TestCase):
         self.assertEqual([("RUN-0001", "cli-thread-1")], service.bindings)
         self.assertEqual([], service.failures)
 
-    def test_dispatch_rewrites_cloud_lifecycle_paths_to_local_runtime(self):
+    def test_dispatch_removes_legacy_skill_and_localizes_callback_path(self):
         service = FakeService(None)
         executor = self.build_executor(service, close_lifecycle=True)
         dispatch = make_dispatch(
@@ -144,15 +148,29 @@ class LocalCodexExecutorTest(unittest.TestCase):
         localized = executor._localize_dispatch_prompt(dispatch)
 
         self.assertNotIn("/app/", localized["dispatch_prompt"])
-        self.assertIn(
-            str(executor.runtime_home / "skills/dotasks-lifecycle/SKILL.md"),
-            localized["dispatch_prompt"],
-        )
+        self.assertNotIn("dotasks-lifecycle", localized["dispatch_prompt"])
         self.assertIn(
             str(executor.runtime_home / "scripts/mcp-server"),
             localized["dispatch_prompt"],
         )
+        self.assertEqual("[DoTasks] TASK-0001 开发", localized["dispatch_title"])
         self.assertIn("/app/", dispatch["dispatch_prompt"])
+
+    def test_review_dispatch_uses_visible_review_title_contract(self):
+        service = FakeService(None)
+        executor = self.build_executor(service, close_lifecycle=True)
+
+        localized = executor._localize_dispatch_prompt(
+            make_dispatch(
+                entity_id="TASK-0005",
+                role="code_review",
+                dispatch_title="[DoTaks] TASK-0005 Code Review",
+                dispatch_prompt="$dotasks-lifecycle\nReview it",
+            )
+        )
+
+        self.assertEqual("[DoTasks] TASK-0005 Review", localized["dispatch_title"])
+        self.assertNotIn("$dotasks-lifecycle", localized["dispatch_prompt"])
 
     def test_dispatch_downloads_server_visual_and_rewrites_prompt_path(self):
         service = FakeService(None)
@@ -181,10 +199,80 @@ class LocalCodexExecutorTest(unittest.TestCase):
 
         self.assertNotIn("/app/data/missing.png", localized["dispatch_prompt"])
         self.assertEqual(1, len(localized["local_visual_paths"]))
+        self.assertEqual(localized["local_visual_paths"], localized["input_image_paths"])
         local_path = Path(localized["local_visual_paths"][0])
         self.assertEqual(content, local_path.read_bytes())
         executor._cleanup_dispatch_visuals(localized)
         self.assertFalse(local_path.exists())
+
+    def test_duplicate_active_dispatch_preserves_worker_visual(self):
+        content = b"\x89PNG\r\n\x1a\nactive-worker-visual"
+        digest = hashlib.sha256(content).hexdigest()
+        service = FakeService(None)
+        executor = self.build_executor(service, close_lifecycle=True)
+        local_path = (
+            executor.data_home
+            / "artifacts"
+            / "dispatch-visuals"
+            / "RUN-0001"
+            / f"{digest}.png"
+        )
+        local_path.parent.mkdir(parents=True)
+        local_path.write_bytes(content)
+        service.dispatch = make_dispatch(
+            dispatch_prompt=(
+                "$dotasks-lifecycle\n"
+                "RUN_CONTEXT_JSON={\"visual_references\":[{\"path\":\""
+                + str(local_path)
+                + "\",\"sha256\":\""
+                + digest
+                + "\"}]}\n\n完成后上报"
+            )
+        )
+        executor._active_runs.add("RUN-0001")
+
+        self.assertEqual(0, executor.dispatch_once())
+
+        self.assertEqual(content, local_path.read_bytes())
+        executor._cleanup_dispatch_visuals({"local_visual_paths": [str(local_path)]})
+
+    def test_dispatch_attaches_server_visual_to_codex_turn(self):
+        content = b"\x89PNG\r\n\x1a\nturn-input-visual"
+        digest = hashlib.sha256(content).hexdigest()
+        artifact_id = f"artifact://visuals/{digest}.png"
+        service = FakeService(
+            make_dispatch(
+                dispatch_prompt=(
+                    "$dotasks-lifecycle\n"
+                    "RUN_CONTEXT_JSON={\"visual_references\":[{\"artifact_id\":\""
+                    + artifact_id
+                    + "\",\"path\":\"/app/data/missing.png\",\"sha256\":\""
+                    + digest
+                    + "\"}]}\n\n完成后上报"
+                )
+            )
+        )
+        service.visual_artifacts[artifact_id] = {
+            "artifact_id": artifact_id,
+            "content_type": "image/png",
+            "sha256": digest,
+            "content_base64": base64.b64encode(content).decode("ascii"),
+        }
+        clients: list[FakeClient] = []
+        executor = self.build_executor(service, close_lifecycle=True)
+
+        def factory(**kwargs):
+            client = FakeClient(service, True, **kwargs)
+            clients.append(client)
+            return client
+
+        executor.client_factory = factory
+
+        self.assertEqual(1, executor.dispatch_once())
+        executor.wait_for_workers()
+
+        self.assertEqual(1, len(clients[0].started_image_paths))
+        self.assertTrue(clients[0].started_image_paths[0].endswith(f"{digest}.png"))
 
     def test_completed_turn_without_callback_is_failed_and_wakes_next_cycle(self):
         service = FakeService(make_dispatch())
@@ -210,7 +298,9 @@ class LocalCodexExecutorTest(unittest.TestCase):
         executor.dispatch_once()
         executor.wait_for_workers()
 
-        self.assertEqual("cli-thread-1", clients[0].resumed)
+        self.assertEqual(
+            ("cli-thread-1", "[DoTasks] TASK-0001 开发"), clients[0].resumed
+        )
         self.assertEqual([("RUN-0001", "cli-thread-1")], service.bindings)
 
     def test_worktree_dispatch_uses_pinned_isolated_checkout(self):
