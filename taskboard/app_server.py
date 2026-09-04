@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,40 @@ from .version import VERSION
 
 class AppServerError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class WorkerExecutionPolicy:
+    """Authoritative permissions contract for autonomous DoTasks workers."""
+
+    sandbox_mode: str = "danger-full-access"
+    sandbox_policy_type: str = "dangerFullAccess"
+    approval_policy_name: str = "never"
+
+    @staticmethod
+    def approval_policy() -> dict[str, Any]:
+        return {
+            "granular": {
+                "mcp_elicitations": True,
+                "rules": False,
+                "sandbox_approval": False,
+            }
+        }
+
+    def thread_overrides(self) -> dict[str, Any]:
+        return {
+            "approvalPolicy": self.approval_policy(),
+            "sandbox": self.sandbox_mode,
+        }
+
+    def turn_overrides(self) -> dict[str, Any]:
+        return {
+            "approvalPolicy": self.approval_policy(),
+            "sandboxPolicy": {"type": self.sandbox_policy_type},
+        }
+
+
+WORKER_EXECUTION_POLICY = WorkerExecutionPolicy()
 
 
 LIFECYCLE_TOOLS = {
@@ -214,9 +249,10 @@ def prepare_worker_codex_home(
     python_bin = str(Path(python_executable or sys.executable).expanduser().resolve())
     config_lines = [
         *base_lines,
+        f"approval_policy = {json.dumps(WORKER_EXECUTION_POLICY.approval_policy_name)}",
+        f"sandbox_mode = {json.dumps(WORKER_EXECUTION_POLICY.sandbox_mode)}",
         "",
         "[mcp_servers.dotasks]",
-        'type = "stdio"',
         f"command = {json.dumps(python_bin)}",
         f"args = {json.dumps(['-B', '-m', 'taskboard.mcp_server'])}",
         f"cwd = {json.dumps(str(runtime_path))}",
@@ -390,14 +426,7 @@ class CodexAppServerClient:
                 "ephemeral": False,
                 "serviceName": "dotasks-agent",
                 "threadSource": "dotasks",
-                "approvalPolicy": {
-                    "granular": {
-                        "mcp_elicitations": True,
-                        "rules": False,
-                        "sandbox_approval": False,
-                    }
-                },
-                "sandbox": "danger-full-access",
+                **WORKER_EXECUTION_POLICY.thread_overrides(),
                 "baseInstructions": (
                     "You are an autonomous DoTasks worker. Treat the persisted task prompt as "
                     "the authoritative stage contract, preserve unrelated changes, and verify "
@@ -418,7 +447,13 @@ class CodexAppServerClient:
         return thread_id
 
     def resume_thread(self, thread_id: str, title: str = "") -> str:
-        result = self.request("thread/resume", {"threadId": thread_id})
+        result = self.request(
+            "thread/resume",
+            {
+                "threadId": thread_id,
+                **WORKER_EXECUTION_POLICY.thread_overrides(),
+            },
+        )
         resumed_id = str((result.get("thread") or {}).get("id") or "")
         if not resumed_id:
             raise AppServerError("thread/resume did not return a thread id")
@@ -448,6 +483,7 @@ class CodexAppServerClient:
         prompt: str,
         image_paths: list[str] | None = None,
     ) -> str:
+        self.ensure_worker_settings(thread_id)
         turn_input: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         for value in image_paths or []:
             path = Path(value).expanduser().resolve()
@@ -459,14 +495,7 @@ class CodexAppServerClient:
             {
                 "threadId": thread_id,
                 "input": turn_input,
-                "approvalPolicy": {
-                    "granular": {
-                        "mcp_elicitations": True,
-                        "rules": False,
-                        "sandbox_approval": False,
-                    }
-                },
-                "sandboxPolicy": {"type": "dangerFullAccess"},
+                **WORKER_EXECUTION_POLICY.turn_overrides(),
                 "effort": "medium",
                 "turnTrigger": "dotasks_dispatch",
             },
@@ -475,6 +504,40 @@ class CodexAppServerClient:
         if not turn_id:
             raise AppServerError("turn/start did not return a turn id")
         return turn_id
+
+    def ensure_worker_settings(self, thread_id: str) -> None:
+        self.request(
+            "thread/settings/update",
+            {
+                "threadId": thread_id,
+                **WORKER_EXECUTION_POLICY.turn_overrides(),
+            },
+        )
+
+    def interrupt_turn(self, thread_id: str, turn_id: str) -> None:
+        self.request(
+            "turn/interrupt",
+            {"threadId": thread_id, "turnId": turn_id},
+        )
+
+    @staticmethod
+    def has_worker_permission_drift(
+        notification: dict[str, Any], thread_id: str
+    ) -> bool:
+        method = str(notification.get("method") or "")
+        if method not in {"thread/settings/updated", "thread_settings_applied"}:
+            return False
+        params = notification.get("params") or notification.get("payload") or {}
+        target_thread = str(params.get("threadId") or params.get("thread_id") or "")
+        if target_thread and target_thread != thread_id:
+            return False
+        settings = params.get("threadSettings") or params.get("thread_settings") or {}
+        sandbox = settings.get("sandboxPolicy") or settings.get("sandbox_policy") or {}
+        sandbox_type = str(sandbox.get("type") or "")
+        return bool(
+            sandbox_type
+            and sandbox_type != WORKER_EXECUTION_POLICY.sandbox_policy_type
+        )
 
     def _write(self, payload: dict[str, Any]) -> None:
         process = self.process

@@ -1,6 +1,6 @@
 {
   "name": "dotasks",
-  "version": "0.1.0+codex.20260904024429",
+  "version": "0.1.0+codex.20260904031009",
   "description": "Queue work and orchestrate traceable delivery through visible native Codex tasks.",
   "author": {
     "name": "sanmws"

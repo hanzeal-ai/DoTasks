@@ -11,6 +11,8 @@ from taskboard.app_server import (
     AppServerError,
     CodexAppServerClient,
     LIFECYCLE_TOOLS,
+    WORKER_EXECUTION_POLICY,
+    prepare_worker_codex_home,
     sync_worker_thread_to_shared_home,
 )
 
@@ -133,7 +135,13 @@ class WorkerSessionVisibilityTest(unittest.TestCase):
         self.assertEqual(self.thread_id, resumed_id)
         self.assertEqual(
             [
-                call("thread/resume", {"threadId": self.thread_id}),
+                call(
+                    "thread/resume",
+                    {
+                        "threadId": self.thread_id,
+                        **WORKER_EXECUTION_POLICY.thread_overrides(),
+                    },
+                ),
                 call(
                     "thread/name/set",
                     {"threadId": self.thread_id, "name": title},
@@ -142,6 +150,71 @@ class WorkerSessionVisibilityTest(unittest.TestCase):
             request.call_args_list,
         )
         self.assertEqual(title, client._threads_to_sync[self.thread_id])
+
+
+class WorkerPermissionPolicyTest(unittest.TestCase):
+    def test_worker_home_persists_autonomous_permission_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root)
+            worker_home = prepare_worker_codex_home(
+                path / "data",
+                Path(__file__).resolve().parents[1],
+                shared_codex_home=path / "shared",
+            )
+
+            config = (worker_home / "config.toml").read_text(encoding="utf-8")
+
+        self.assertIn('approval_policy = "never"', config)
+        self.assertIn('sandbox_mode = "danger-full-access"', config)
+
+    def test_thread_start_uses_worker_permission_contract(self) -> None:
+        client = CodexAppServerClient(
+            tempfile.gettempdir(),
+            Path(__file__).resolve().parents[1],
+            executable="codex",
+        )
+        requests: list[tuple[str, dict]] = []
+
+        def request(method: str, params: dict) -> dict:
+            requests.append((method, params))
+            return {"thread": {"id": "thread-1"}} if method == "thread/start" else {}
+
+        client.request = request  # type: ignore[method-assign]
+
+        self.assertEqual("thread-1", client.start_thread("/tmp/project", "Task"))
+
+        self.assertEqual("thread/start", requests[0][0])
+        for key, value in WORKER_EXECUTION_POLICY.thread_overrides().items():
+            self.assertEqual(value, requests[0][1][key])
+
+    def test_restricted_thread_settings_are_detected_as_permission_drift(self) -> None:
+        restricted = {
+            "method": "thread/settings/updated",
+            "params": {
+                "threadId": "thread-1",
+                "threadSettings": {
+                    "sandboxPolicy": {
+                        "type": "workspaceWrite",
+                        "writableRoots": ["/tmp/project"],
+                        "networkAccess": False,
+                    }
+                },
+            },
+        }
+        expected = {
+            "method": "thread/settings/updated",
+            "params": {
+                "threadId": "thread-1",
+                "threadSettings": {"sandboxPolicy": {"type": "dangerFullAccess"}},
+            },
+        }
+
+        self.assertTrue(
+            CodexAppServerClient.has_worker_permission_drift(restricted, "thread-1")
+        )
+        self.assertFalse(
+            CodexAppServerClient.has_worker_permission_drift(expected, "thread-1")
+        )
 
 
 class LifecycleApprovalTest(unittest.TestCase):
@@ -193,7 +266,7 @@ class LifecycleApprovalTest(unittest.TestCase):
 
         def request(method: str, params: dict) -> dict:
             requests.append((method, params))
-            return {"turn": {"id": "turn-1"}}
+            return {"turn": {"id": "turn-1"}} if method == "turn/start" else {}
 
         client.request = request  # type: ignore[method-assign]
 
@@ -202,14 +275,26 @@ class LifecycleApprovalTest(unittest.TestCase):
             client.start_turn("thread-1", "处理这张图片", [str(image)]),
         )
 
-        self.assertEqual("turn/start", requests[0][0])
+        self.assertEqual(
+            (
+                "thread/settings/update",
+                {
+                    "threadId": "thread-1",
+                    **WORKER_EXECUTION_POLICY.turn_overrides(),
+                },
+            ),
+            requests[0],
+        )
+        self.assertEqual("turn/start", requests[1][0])
         self.assertEqual(
             [
                 {"type": "text", "text": "处理这张图片"},
                 {"type": "localImage", "path": str(image.resolve())},
             ],
-            requests[0][1]["input"],
+            requests[1][1]["input"],
         )
+        for key, value in WORKER_EXECUTION_POLICY.turn_overrides().items():
+            self.assertEqual(value, requests[1][1][key])
 
 
 if __name__ == "__main__":

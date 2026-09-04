@@ -21,6 +21,13 @@ from .app_server import AppServerError, CodexAppServerClient
 WORKER_ID = "dotasks-local-agent"
 LEASE_SECONDS = 3600
 LEASE_RENEW_SECONDS = 1200
+MAX_PERMISSION_RECOVERY_ATTEMPTS = 2
+PERMISSION_DRIFT_STATUS = "worker_permission_drift"
+PERMISSION_RECOVERY_FAILED = "worker_permission_recovery_failed"
+PERMISSION_RECOVERY_PROMPT = (
+    "DoTasks 已恢复此任务的执行权限。继续上一回合尚未完成的工作，"
+    "保留已有修改和上下文，完成验证后按原任务要求提交生命周期回调。"
+)
 
 
 class LocalCodexExecutor:
@@ -302,11 +309,83 @@ class LocalCodexExecutor:
                 dispatch_attempt_id=str(dispatch.get("dispatch_attempt_id") or ""),
             )
             turn_id = client.start_turn(
-                thread_id,
-                str(dispatch["dispatch_prompt"]),
+                thread_id, str(dispatch["dispatch_prompt"]),
                 image_paths=list(dispatch.get("input_image_paths") or []),
             )
             status, error = self._wait_for_turn(client, thread_id, turn_id, run_id)
+            recovery_attempt = 0
+            while status == PERMISSION_DRIFT_STATUS and not self._stop_event.is_set():
+                self._log_worker_event(
+                    "permission_drift_detected",
+                    run_id=run_id,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    attempt=recovery_attempt + 1,
+                )
+                try:
+                    client.interrupt_turn(thread_id, turn_id)
+                except AppServerError as exc:
+                    status = "failed"
+                    error = f"[{PERMISSION_RECOVERY_FAILED}] 无法中断受限回合：{exc}"
+                    self._log_worker_event(
+                        "permission_recovery_failed",
+                        run_id=run_id,
+                        thread_id=thread_id,
+                        attempt=recovery_attempt,
+                        error=error,
+                    )
+                    break
+                current = self.service.get_native_dispatch(run_id)
+                if current.get("status") not in {"claimed", "pending_thread", "bound"}:
+                    status, error = "completed", ""
+                    break
+                if recovery_attempt >= MAX_PERMISSION_RECOVERY_ATTEMPTS:
+                    status = "failed"
+                    error = (
+                        f"[{PERMISSION_RECOVERY_FAILED}] 执行权限连续漂移，"
+                        f"已停止自动恢复（{MAX_PERMISSION_RECOVERY_ATTEMPTS} 次）"
+                    )
+                    self._log_worker_event(
+                        "permission_recovery_failed",
+                        run_id=run_id,
+                        thread_id=thread_id,
+                        attempt=recovery_attempt,
+                        error=error,
+                    )
+                    break
+                recovery_attempt += 1
+                self._log_worker_event(
+                    "permission_recovery_started",
+                    run_id=run_id,
+                    thread_id=thread_id,
+                    attempt=recovery_attempt,
+                )
+                try:
+                    turn_id = client.start_turn(
+                        thread_id,
+                        PERMISSION_RECOVERY_PROMPT,
+                        image_paths=list(dispatch.get("input_image_paths") or []),
+                    )
+                except AppServerError as exc:
+                    status = "failed"
+                    error = f"[{PERMISSION_RECOVERY_FAILED}] 无法启动恢复回合：{exc}"
+                    self._log_worker_event(
+                        "permission_recovery_failed",
+                        run_id=run_id,
+                        thread_id=thread_id,
+                        attempt=recovery_attempt,
+                        error=error,
+                    )
+                    break
+                self._log_worker_event(
+                    "permission_recovery_succeeded",
+                    run_id=run_id,
+                    thread_id=thread_id,
+                    attempt=recovery_attempt,
+                )
+                status, error = self._wait_for_turn(
+                    client, thread_id, turn_id, run_id
+                )
             if self._stop_event.is_set():
                 return
             current = self.service.get_native_dispatch(run_id)
@@ -341,6 +420,17 @@ class LocalCodexExecutor:
                 self._workers.discard(threading.current_thread())
             if not self._stop_event.is_set():
                 self.wake()
+
+    @staticmethod
+    def _log_worker_event(event: str, **payload: Any) -> None:
+        print(
+            json.dumps(
+                {"component": "dotasks-executor", "event": event, **payload},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            file=sys.stderr,
+        )
 
     def _prepare_thread(
         self, client: CodexAppServerClient, dispatch: dict[str, Any]
@@ -426,6 +516,13 @@ class LocalCodexExecutor:
         renewed_at = time.monotonic()
         while not self._stop_event.is_set():
             notification = client.wait_notification(timeout=30)
+            if (
+                notification is not None
+                and CodexAppServerClient.has_worker_permission_drift(
+                    notification, thread_id
+                )
+            ):
+                return PERMISSION_DRIFT_STATUS, "worker sandbox policy changed"
             if notification is not None and notification.get("method") == "turn/completed":
                 params = notification.get("params") or {}
                 turn = params.get("turn") or {}

@@ -7,7 +7,12 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from taskboard.local_executor import LocalCodexExecutor, WORKER_ID
+from taskboard.local_executor import (
+    MAX_PERMISSION_RECOVERY_ATTEMPTS,
+    PERMISSION_RECOVERY_FAILED,
+    LocalCodexExecutor,
+    WORKER_ID,
+)
 
 
 class FakeService:
@@ -283,6 +288,135 @@ class LocalCodexExecutorTest(unittest.TestCase):
 
         self.assertEqual([("RUN-0001", "missing callback")], service.failures)
         self.assertTrue(executor._wake_event.is_set())
+
+    def test_permission_drift_recovers_same_thread_and_preserves_images(self):
+        service = FakeService(None)
+        executor = self.build_executor(service, close_lifecycle=False)
+        image = (
+            executor.data_home
+            / "artifacts"
+            / "dispatch-visuals"
+            / "RUN-0001"
+            / "ref.png"
+        )
+        image.parent.mkdir(parents=True)
+        image.write_bytes(b"reference")
+
+        class RecoveringClient(FakeClient):
+            def __init__(self, **kwargs):
+                super().__init__(service, False, **kwargs)
+                self.turns: list[tuple[str, str, list[str], list[bool]]] = []
+                self.interruptions: list[tuple[str, str]] = []
+
+            def start_turn(self, thread_id, prompt, image_paths=None):
+                paths = list(image_paths or [])
+                self.turns.append(
+                    (thread_id, prompt, paths, [Path(path).is_file() for path in paths])
+                )
+                return f"turn-{len(self.turns)}"
+
+            def wait_notification(self, timeout):
+                if len(self.turns) == 1:
+                    return {
+                        "method": "thread/settings/updated",
+                        "params": {
+                            "threadId": "cli-thread-1",
+                            "threadSettings": {
+                                "sandboxPolicy": {
+                                    "type": "workspaceWrite",
+                                    "writableRoots": ["/tmp/project"],
+                                    "networkAccess": False,
+                                }
+                            },
+                        },
+                    }
+                service.status = "completed"
+                return {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "cli-thread-1",
+                        "turn": {"id": "turn-2", "status": "completed"},
+                    },
+                }
+
+            def interrupt_turn(self, thread_id, turn_id):
+                self.interruptions.append((thread_id, turn_id))
+
+        clients: list[RecoveringClient] = []
+
+        def factory(**kwargs):
+            client = RecoveringClient(**kwargs)
+            clients.append(client)
+            return client
+
+        executor.client_factory = factory
+        self.assertTrue(
+            executor._launch(
+                make_dispatch(
+                    input_image_paths=[str(image)],
+                    local_visual_paths=[str(image)],
+                )
+            )
+        )
+        executor.wait_for_workers()
+
+        client = clients[0]
+        self.assertEqual(2, len(client.turns))
+        self.assertEqual("cli-thread-1", client.turns[0][0])
+        self.assertEqual("cli-thread-1", client.turns[1][0])
+        self.assertEqual([str(image)], client.turns[0][2])
+        self.assertEqual([str(image)], client.turns[1][2])
+        self.assertEqual([True], client.turns[0][3])
+        self.assertEqual([True], client.turns[1][3])
+        self.assertEqual([("cli-thread-1", "turn-1")], client.interruptions)
+        self.assertEqual([], service.failures)
+        self.assertFalse(image.exists())
+
+    def test_repeated_permission_drift_fails_with_structured_reason(self):
+        service = FakeService(make_dispatch())
+
+        class DriftingClient(FakeClient):
+            def __init__(self, **kwargs):
+                super().__init__(service, False, **kwargs)
+                self.turn_count = 0
+
+            def start_turn(self, thread_id, prompt, image_paths=None):
+                self.turn_count += 1
+                return f"turn-{self.turn_count}"
+
+            def wait_notification(self, timeout):
+                return {
+                    "method": "thread/settings/updated",
+                    "params": {
+                        "threadId": "cli-thread-1",
+                        "threadSettings": {
+                            "sandboxPolicy": {
+                                "type": "workspaceWrite",
+                                "writableRoots": ["/tmp/project"],
+                                "networkAccess": False,
+                            }
+                        },
+                    },
+                }
+
+            def interrupt_turn(self, thread_id, turn_id):
+                pass
+
+        clients: list[DriftingClient] = []
+        executor = self.build_executor(service, close_lifecycle=False)
+
+        def factory(**kwargs):
+            client = DriftingClient(**kwargs)
+            clients.append(client)
+            return client
+
+        executor.client_factory = factory
+
+        executor.dispatch_once()
+        executor.wait_for_workers()
+
+        self.assertEqual(MAX_PERMISSION_RECOVERY_ATTEMPTS + 1, clients[0].turn_count)
+        self.assertIn(PERMISSION_RECOVERY_FAILED, service.failures[0][1])
 
     def test_existing_cli_thread_is_resumed_before_turn(self):
         service = FakeService(make_dispatch(thread_id="cli-thread-1"))
