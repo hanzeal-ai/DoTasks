@@ -78,6 +78,71 @@ export function formatTimestamp(timestamp) {
   return value ? new Date(value).toLocaleString("zh-CN", {hour12: false}) : "时间未知";
 }
 
+export function formatLogTimestamp(timestamp) {
+  const value = timestampValue(timestamp);
+  if (!value) return "时间未知";
+  const date = new Date(value);
+  const pad = part => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+const EXECUTION_LOG_LABELS = {
+  created: "创建",
+  intake_queued: "加入队列",
+  claimed: "领取",
+  conversation_bound: "绑定会话",
+  native_thread_bound: "启动会话",
+  transitioned: "状态变更",
+  paused: "暂停",
+  resumed: "恢复",
+  delivery_submitted: "提交交付",
+  batch_delivery_submitted: "提交批次交付",
+  delivery_integrated: "交付已集成",
+  delivery_integration_failed: "交付集成失败",
+  code_reviewed: "Code Review",
+  review_interrupted: "评审中断",
+  review_preparation_failed: "评审准备失败",
+  execution_stopped: "执行中断",
+  execution_requeued: "重新排队",
+  execution_failed: "执行失败",
+  context_build_failed: "上下文准备失败",
+  lease_expired: "会话超时",
+  token_budget_exceeded: "Token 预算耗尽",
+  stage_budget_preflight_blocked: "阶段预算阻塞",
+  self_heal_scheduled: "安排自动修复",
+  self_heal_exhausted: "自动修复失败",
+  target_conflict_detected: "检测到目标冲突",
+  execution_batch_joined: "加入执行批次",
+  auto_batched: "自动加入批次",
+  relation_added: "关联任务",
+  deleted: "删除",
+};
+
+export function executionLogLabel(event, statusLabels = {}) {
+  const payload = event?.payload || {};
+  if (event?.event_type === "transitioned") {
+    return statusLabels[payload.to] || payload.to || EXECUTION_LOG_LABELS.transitioned;
+  }
+  if (event?.event_type === "code_reviewed") {
+    return payload.verdict === "pass" ? "Code Review 通过" : payload.verdict === "fail" ? "Code Review 失败" : EXECUTION_LOG_LABELS.code_reviewed;
+  }
+  return EXECUTION_LOG_LABELS[event?.event_type]
+    || String(event?.event_type || "状态更新").replaceAll("_", " ");
+}
+
+export function executionLogReason(event) {
+  const payload = event?.payload || {};
+  if (payload.reason) return String(payload.reason);
+  if (payload.error) return String(payload.error);
+  if (Array.isArray(payload.reasons) && payload.reasons.length) {
+    return payload.reasons.map(String).join("；");
+  }
+  if (Array.isArray(payload.failed_criteria) && payload.failed_criteria.length) {
+    return payload.failed_criteria.map(item => typeof item === "string" ? item : (item?.criterion || item?.description || JSON.stringify(item))).join("；");
+  }
+  return "";
+}
+
 export function formatDuration(seconds) {
   const value = Math.max(0, Math.floor(Number(seconds) || 0));
   const days = Math.floor(value / 86400);

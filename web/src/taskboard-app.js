@@ -1,8 +1,11 @@
 import {
   durationBetween,
   escapeHtml,
+  executionLogLabel,
+  executionLogReason,
   formatCompactTokenCount,
   formatDuration,
+  formatLogTimestamp,
   formatMetricTokenCount,
   formatTimestamp,
   formatTokenCount,
@@ -139,6 +142,28 @@ function syncSidebar() {
   document.querySelector("#token-panel").classList.toggle("selected", state.view === "tokens");
   document.querySelector("#board-count").textContent = String(state.board?.tasks?.length || 0);
   document.querySelector("#requirements-count").textContent = String(state.board?.requirements?.length || 0);
+}
+
+function renderExecutionLog() {
+  const logs = (state.board?.execution_logs || []).filter(item => item.event_type !== "token_usage_updated");
+  document.querySelector("#execution-log-count").textContent = String(logs.length);
+  document.querySelector("#execution-log-list").innerHTML = logs.length
+    ? logs.map(item => {
+      const reason = executionLogReason(item);
+      const problem = /failed|blocked|expired|interrupted|exhausted|stopped/.test(item.event_type)
+        || item.payload?.verdict === "fail"
+        || ["blocked", "failed"].includes(item.payload?.to);
+      const reasonKind = item.event_type.includes("blocked") || item.payload?.to === "blocked"
+        ? "阻塞原因"
+        : problem ? "失败原因" : "原因";
+      const threadId = item.thread_id || "—";
+      const taskExists = (state.board?.tasks || []).some(task => task.id === item.task_id);
+      const taskLabel = taskExists
+        ? `<button type="button" data-details="${escapeHtml(item.task_id)}" title="查看任务详情">${escapeHtml(item.task_id)}</button>`
+        : `<b>${escapeHtml(item.task_id)}</b>`;
+      return `<article class="execution-log-item${problem ? " problem" : ""}"><div class="execution-log-line"><time>[${escapeHtml(formatLogTimestamp(item.created_at))}]</time>${taskLabel}<strong>${escapeHtml(executionLogLabel(item, statusLabels))}</strong>${item.thread_id ? `<button type="button" class="execution-log-thread" data-open-thread="${escapeHtml(item.thread_id)}" title="打开会话 ${escapeHtml(item.thread_id)}">${escapeHtml(threadId)}</button>` : `<code title="此时尚未创建会话">${escapeHtml(threadId)}</code>`}</div>${reason ? `<p><span>${reasonKind}：</span>${escapeHtml(reason)}</p>` : ""}</article>`;
+    }).join("")
+    : '<p class="execution-log-empty">暂无任务执行日志</p>';
 }
 
 function syncHeader() {
@@ -487,6 +512,7 @@ function renderSettings() {
 function render() {
   syncSidebar();
   syncHeader();
+  renderExecutionLog();
   if (state.view === "tokens") renderTokenPanel();
   else if (state.view === "requirements") renderRequirementsBoard();
   else if (state.view === "settings") renderSettings();

@@ -79,6 +79,28 @@ for (const [value, expected] of cases) {
 """)
         self.assertEqual(0, completed.returncode, completed.stderr)
 
+    def test_execution_log_helpers_format_status_and_failure_reason(self):
+        completed = self.run_module_script("""
+const event = {
+  event_type: "code_reviewed",
+  payload: {verdict: "fail", reasons: ["测试未通过", "存在回归"]},
+};
+if (module.executionLogLabel(event, {}) !== "Code Review 失败") throw new Error("review status was not localized");
+if (module.executionLogReason(event) !== "测试未通过；存在回归") throw new Error("failure reasons were not joined");
+if (module.executionLogLabel({event_type: "transitioned", payload: {to: "blocked"}}, {blocked: "阻塞"}) !== "阻塞") throw new Error("transition status did not use workflow labels");
+const formatted = module.formatLogTimestamp("2026-09-04 08:44:39");
+if (!/^2026-09-04 \\d{2}:44:39$/.test(formatted)) throw new Error(`unexpected log timestamp: ${formatted}`);
+""")
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
+    def test_sidebar_contains_realtime_execution_log(self):
+        app = (WEB_SOURCE / "App.jsx").read_text(encoding="utf-8")
+        script = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")
+        self.assertIn('id="execution-log-list"', app)
+        self.assertIn('className="sidebar-log"', app)
+        self.assertIn("renderExecutionLog()", script)
+        self.assertIn('item.event_type !== "token_usage_updated"', script)
+
     def test_only_period_token_cards_use_metric_formatting(self):
         app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")
         period_summary = app.split(

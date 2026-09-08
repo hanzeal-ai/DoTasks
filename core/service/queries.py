@@ -9,6 +9,57 @@ from .domain import ACTIVE_RUN_STATUSES, decode_row
 class TaskQueryMixin:
     """Read models used by API, MCP, lifecycle, and reporting surfaces."""
 
+    def list_execution_logs(self) -> list[dict[str, Any]]:
+        """Return the task/run event stream with its owning task and conversation."""
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """SELECT e.*, r.task_id AS run_task_id, r.run_type, r.attempt
+                   FROM events e
+                   LEFT JOIN task_runs r
+                     ON e.entity_type='run' AND e.entity_id=r.id
+                   WHERE (e.entity_type='task'
+                      OR (e.entity_type='run' AND r.task_id IS NOT NULL))
+                     AND e.event_type != 'token_usage_updated'
+                   ORDER BY e.id DESC"""
+            ).fetchall()
+            conversation_rows = connection.execute(
+                """SELECT run_id, thread_id FROM task_run_conversations
+                   WHERE trim(thread_id) != ''"""
+            ).fetchall()
+
+        threads_by_run = {
+            row["run_id"]: row["thread_id"] for row in conversation_rows
+        }
+        logs = []
+        for row in rows:
+            item = dict(row)
+            payload = json.loads(item.pop("payload") or "{}")
+            run_id = (
+                item["entity_id"]
+                if item["entity_type"] == "run"
+                else str(payload.get("run_id") or "")
+            )
+            task_id = (
+                item["entity_id"]
+                if item["entity_type"] == "task"
+                else str(item.pop("run_task_id") or payload.get("task_id") or "")
+            )
+            item.pop("run_task_id", None)
+            logs.append(
+                {
+                    **item,
+                    "task_id": task_id,
+                    "run_id": run_id,
+                    "thread_id": str(
+                        payload.get("thread_id")
+                        or threads_by_run.get(run_id)
+                        or ""
+                    ),
+                    "payload": payload,
+                }
+            )
+        return logs
+
     def list_requirements(self) -> list[dict[str, Any]]:
         with self.db.connection() as connection:
             rows = connection.execute(

@@ -269,6 +269,7 @@ class TaskReportingMixin:
         return {
             "tasks": tasks,
             "requirements": requirements,
+            "execution_logs": self.list_execution_logs(),
             "pending_task_changes": self.list_pending_task_changes(),
             "projects": projects,
             "token_analytics": self.token_analytics(),

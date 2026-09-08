@@ -49,6 +49,23 @@ class TaskboardServiceTest(unittest.TestCase):
             service = TaskboardService(home)
             self.assertFalse(service.dispatcher_enabled())
 
+    def test_execution_logs_join_run_events_to_task_and_conversation(self):
+        task = self.create_ready_task()
+        claimed = self.service.claim_next_task("worker", task["project"])
+        run_id = claimed["run"]["id"]
+        self.service.bind_conversation(task["id"], "execution", "thread-log-1", run_id)
+        self.service.interrupt_unsubmitted_run(run_id, "执行进程异常退出")
+
+        logs = self.service.list_execution_logs()
+        claim_log = next(item for item in logs if item["event_type"] == "claimed")
+        failure_log = next(item for item in logs if item["event_type"] in {"execution_requeued", "execution_failed"})
+
+        self.assertEqual(task["id"], claim_log["task_id"])
+        self.assertEqual(run_id, claim_log["run_id"])
+        self.assertEqual("thread-log-1", claim_log["thread_id"])
+        self.assertEqual("执行进程异常退出", failure_log["payload"]["reason"])
+        self.assertEqual(logs, self.service.board()["execution_logs"])
+
     def test_native_dispatch_is_persisted_and_binds_only_a_real_thread(self):
         task = self.create_ready_task()
         dispatch = self.service._claim_next_native_dispatch("codex-native-controller", stage="development")

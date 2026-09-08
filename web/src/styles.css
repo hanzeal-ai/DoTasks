@@ -244,7 +244,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
 .sidebar { display: flex; flex: 0 0 252px; min-width: 0; min-height: 0; height: 100%; flex-direction: column; border-right: 1px solid var(--border); background: var(--column-bg); }
 .sidebar-brand { display: flex; flex: 0 0 52px; align-items: center; gap: 10px; padding: 0 14px; border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 650; }
 .brand-mark { display: block; width: 24px; height: 24px; flex: 0 0 auto; }
-.sidebar-nav { flex: 1 1 auto; min-height: 0; padding: 8px; overflow-y: auto; }
+.sidebar-nav { flex: 0 0 auto; min-height: 0; padding: 8px; overflow-y: auto; }
 .sidebar-primary-actions { display: grid; gap: 2px; }
 .sidebar-item { display: flex; width: 100%; min-width: 0; height: 36px; align-items: center; gap: 10px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text-secondary); font-size: 12px; text-align: left; }
 .sidebar-item:hover { background: var(--surface-hover); color: var(--text); }
@@ -252,6 +252,21 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
 .sidebar-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .sidebar-item svg { flex: 0 0 auto; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.5; }
 .sidebar-count { margin-left: auto; color: var(--text-tertiary); font-size: 10px; font-weight: 500; }
+.sidebar-log { display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; border-top: 1px solid var(--border); }
+.sidebar-log-head { display: flex; flex: 0 0 34px; align-items: center; padding: 0 14px; color: var(--text-secondary); font-size: 10px; font-weight: 600; }
+.execution-log-list { flex: 1 1 auto; min-height: 0; padding: 0 9px 9px; overflow-y: auto; }
+.execution-log-item { display: grid; gap: 3px; padding: 7px 5px; border-bottom: 1px solid var(--border); font-size: 9px; }
+.execution-log-item.problem { border-left: 2px solid var(--red); padding-left: 7px; background: var(--red-soft); }
+.execution-log-line { display: flex; min-width: 0; align-items: baseline; gap: 4px; white-space: nowrap; }
+.execution-log-line time { flex: 0 0 auto; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.execution-log-line strong { flex: 0 0 auto; color: var(--text-secondary); font-weight: 600; }
+.execution-log-line b { flex: 0 0 auto; color: var(--text-secondary); font-weight: 600; }
+.execution-log-line button { min-width: 0; padding: 0; overflow: hidden; border: 0; background: transparent; color: var(--accent); font: inherit; text-overflow: ellipsis; white-space: nowrap; }
+.execution-log-line > button:first-of-type { flex: 0 0 auto; font-weight: 600; }
+.execution-log-thread, .execution-log-line code { flex: 1 1 auto; min-width: 20px; overflow: hidden; color: var(--text-tertiary) !important; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important; text-overflow: ellipsis; white-space: nowrap; }
+.execution-log-item p { color: var(--red); font-size: 9px; line-height: 14px; overflow-wrap: anywhere; }
+.execution-log-item p span { font-weight: 600; }
+.execution-log-empty { padding: 16px 5px; color: var(--text-tertiary); font-size: 9px; text-align: center; }
 .sidebar-footer { display: flex; flex: 0 0 38px; align-items: center; gap: 7px; padding: 0 14px; border-top: 1px solid var(--border); color: var(--text-tertiary); font-size: 9px; }
 .sync-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-tertiary); }
 .sync-dot.connected { background: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
@@ -264,6 +279,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
   .app-shell > main { min-height: 0; }
   .sidebar { width: 100%; height: auto; flex: 0 0 auto; border-right: 0; border-bottom: 1px solid var(--border); }
   .sidebar-brand, .sidebar-footer { display: none; }
+  .sidebar-log { display: none; }
   .sidebar-nav { flex: 0 0 auto; padding: 6px; overflow: visible; }
   .sidebar-primary-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .sidebar-item { justify-content: center; padding-inline: 6px; }

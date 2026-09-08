@@ -57,6 +57,15 @@ export default function App() {
               </button>
             </div>
           </nav>
+          <section className="sidebar-log" aria-labelledby="execution-log-title">
+            <div className="sidebar-log-head">
+              <span id="execution-log-title">执行日志</span>
+              <span id="execution-log-count" className="sidebar-count">0</span>
+            </div>
+            <div id="execution-log-list" className="execution-log-list">
+              <p className="execution-log-empty">暂无任务执行日志</p>
+            </div>
+          </section>
           <div className="sidebar-footer">
             <span className="sync-dot connected"></span>
             <span>Codex 原生任务调度</span>
