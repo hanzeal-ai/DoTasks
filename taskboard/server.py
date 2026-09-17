@@ -17,6 +17,7 @@ from .codex_projects import discover_codex_projects
 from .config import LOCAL_MODE, ServerConfig
 from .http_base import BaseDoTasksHandler, MAX_JSON_BODY_BYTES
 from .version import VERSION
+from .web_auth import WebSessions
 
 class TaskboardHandler(BaseDoTasksHandler):
     service: TaskboardService
@@ -49,6 +50,10 @@ class TaskboardHandler(BaseDoTasksHandler):
         self.wfile.flush()
         deadline = time.monotonic() + 25
         while time.monotonic() < deadline:
+            try:
+                self._require_authentication()
+            except ValueError:
+                break
             latest = self.service.latest_event_id()
             if latest > cursor:
                 cursor = latest
@@ -67,6 +72,8 @@ class TaskboardHandler(BaseDoTasksHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         try:
+            if self._handle_web_auth("GET", parsed.path):
+                return
             if parsed.path.startswith("/api/"):
                 self._validate_api_request()
             if parsed.path == "/api/health":
@@ -118,6 +125,8 @@ class TaskboardHandler(BaseDoTasksHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         try:
+            if self._handle_web_auth("POST", parsed.path):
+                return
             self._validate_api_request()
             if parsed.path == "/api/visual-artifacts":
                 payload = self._read_json(VISUAL_UPLOAD_BODY_LIMIT)
@@ -275,7 +284,9 @@ class TaskboardHandler(BaseDoTasksHandler):
             self._handle_error(exc)
 
 class TaskboardHTTPServer(ThreadingHTTPServer):
-    pass
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.web_sessions = WebSessions()
 
 
 def build_server(

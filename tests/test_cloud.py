@@ -161,8 +161,82 @@ class RelayHTTPServerTest(unittest.TestCase):
             headers={"Host": "dotasks.test", "Origin": "http://dotasks.test"},
         )
         self.assertEqual(401, status)
-        self.assertIn("Basic", headers.get("WWW-Authenticate", ""))
+        self.assertNotIn("WWW-Authenticate", headers)
         self.assertIn("Authentication", json.loads(body)["error"])
+
+    def login(self, password="correct horse battery staple", extra_headers=None):
+        return self.request("POST", "/api/auth/login", json.dumps({
+            "username": "operator", "password": password,
+        }).encode(), {"Host": "dotasks.test", "Origin": "http://dotasks.test",
+                      "Content-Type": "application/json", **(extra_headers or {})})
+
+    def test_browser_session_login_logout_and_replay(self):
+        public = {"Host": "dotasks.test", "Origin": "http://dotasks.test"}
+        status, _, body = self.request("GET", "/api/auth/status", headers=public)
+        self.assertEqual(200, status)
+        self.assertEqual({"enabled": True, "authenticated": False}, json.loads(body))
+        status, headers, _ = self.login()
+        self.assertEqual(200, status)
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        self.assertIn("HttpOnly", headers["Set-Cookie"])
+        self.assertIn("SameSite=Strict", headers["Set-Cookie"])
+        authenticated = {**public, "Cookie": cookie}
+        self.assertEqual(200, self.request("GET", "/api/board", headers=authenticated)[0])
+        self.assertTrue(json.loads(self.request("GET", "/api/auth/status", headers=authenticated)[2])["authenticated"])
+        status, headers, _ = self.request("POST", "/api/auth/logout", b"{}", {
+            **authenticated, "Content-Type": "application/json"})
+        self.assertEqual(200, status)
+        self.assertIn("dotasks_session=signed-out", headers["Set-Cookie"])
+        for invalid_cookie in (headers["Set-Cookie"].split(";", 1)[0], cookie,
+                               "dotasks_session=forged", "dotasks_session="):
+            self.assertEqual(401, self.request("GET", "/api/board", headers={
+                "Host": "dotasks.test", "Authorization": self.browser_headers["Authorization"],
+                "Cookie": invalid_cookie})[0])
+        self.assertEqual(401, self.request("GET", "/api/board", headers=authenticated)[0])
+        self.assertEqual(401, self.request("GET", "/api/board", headers={
+            **self.browser_headers, "Sec-Fetch-Mode": "cors"})[0])
+        self.assertEqual(200, self.request("GET", "/api/board", headers=self.browser_headers)[0])
+
+    def test_login_validation_and_rate_limit(self):
+        for password in ("wrong", "错误密码", None, {"value": "wrong"}):
+            status, headers, _ = self.login(password)
+            self.assertEqual(401, status)
+            self.assertNotIn("Set-Cookie", headers)
+            self.assertNotIn("WWW-Authenticate", headers)
+        for _ in range(16):
+            self.assertEqual(401, self.login("wrong")[0])
+        status, headers, _ = self.login()
+        self.assertEqual(429, status)
+        self.assertEqual("60", headers["Retry-After"])
+        self.assertEqual(413, self.login("x" * 5000)[0])
+
+    def test_auth_rejects_untrusted_host_origin_and_missing_origin(self):
+        self.assertEqual(403, self.login(extra_headers={"Origin": "https://evil.test"})[0])
+        self.assertEqual(403, self.login(extra_headers={"Host": "evil.test"})[0])
+        self.assertEqual(403, self.login(extra_headers={"Origin": ""})[0])
+        self.assertEqual(403, self.request("GET", "/api/auth/status", headers={"Host": "evil.test"})[0])
+        self.assertEqual(403, self.request("POST", "/api/auth/logout", b"{}", {
+            "Host": "dotasks.test", "Origin": "https://evil.test", "Content-Type": "application/json"})[0])
+
+    def test_session_rotation_expiry_and_agent_isolation(self):
+        cookie = self.login()[1]["Set-Cookie"].split(";", 1)[0]
+        next_cookie = self.login(extra_headers={"Cookie": cookie})[1]["Set-Cookie"].split(";", 1)[0]
+        self.assertNotEqual(cookie, next_cookie)
+        public = {"Host": "dotasks.test"}
+        self.assertEqual(401, self.request("GET", "/api/board", headers={**public, "Cookie": cookie})[0])
+        self.assertEqual(401, self.request("GET", "/_agent/v1/events", headers={**public, "Cookie": next_cookie})[0])
+        self.assertEqual(401, self.request("GET", "/api/board", headers=self.agent_headers)[0])
+        with patch("taskboard.web_auth.time.monotonic", return_value=10**12):
+            self.assertEqual(401, self.request("GET", "/api/board", headers={**public, "Cookie": next_cookie})[0])
+        self.assertEqual(401, self.request("GET", "/api/board", headers={**public, "Cookie": "dotasks_session=forged"})[0])
+
+    def test_public_login_shell_keeps_business_routes_protected(self):
+        public = {"Host": "dotasks.test"}
+        for path in ("/", "/login", "/dotasks-mark.svg"):
+            self.assertEqual(200, self.request("GET", path, headers=public)[0])
+        for method, path in (("GET", "/api/board"), ("GET", "/api/events/stream"),
+                             ("POST", "/api/settings"), ("PATCH", "/api/tasks/example")):
+            self.assertEqual(401, self.request(method, path, headers=public)[0])
 
     def test_browser_manages_cloud_board_while_agent_is_offline(self) -> None:
         payload = {

@@ -28,6 +28,7 @@ from taskboard.http_security import HTTPRequestError
 from taskboard.mcp_server import tool_handlers_for
 from taskboard.project_guard import ProjectWorkspaceGuard
 from taskboard.server import TaskboardHandler
+from taskboard.web_auth import WebSessions
 from taskboard.websocket_transport import (
     WebSocketConnection,
     read_frame,
@@ -490,6 +491,7 @@ class RelayHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
+        self.web_sessions = WebSessions()
         self._agent_sockets: dict[str, dict[int, WebSocketConnection]] = {}
         self._agent_sockets_lock = threading.Lock()
         self._next_agent_socket_id = 0

@@ -66,6 +66,10 @@ function restoreNavigationState() {
     const saved = JSON.parse(sessionStorage.getItem(NAVIGATION_STORAGE_KEY) || "null");
     if (!saved) return;
     state.tokenView = saved.tokenView === "details" ? "details" : "charts";
+    if (saved.view === "logs") {
+      state.view = "logs";
+      return;
+    }
     if (saved.view === "tokens") {
       state.view = "tokens";
       return;
@@ -84,7 +88,14 @@ function restoreNavigationState() {
 }
 
 async function api(path, options = {}) {
-  return requestJson(fetch, path, options);
+  return requestJson(async (...args) => {
+    const response = await fetch(...args);
+    if (response.status === 401) {
+      boardEventSource?.close();
+      window.location.replace("/login");
+    }
+    return response;
+  }, path, options);
 }
 
 async function loadWorkflow() {
@@ -137,6 +148,8 @@ async function syncIntegrationStatuses() {
 }
 
 function syncSidebar() {
+  document.querySelector("#execution-log-nav").classList.toggle("selected", state.view === "logs");
+  document.querySelector("#execution-log-count").textContent = String(executionLogs().length);
   document.querySelector("#board-nav").classList.toggle("selected", state.view === "board");
   document.querySelector("#requirements-nav").classList.toggle("selected", state.view === "requirements");
   document.querySelector("#token-panel").classList.toggle("selected", state.view === "tokens");
@@ -144,9 +157,15 @@ function syncSidebar() {
   document.querySelector("#requirements-count").textContent = String(state.board?.requirements?.length || 0);
 }
 
+function executionLogs() {
+  return (state.board?.execution_logs || [])
+    .filter(item => item.event_type !== "token_usage_updated")
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+}
+
 function renderExecutionLog() {
-  const logs = (state.board?.execution_logs || []).filter(item => item.event_type !== "token_usage_updated");
-  document.querySelector("#execution-log-count").textContent = String(logs.length);
+  const logs = executionLogs();
+  document.querySelector("#content").innerHTML = '<section id="execution-log-list" class="execution-log-list" aria-label="执行日志"></section>';
   document.querySelector("#execution-log-list").innerHTML = logs.length
     ? logs.map(item => {
       const reason = executionLogReason(item);
@@ -172,8 +191,8 @@ function syncHeader() {
   const settingsView = state.view === "settings";
   const completedCount = (state.board?.tasks || []).filter(task => task.status === "done").length;
   const taskChangeCount = (state.board?.pending_task_changes || []).length;
-  document.querySelector("#view-eyebrow").textContent = tokenView ? "TOKEN USAGE" : requirementsView ? "REQUIREMENTS" : settingsView ? "SETTINGS" : "TASKBOARD";
-  document.querySelector("#view-title").textContent = tokenView ? "Token 使用看板" : requirementsView ? "需求看板" : settingsView ? "设置" : "任务面板";
+  document.querySelector("#view-eyebrow").textContent = state.view === "logs" ? "EXECUTION LOG" : tokenView ? "TOKEN USAGE" : requirementsView ? "REQUIREMENTS" : settingsView ? "SETTINGS" : "TASKBOARD";
+  document.querySelector("#view-title").textContent = state.view === "logs" ? "执行日志" : tokenView ? "Token 使用看板" : requirementsView ? "需求看板" : settingsView ? "设置" : "任务面板";
   document.querySelector("#view-title").title = "";
   document.querySelector("#completed-tasks").hidden = false;
   document.querySelector("#completed-count").textContent = String(completedCount);
@@ -242,6 +261,18 @@ function connectBoardEvents() {
   boardEventSource?.close();
   boardEventSource = new EventSource("/api/events/stream");
   boardEventSource.addEventListener("board_changed", scheduleBoardRefresh);
+  boardEventSource.addEventListener("error", async () => {
+    try {
+      const auth = await api("/api/auth/status");
+      if (!auth.authenticated) {
+        boardEventSource?.close();
+        window.location.replace("/login");
+      }
+    } catch (_error) {
+      document.querySelector("#health").textContent = "连接失败";
+      document.querySelector("#health").classList.remove("ok");
+    }
+  });
 }
 
 const conversationRoleLabels = {
@@ -512,8 +543,8 @@ function renderSettings() {
 function render() {
   syncSidebar();
   syncHeader();
-  renderExecutionLog();
-  if (state.view === "tokens") renderTokenPanel();
+  if (state.view === "logs") renderExecutionLog();
+  else if (state.view === "tokens") renderTokenPanel();
   else if (state.view === "requirements") renderRequirementsBoard();
   else if (state.view === "settings") renderSettings();
   else renderBoard();
@@ -522,6 +553,25 @@ function render() {
 }
 
 async function handleViewNavigation(event) {
+  const logout = event.target.closest("#logout-button");
+  if (logout) {
+    logout.disabled = true;
+    try {
+      await api("/api/auth/logout", {method: "POST", body: "{}"});
+      boardEventSource?.close();
+      window.location.replace("/login");
+    } catch (error) {
+      logout.disabled = false;
+      toast(error.message);
+    }
+    return true;
+  }
+  if (event.target.closest("#execution-log-nav")) {
+    state.view = "logs";
+    persistNavigationState();
+    render();
+    return true;
+  }
   if (event.target.closest("#board-nav")) {
     state.view = "board";
     persistNavigationState();

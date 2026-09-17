@@ -294,6 +294,12 @@ chmod +x ./deploy-cloud-ip
 运行所需的 Compose 配置，然后拉取镜像、启动容器并执行带认证的健康检查。服务器既不构建
 镜像，也不需要 Dockerfile、前端产物或 Python 源码。
 
+云端网页通过登录页使用现有 `DOTASKS_HTTP_USER` / `DOTASKS_HTTP_PASSWORD` 登录。
+登录会话有效期为 12 小时，刷新页面保持登录；侧栏“退出登录”会撤销当前会话，同一会话的其他页面会返回登录页。
+服务重启会使全部网页会话失效。会话 Cookie 使用 HttpOnly、SameSite=Strict；HTTPS 公网地址自动启用 Secure。
+本地模式继续免登录，Agent Token 与现有程序客户端的显式 Basic 认证保持独立。
+部署该更新时需同时更新后端和 Web 构建产物；无需数据库迁移。回退时恢复上一版代码和静态产物并重启服务。
+
 发布新版本后，使用新镜像标签重新执行并保留原有密码、Token 和数据卷：
 
 ```bash

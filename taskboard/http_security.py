@@ -7,6 +7,7 @@ from http import HTTPStatus
 from typing import Mapping
 
 from .config import CLOUD_MODE, ServerConfig
+from .web_auth import WebSessions, has_session_cookie, session_token
 
 
 class HTTPRequestError(ValueError):
@@ -24,9 +25,10 @@ class HTTPRequestError(ValueError):
 class RequestSecurityPolicy:
     """Validate one HTTP surface without coupling it to route handlers."""
 
-    def __init__(self, config: ServerConfig, actual_port: int):
+    def __init__(self, config: ServerConfig, actual_port: int, sessions: WebSessions | None = None):
         self.config = config
         self.actual_port = actual_port
+        self.sessions = sessions
 
     @property
     def trusted_origins(self) -> set[str]:
@@ -35,9 +37,12 @@ class RequestSecurityPolicy:
     def require_authentication(self, headers: Mapping[str, str]) -> None:
         if self.config.mode != CLOUD_MODE:
             return
+        if self.sessions and self.sessions.valid(session_token(headers.get("Cookie", ""))):
+            return
         header = headers.get("Authorization", "")
-        challenge = {"WWW-Authenticate": 'Basic realm="DoTasks", charset="UTF-8"'}
-        if not header.startswith("Basic "):
+        challenge = {}
+        # Browser requests must use revocable sessions, even if legacy Basic credentials are cached.
+        if has_session_cookie(headers.get("Cookie", "")) or headers.get("Sec-Fetch-Mode") or not header.startswith("Basic "):
             raise HTTPRequestError(
                 HTTPStatus.UNAUTHORIZED, "Authentication required", challenge
             )
@@ -50,8 +55,7 @@ class RequestSecurityPolicy:
                 "Invalid authentication credentials",
                 challenge,
             ) from exc
-        valid = hmac.compare_digest(username, self.config.http_user)
-        valid = hmac.compare_digest(password, self.config.http_password) and valid
+        valid = self.valid_credentials(username, password)
         if not valid:
             raise HTTPRequestError(
                 HTTPStatus.UNAUTHORIZED,
@@ -59,8 +63,15 @@ class RequestSecurityPolicy:
                 challenge,
             )
 
+    def valid_credentials(self, username: str, password: str) -> bool:
+        valid = hmac.compare_digest(username.encode("utf-8"), self.config.http_user.encode("utf-8"))
+        return hmac.compare_digest(password.encode("utf-8"), self.config.http_password.encode("utf-8")) and valid
+
     def validate_api_request(self, headers: Mapping[str, str]) -> None:
         self.require_authentication(headers)
+        self.validate_origin(headers)
+
+    def validate_origin(self, headers: Mapping[str, str]) -> None:
         host_header = headers.get("Host", "").lower()
         if host_header not in self.config.trusted_hosts(self.actual_port):
             raise HTTPRequestError(HTTPStatus.FORBIDDEN, "Untrusted Host header")

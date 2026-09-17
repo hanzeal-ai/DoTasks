@@ -1,6 +1,10 @@
 import { useEffect } from "react";
 
-export default function App() {
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+
+export default function App({authenticationEnabled = false}) {
   useEffect(() => {
     void import("./taskboard-app.js");
   }, []);
@@ -19,7 +23,8 @@ export default function App() {
           </div>
           <nav className="sidebar-nav" aria-label="工作区导航">
             <div className="sidebar-primary-actions">
-              <button
+              <Button
+                variant="ghost"
                 id="board-nav"
                 className="sidebar-item selected"
                 type="button"
@@ -34,8 +39,9 @@ export default function App() {
                 <span id="board-count" className="sidebar-count">
                   0
                 </span>
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="ghost"
                 id="requirements-nav"
                 className="sidebar-item"
                 type="button"
@@ -48,27 +54,27 @@ export default function App() {
                 <span id="requirements-count" className="sidebar-count">
                   0
                 </span>
-              </button>
-              <button id="token-panel" className="sidebar-item" type="button">
+              </Button>
+              <Button variant="ghost" id="token-panel" className="sidebar-item" type="button">
                 <svg viewBox="0 0 20 20" aria-hidden="true">
                   <path d="M4 16V11M10 16V7M16 16V3" />
                 </svg>
                 <span>Token 看板</span>
-              </button>
+              </Button>
+              <Button variant="ghost" id="execution-log-nav" className="sidebar-item" type="button">
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <path d="M5 3.5h10a1.5 1.5 0 0 1 1.5 1.5v10a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 15V5A1.5 1.5 0 0 1 5 3.5Z" />
+                  <path d="M7 7h6M7 10h6M7 13h4" />
+                </svg>
+                <span>执行日志</span>
+                <span id="execution-log-count" className="sidebar-count">0</span>
+              </Button>
             </div>
           </nav>
-          <section className="sidebar-log" aria-labelledby="execution-log-title">
-            <div className="sidebar-log-head">
-              <span id="execution-log-title">执行日志</span>
-              <span id="execution-log-count" className="sidebar-count">0</span>
-            </div>
-            <div id="execution-log-list" className="execution-log-list">
-              <p className="execution-log-empty">暂无任务执行日志</p>
-            </div>
-          </section>
           <div className="sidebar-footer">
             <span className="sync-dot connected"></span>
             <span>Codex 原生任务调度</span>
+            {authenticationEnabled && <Button variant="ghost" id="logout-button" type="button">退出登录</Button>}
           </div>
         </aside>
 
@@ -100,44 +106,45 @@ export default function App() {
               <span id="health" className="health">
                 正在连接…
               </span>
-              <button id="dispatcher-toggle" className="ghost" type="button">
+              <Button variant="outline" id="dispatcher-toggle" className="ghost" type="button">
                 调度状态
-              </button>
-              <button
+              </Button>
+              <Button
                 id="new-task-button"
                 className="primary"
                 type="button"
                 hidden
               >
                 新增任务
-              </button>
-              <button
+              </Button>
+              <Button
                 id="new-requirement-button"
                 className="primary"
                 type="button"
                 hidden
               >
                 新增需求
-              </button>
-              <button
+              </Button>
+              <Button
                 id="task-change-confirmations"
                 className="primary change-confirmation-button"
                 type="button"
                 hidden
               >
                 需求变更（<span id="task-change-count">0</span>）
-              </button>
-              <button id="completed-tasks" className="primary" type="button">
+              </Button>
+              <Button id="completed-tasks" className="primary" type="button">
                 完成任务（<span id="completed-count">0</span>）
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="outline"
                 id="settings-button"
                 className="ghost"
                 type="button"
                 aria-label="打开设置"
               >
                 设置
-              </button>
+              </Button>
             </div>
           </header>
           <section id="content" className="board-columns"></section>
@@ -151,9 +158,9 @@ export default function App() {
               <p className="eyebrow">TASK TRACE</p>
               <h2 id="detail-title">任务记录</h2>
             </div>
-            <button type="button" className="icon-button" data-close>
+            <Button variant="ghost" size="icon" type="button" className="icon-button" data-close>
               ×
-            </button>
+            </Button>
           </div>
           <div id="task-detail-content" className="detail-content"></div>
         </div>
@@ -168,9 +175,9 @@ export default function App() {
                 完成任务（<span id="completed-dialog-count">0</span>）
               </h2>
             </div>
-            <button type="button" className="icon-button" data-close>
+            <Button variant="ghost" size="icon" type="button" className="icon-button" data-close>
               ×
-            </button>
+            </Button>
           </div>
           <div
             id="completed-tasks-content"
@@ -188,9 +195,9 @@ export default function App() {
                 确认需求归属（<span id="task-change-dialog-count">0</span>）
               </h2>
             </div>
-            <button type="button" className="icon-button" data-close>
+            <Button variant="ghost" size="icon" type="button" className="icon-button" data-close>
               ×
-            </button>
+            </Button>
           </div>
           <p className="change-confirmation-help">
             请选择将新需求合并到正在执行的任务，或拆成一个独立任务。选择后立即生效。
@@ -209,13 +216,13 @@ export default function App() {
               <p className="eyebrow">NEW REQUIREMENT</p>
               <h2>新增需求</h2>
             </div>
-            <button type="button" className="icon-button" data-close>
+            <Button variant="ghost" size="icon" type="button" className="icon-button" data-close>
               ×
-            </button>
+            </Button>
           </div>
           <label>
             标题
-            <input name="title" maxLength="120" required autoFocus />
+            <Input name="title" maxLength="120" required autoFocus />
           </label>
           <label>
             Mac Codex 项目（可选）
@@ -227,7 +234,7 @@ export default function App() {
               <option value="">无项目（仅保存需求）</option>
               <option value="__manual__">手动输入绝对路径…</option>
             </select>
-            <input
+            <Input
               name="manual_project"
               data-manual-project
               placeholder="输入 Mac 上的绝对路径"
@@ -236,11 +243,11 @@ export default function App() {
           </label>
           <label>
             需求目标
-            <textarea name="goal" rows="5" required></textarea>
+            <Textarea name="goal" rows="5" required />
           </label>
           <label>
             需求截图（最多 8 张，每张不超过 10 MiB）
-            <input
+            <Input
               name="visual_references"
               type="file"
               accept="image/png,image/jpeg,image/gif,image/webp"
@@ -257,12 +264,12 @@ export default function App() {
             </select>
           </label>
           <label className="inline-checkbox">
-            <input name="auto_dispatch" type="checkbox" defaultChecked />
+            <Input name="auto_dispatch" type="checkbox" defaultChecked />
             保存后自动调度拆解
           </label>
           <div className="form-actions">
-            <button type="button" className="ghost" data-close>取消</button>
-            <button type="submit" className="primary">保存并调度</button>
+            <Button variant="outline" type="button" className="ghost" data-close>取消</Button>
+            <Button type="submit" className="primary">保存并调度</Button>
           </div>
         </form>
       </dialog>
@@ -274,13 +281,13 @@ export default function App() {
               <p className="eyebrow">NEW TASK</p>
               <h2>新增任务</h2>
             </div>
-            <button type="button" className="icon-button" data-close>
+            <Button variant="ghost" size="icon" type="button" className="icon-button" data-close>
               ×
-            </button>
+            </Button>
           </div>
           <label>
             标题
-            <input name="title" maxLength="120" required autoFocus />
+            <Input name="title" maxLength="120" required autoFocus />
           </label>
           <label>
             类型
@@ -299,7 +306,7 @@ export default function App() {
               <option value="">无项目（创建到 Codex 最近）</option>
               <option value="__manual__">手动输入绝对路径…</option>
             </select>
-            <input
+            <Input
               name="manual_project"
               data-manual-project
               placeholder="输入 Mac 上的绝对路径"
@@ -308,11 +315,11 @@ export default function App() {
           </label>
           <label>
             任务目标
-            <textarea name="goal" rows="5" required></textarea>
+            <Textarea name="goal" rows="5" required />
           </label>
           <label>
             任务截图（最多 8 张，每张不超过 10 MiB）
-            <input
+            <Input
               name="visual_references"
               type="file"
               accept="image/png,image/jpeg,image/gif,image/webp"
@@ -329,12 +336,12 @@ export default function App() {
             </select>
           </label>
           <label className="inline-checkbox">
-            <input name="auto_dispatch" type="checkbox" defaultChecked />
+            <Input name="auto_dispatch" type="checkbox" defaultChecked />
             保存后自动定位并执行
           </label>
           <div className="form-actions">
-            <button type="button" className="ghost" data-close>取消</button>
-            <button type="submit" className="primary">加入任务队列</button>
+            <Button variant="outline" type="button" className="ghost" data-close>取消</Button>
+            <Button type="submit" className="primary">加入任务队列</Button>
           </div>
         </form>
       </dialog>

@@ -6,8 +6,10 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
-from .config import ServerConfig
+from .config import CLOUD_MODE, ServerConfig
+from .web_auth import session_cookie, session_token
 from .http_security import HTTPRequestError, RequestSecurityPolicy
 
 
@@ -21,7 +23,7 @@ class BaseDoTasksHandler(BaseHTTPRequestHandler):
     config: ServerConfig
 
     def _security(self) -> RequestSecurityPolicy:
-        return RequestSecurityPolicy(self.config, self.server.server_port)
+        return RequestSecurityPolicy(self.config, self.server.server_port, self.server.web_sessions)
 
     def _trusted_origins(self) -> set[str]:
         return self._security().trusted_origins
@@ -105,8 +107,45 @@ class BaseDoTasksHandler(BaseHTTPRequestHandler):
             )
         return payload
 
+    def _handle_web_auth(self, method: str, path: str) -> bool:
+        if path not in {"/api/auth/status", "/api/auth/login", "/api/auth/logout"}:
+            return False
+        security = self._security()
+        security.validate_origin(self.headers)
+        enabled = self.config.mode == CLOUD_MODE
+        token = session_token(self.headers.get("Cookie", ""))
+        sessions = self.server.web_sessions
+        if method == "GET" and path == "/api/auth/status":
+            authenticated = not enabled or sessions.valid(token)
+            self._json(HTTPStatus.OK, {"enabled": enabled, "authenticated": authenticated})
+            return True
+        if method != "POST" or path == "/api/auth/status":
+            raise HTTPRequestError(HTTPStatus.METHOD_NOT_ALLOWED, "Method not allowed")
+        if self.headers.get("Origin") not in security.trusted_origins:
+            raise HTTPRequestError(HTTPStatus.FORBIDDEN, "Untrusted request origin")
+        payload = self._read_json(4096)
+        if not enabled:
+            raise HTTPRequestError(HTTPStatus.BAD_REQUEST, "本地模式无需登录")
+        if path == "/api/auth/login":
+            if not sessions.allow_login():
+                raise HTTPRequestError(HTTPStatus.TOO_MANY_REQUESTS, "登录尝试过于频繁，请稍后重试", {"Retry-After": "60"})
+            username, password = payload.get("username"), payload.get("password")
+            if not isinstance(username, str) or not isinstance(password, str) or not security.valid_credentials(username, password):
+                raise HTTPRequestError(HTTPStatus.UNAUTHORIZED, "账号或密码错误")
+            sessions.revoke(token)
+            token = sessions.create()
+        else:
+            sessions.revoke(token)
+            # Keep a non-authenticating marker so cached legacy Basic credentials cannot undo logout.
+            token = "signed-out"
+        self._json(HTTPStatus.OK, {"authenticated": path == "/api/auth/login"}, {
+            "Set-Cookie": session_cookie(token, secure=urlparse(self.config.public_url).scheme == "https"),
+        })
+        return True
+
     def _serve_static(self, path: str) -> None:
-        self._require_authentication()
+        # The public application shell contains no account data; APIs enforce authentication.
+        self._security().validate_origin(self.headers)
         relative = "index.html" if path in {"", "/"} else path.lstrip("/")
         candidate = (self.static_root / relative).resolve()
         if self.static_root not in candidate.parents and candidate != self.static_root:

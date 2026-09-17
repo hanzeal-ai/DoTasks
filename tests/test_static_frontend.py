@@ -93,11 +93,13 @@ if (!/^2026-09-04 \\d{2}:44:39$/.test(formatted)) throw new Error(`unexpected lo
 """)
         self.assertEqual(0, completed.returncode, completed.stderr)
 
-    def test_sidebar_contains_realtime_execution_log(self):
+    def test_execution_log_is_a_separate_page(self):
         app = (WEB_SOURCE / "App.jsx").read_text(encoding="utf-8")
         script = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")
-        self.assertIn('id="execution-log-list"', app)
-        self.assertIn('className="sidebar-log"', app)
+        self.assertIn('id="execution-log-nav"', app)
+        self.assertNotIn('id="execution-log-list"', app)
+        self.assertIn('id="execution-log-list"', script)
+        self.assertIn('if (state.view === "logs") renderExecutionLog();', script)
         self.assertIn("renderExecutionLog()", script)
         self.assertIn('item.event_type !== "token_usage_updated"', script)
 
