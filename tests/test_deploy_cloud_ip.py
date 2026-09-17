@@ -91,6 +91,20 @@ class DeployCloudIpScriptTest(unittest.TestCase):
         self.assertIn("DoTasks Cloud is running: http://203.0.113.10:8765", result.stdout)
         self.assertIn("allow inbound TCP 8765", result.stdout)
 
+    def test_accepts_eight_character_password_and_reuses_it(self) -> None:
+        self.run_script("--http-password", "pass1234")
+        self.assertIn(
+            "DOTASKS_HTTP_PASSWORD=pass1234\n",
+            (self.project / ".env").read_text(encoding="utf-8"),
+        )
+        self.run_script("--reuse-env")
+
+    def test_rejects_password_shorter_than_eight_characters(self) -> None:
+        result = self.run_script("--http-password", "pass123", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("DOTASKS_HTTP_PASSWORD must contain at least 8 characters", result.stderr)
+        self.assertFalse((self.project / ".env").exists())
+
     def test_https_url_binds_backend_to_loopback_for_reverse_proxy(self) -> None:
         result = subprocess.run(
             [

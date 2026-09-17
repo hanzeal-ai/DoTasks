@@ -210,7 +210,7 @@ case "$IMAGE_NAME" in
   *) fail "DOTASKS_IMAGE must include an explicit version tag" ;;
 esac
 [ -n "$HTTP_USER" ] || fail "DOTASKS_HTTP_USER is missing from .env"
-[ "${#HTTP_PASSWORD}" -ge 16 ] || fail "DOTASKS_HTTP_PASSWORD must contain at least 16 characters"
+[ "${#HTTP_PASSWORD}" -ge 8 ] || fail "DOTASKS_HTTP_PASSWORD must contain at least 8 characters"
 [ -n "$AGENT_ID" ] || fail "DOTASKS_AGENT_ID is missing from .env"
 [ "${#AGENT_TOKEN}" -ge 24 ] || fail "DOTASKS_AGENT_TOKEN must contain at least 24 characters"
 case "$HTTP_PASSWORD$AGENT_TOKEN" in
