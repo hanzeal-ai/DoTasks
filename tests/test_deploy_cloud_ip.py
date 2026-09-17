@@ -143,6 +143,25 @@ class DeployCloudIpScriptTest(unittest.TestCase):
         self.assertIn("DOTASKS_AGENT_TOKEN=agent-token-12345678901234567890", environment)
         self.assertIn("Image: registry.example.com/team/dotasks:2026.09.04", result.stdout)
 
+    def test_https_image_update_preserves_existing_listener(self) -> None:
+        self.run_script()
+        env_file = self.project / ".env"
+        previous = env_file.read_text().replace("DOTASKS_BIND_ADDRESS=0.0.0.0", "DOTASKS_BIND_ADDRESS=172.17.0.1")
+        # Keep an existing private listener used by a containerized reverse proxy.
+        lines = previous.splitlines()
+        previous = "\n".join("DOTASKS_PUBLIC_URL=https://tasks.example.com" if line.startswith("DOTASKS_PUBLIC_URL=") else line for line in lines) + "\n"
+        env_file.write_text(previous)
+        result = subprocess.run([
+            "/bin/sh", str(SCRIPT), "--public-url", "https://tasks.example.com", "--reuse-env",
+            "--image", "registry.example.com/team/dotasks:new", "--no-print-secrets",
+        ], cwd=self.project, env=self.environment, capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        current = env_file.read_text()
+        self.assertIn("DOTASKS_BIND_ADDRESS=172.17.0.1", current)
+        self.assertIn("DOTASKS_HTTP_PASSWORD=browser-password-123456", current)
+        self.assertIn("DOTASKS_AGENT_TOKEN=agent-token-12345678901234567890", current)
+        self.assertIn("DOTASKS_IMAGE=registry.example.com/team/dotasks:new", current)
+
     def test_ci_mode_keeps_credentials_out_of_output(self) -> None:
         result = self.run_script("--no-print-secrets")
 

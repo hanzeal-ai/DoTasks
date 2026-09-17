@@ -177,7 +177,15 @@ if [ -f "$ENV_FILE" ] && [ "$FORCE_ENV" -eq 0 ]; then
   EXISTING_BIND_ADDRESS=$(read_env DOTASKS_BIND_ADDRESS)
   EXISTING_PORT=$(read_env DOTASKS_BIND_PORT)
   [ "$EXISTING_PUBLIC_URL" = "$PUBLIC_URL" ] || fail "existing DOTASKS_PUBLIC_URL does not match $PUBLIC_URL"
-  [ "$EXISTING_BIND_ADDRESS" = "$BIND_ADDRESS" ] || fail "existing DOTASKS_BIND_ADDRESS does not match $BIND_ADDRESS"
+  # Image-only updates retain the established proxy/listener topology.
+  printf '%s\n' "$EXISTING_BIND_ADDRESS" | awk -F. '
+    NF != 4 { exit 1 }
+    { for (i = 1; i <= 4; i++) {
+        if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) exit 1
+      }
+    }
+  ' || fail "existing DOTASKS_BIND_ADDRESS must be an IPv4 address"
+  BIND_ADDRESS=$EXISTING_BIND_ADDRESS
   [ "$EXISTING_PORT" = "$PORT" ] || fail "existing DOTASKS_BIND_PORT does not match $PORT"
   EXISTING_IMAGE=$(read_env DOTASKS_IMAGE)
   [ -n "$IMAGE" ] || IMAGE=$EXISTING_IMAGE
