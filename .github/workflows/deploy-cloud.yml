@@ -112,10 +112,38 @@ jobs:
           fi
           deploy_root="$HOME/dotasks"
           mkdir -p "$deploy_root"
+          # A manual root deployment can leave private configuration unreadable by this runner.
+          runner_uid=$(id -u)
+          runner_gid=$(id -g)
+          if [[ -L "$deploy_root" || $(stat -c %u "$deploy_root") != "$runner_uid" ]]; then
+            echo "Deployment directory must be owned by the runner and must not be a symlink" >&2
+            exit 1
+          fi
+          cd "$deploy_root"
+          for config_path in .env .dotasks-cloud .dotasks-cloud/compose.yaml; do
+            if [[ -L "$config_path" ]]; then
+              echo "Refusing symlink deployment configuration: $config_path" >&2
+              exit 1
+            fi
+            if [[ -e "$config_path" ]]; then
+              if { [[ "$config_path" == .dotasks-cloud ]] && [[ ! -d "$config_path" ]]; } ||
+                 { [[ "$config_path" != .dotasks-cloud ]] && [[ ! -f "$config_path" ]]; }; then
+                echo "Unexpected deployment configuration type: $config_path" >&2
+                exit 1
+              fi
+              config_owner=$(stat -c %u "$config_path")
+              if [[ "$config_owner" == 0 && "$runner_uid" != 0 ]]; then
+                sudo -n chown "$runner_uid:$runner_gid" -- "$deploy_root/$config_path"
+              elif [[ "$config_owner" != "$runner_uid" ]]; then
+                echo "Unexpected deployment configuration owner: $config_path" >&2
+                exit 1
+              fi
+              if [[ -d "$config_path" ]]; then chmod 700 "$config_path"; else chmod 600 "$config_path"; fi
+            fi
+          done
           install -m 755 \
             "$RUNNER_TEMP/dotasks-deployment/deploy-cloud-ip" \
             "$deploy_root/deploy-cloud-ip"
-          cd "$deploy_root"
           reuse_env=()
           if test -f .env; then reuse_env=(--reuse-env); fi
           ./deploy-cloud-ip \
