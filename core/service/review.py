@@ -709,6 +709,7 @@ class TaskReviewMixin:
                 task_id,
                 "code_reviewed",
                 {
+                    "run_id": run_id,
                     "verdict": verdict,
                     "reasons": reasons,
                     "next_stage": next_status,

@@ -449,10 +449,28 @@ CREATE INDEX IF NOT EXISTS idx_events_entity ON events(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_integration_outbox_pending ON integration_outbox(status, next_attempt_at, created_at);
 CREATE INDEX IF NOT EXISTS idx_native_dispatches_worker ON native_dispatches(worker_id, status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_native_dispatches_entity ON native_dispatches(entity_type, entity_id, created_at);
+
+CREATE TABLE IF NOT EXISTS mobile_messages (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  thread_id TEXT NOT NULL,
+  body TEXT NOT NULL,
+  run_id TEXT REFERENCES task_runs(id),
+  usage_baseline TEXT NOT NULL DEFAULT '{}',
+  thread_usage_baseline TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK(status IN ('queued','starting','running','completed','failed','uncertain')),
+  worker_id TEXT NOT NULL DEFAULT '',
+  turn_id TEXT NOT NULL DEFAULT '',
+  result TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_mobile_messages_queue ON mobile_messages(status, created_at);
 """
 
 # Schema version changes whenever migration output or validation constraints change.
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 
 class Database:
@@ -467,7 +485,10 @@ class Database:
                     connection.executescript(SCHEMA)
                     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
                     if self._needs_migration(connection, version):
-                        self._migrate(connection)
+                        # v23 only adds the mobile queue. Do not normalize existing
+                        # v22 business rows unless a separate invariant needs repair.
+                        if version != 22 or self._needs_migration(connection, SCHEMA_VERSION):
+                            self._migrate(connection)
                         connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                     connection.commit()
             finally:

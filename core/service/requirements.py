@@ -632,6 +632,8 @@ class TaskRequirementMixin:
         self, worker_id: str, project: str | None, lease_seconds: int,
     ) -> dict[str, Any] | None:
         with self.db.transaction() as connection:
+            if connection.execute("SELECT 1 FROM mobile_messages WHERE status IN ('starting','running','uncertain') LIMIT 1").fetchone():
+                return None
             connection.execute(
                 """UPDATE requirement_decomposition_runs SET status='failed',
                    error='decomposition lease expired', completed_at=CURRENT_TIMESTAMP,

@@ -569,6 +569,8 @@ class TaskLifecycleMixin:
             return [self._dispatch_blocker("dispatcher_paused", "全局调度已暂停")]
         if not bool(task.get("auto_dispatch")):
             return [self._dispatch_blocker("task_auto_dispatch_paused", "任务自动领取已暂停")]
+        if self._mobile_task_locked(connection, task['id']):
+            return [self._dispatch_blocker('mobile_conversation_active', '手机对话正在执行或等待核对')]
 
         retry_after = str(task.get("dispatch_retry_after") or "").strip()
         if retry_after:
@@ -1182,6 +1184,7 @@ class TaskLifecycleMixin:
             values: list[Any] = []
             where = [
                 "t.status='code_review'",
+                "NOT EXISTS (SELECT 1 FROM mobile_messages WHERE status IN ('starting','running','uncertain'))",
                 "t.auto_dispatch=1",
                 "(t.review_retry_after IS NULL OR t.review_retry_after<=CURRENT_TIMESTAMP)",
                 "EXISTS (SELECT 1 FROM task_runs d WHERE d.id=t.primary_run_id AND d.status='waiting_review')",

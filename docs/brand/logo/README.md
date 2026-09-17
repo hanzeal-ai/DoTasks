@@ -1,57 +1,21 @@
 # DoTasks Logo
 
-## Primary direction: Done Loop
+正式方案为 **Ribbon D / 交叠 D**，与 CarryOn 的黑色交叠丝带 C 构成同一品牌系列。采用相同的圆头粗线和透明穿插留白，DoTasks 使用 D 形轮廓。
 
-The selected mark combines three ideas in one compact shape:
+## 正式资源
 
-- three stacked task cards form the vertical stem of the letter `D`;
-- the white outer curve represents a workflow moving through the board;
-- the mint check signals a verified completion rather than activity alone.
+- `dotasks-mark.svg`：黑色独立图形。
+- `dotasks-mark-mono-dark.svg` / `dotasks-mark-mono-light.svg`：黑白单色图形。
+- `dotasks-logo-horizontal.svg`：浅色背景横排。
+- `dotasks-logo-horizontal-dark.svg`：深色背景白色横排。
+- `dotasks-logo-vertical.svg`：竖排组合。
+- `../../../web/public/dotasks-mark.svg`：Web 登录页、侧栏和 favicon 的源文件。
+- `../../../static/dotasks-mark.svg`：Vite 构建复制的运行时资源。
 
-The design keeps the product's existing blue accent while reducing detail at favicon and sidebar sizes. It is geometric, calm, and technical without resembling a generic chat bubble or checklist app.
+选定设计源位于 `../dotasks-family-v2/01-ribbon-d/`。`concepts/` 为旧方案归档，不用于正式产品。
 
-## Files
+## 使用规范
 
-- `dotasks-mark.svg`: primary icon-only mark.
-- `dotasks-logo-horizontal.svg`: primary lockup for light backgrounds.
-- `dotasks-logo-horizontal-dark.svg`: primary lockup for dark backgrounds.
-- `dotasks-logo-vertical.svg`: centered lockup for square or stacked placements.
-- `dotasks-mark-mono-dark.svg`: single-color mark for light backgrounds.
-- `dotasks-mark-mono-light.svg`: single-color mark for dark backgrounds.
-- `concepts/`: three explored directions; `concept-1-done-loop.svg` is the selected production direction.
-- `../../../web/public/dotasks-mark.svg`: web source used by the sidebar and favicon.
-- `../../../static/dotasks-mark.svg`: built/runtime copy of the production mark.
+主色为纯黑 `#000000`，深色背景使用白色 `#FFFFFF`。产品原有蓝色交互强调色保持原状。图标透明，不额外添加底板、阴影或描边。
 
-## Palette
-
-| Role | Color | Usage |
-| --- | --- | --- |
-| DoTasks blue | `#317CFF` | Primary mark and product accent |
-| Completion mint | `#8AF0B6` | Successful workflow completion |
-| Ink | `#18181B` | Wordmark on light backgrounds |
-| Paper | `#F7F7F8` | Wordmark on dark backgrounds |
-
-## Usage
-
-- Use the icon-only mark below 120 px of available horizontal space.
-- Use the horizontal lockup in headers, documentation, and release material.
-- Keep clear space equal to one task-card width around every side of the mark.
-- Minimum recommended size is 16 px for the mark and 120 px wide for the horizontal lockup.
-- The production icon has a transparent canvas; do not add another container or corner radius around it.
-
-## Do not
-
-- stretch, skew, rotate, outline, or add shadows to the mark;
-- recolor individual task cards;
-- place the full-color mark on a saturated blue background;
-- typeset a replacement wordmark with a decorative font;
-- remove the completion check or separate it from the workflow loop.
-
-## Export
-
-SVG is the source of truth. When a PNG is required, export from the SVG at the exact target size:
-
-```bash
-inkscape dotasks-logo-horizontal.svg --export-type=png --export-width=1040
-inkscape dotasks-mark-mono-dark.svg --export-type=png --export-width=512
-```
+独立图形推荐至少 24px；16px 时仍可辨认轮廓，但穿插留白会弱化。横排至少 140px，外围留白为可见图形宽度约 20%。不可拉伸或单独改变线宽和穿插间隙。字标采用 Arial/Helvetica Bold，SVG 中保留可编辑文字，印刷前需转轮廓。

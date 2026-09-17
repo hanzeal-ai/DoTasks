@@ -303,6 +303,12 @@ class TaskRunMixin:
         self, run_id: str, token_used: int, usage: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """Persist monotonic run totals, including cached-input and output detail."""
+        with self.db.transaction() as connection:
+            self._record_run_token_usage(connection, run_id, token_used, usage)
+        return self.get_run(run_id)
+
+    def _record_run_token_usage(self, connection: Any, run_id: str,
+                               token_used: int, usage: dict[str, int] | None = None) -> None:
         token_used = int(token_used)
         if token_used < 0:
             raise ValueError("token_used must be non-negative")
@@ -314,61 +320,59 @@ class TaskRunMixin:
             )
         }
         effective_used = effective_token_total(token_used, normalized_usage)
-        with self.db.transaction() as connection:
-            row = connection.execute(
-                """SELECT task_id, token_used, effective_token_used, input_tokens, cached_input_tokens,
-                          output_tokens, reasoning_output_tokens
-                   FROM task_runs WHERE id=?""", (run_id,),
-            ).fetchone()
-            if not row:
-                raise KeyError(f"Run not found: {run_id}")
-            previous = int(row["token_used"] or 0)
-            previous_effective = int(row["effective_token_used"] or 0)
-            if token_used > previous:
-                deltas = {
-                    key: max(0, normalized_usage[key] - int(row[key] or 0))
-                    for key in normalized_usage
-                }
-                connection.execute(
-                    """INSERT OR IGNORE INTO token_usage_events(
-                           task_id, run_id, source_total, token_delta, effective_token_delta, input_delta,
-                           cached_input_delta, output_delta, reasoning_output_delta
-                       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        row["task_id"], run_id, token_used, token_used - previous,
-                        max(0, effective_used - previous_effective),
-                        deltas["input_tokens"], deltas["cached_input_tokens"],
-                        deltas["output_tokens"], deltas["reasoning_output_tokens"],
-                    ),
-                )
-            if token_used > previous or any(normalized_usage[key] > int(row[key] or 0) for key in normalized_usage):
-                connection.execute(
-                    """UPDATE task_runs SET token_used=MAX(token_used, ?),
-                           effective_token_used=MAX(effective_token_used, ?),
-                           input_tokens=MAX(input_tokens, ?),
-                           cached_input_tokens=MAX(cached_input_tokens, ?),
-                           output_tokens=MAX(output_tokens, ?),
-                           reasoning_output_tokens=MAX(reasoning_output_tokens, ?),
-                           updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                    (
-                        token_used, effective_used, normalized_usage["input_tokens"],
-                        normalized_usage["cached_input_tokens"], normalized_usage["output_tokens"],
-                        normalized_usage["reasoning_output_tokens"], run_id,
-                    ),
-                )
-                connection.execute(
-                    """UPDATE tasks SET token_used=(
-                           SELECT COALESCE(SUM(r.token_used), 0) FROM task_runs r WHERE r.task_id=tasks.id
-                       ), effective_token_used=(
-                           SELECT COALESCE(SUM(r.effective_token_used), 0) FROM task_runs r WHERE r.task_id=tasks.id
-                       ), updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                    (row["task_id"],),
-                )
-                self._event(connection, "run", run_id, "token_usage_updated", {
-                    "task_id": row["task_id"], "token_used": token_used,
-                    "effective_token_used": effective_used, **normalized_usage,
-                })
-        return self.get_run(run_id)
+        row = connection.execute(
+            """SELECT task_id, token_used, effective_token_used, input_tokens, cached_input_tokens,
+                      output_tokens, reasoning_output_tokens
+               FROM task_runs WHERE id=?""", (run_id,),
+        ).fetchone()
+        if not row:
+            raise KeyError(f"Run not found: {run_id}")
+        previous = int(row["token_used"] or 0)
+        previous_effective = int(row["effective_token_used"] or 0)
+        if token_used > previous:
+            deltas = {
+                key: max(0, normalized_usage[key] - int(row[key] or 0))
+                for key in normalized_usage
+            }
+            connection.execute(
+                """INSERT OR IGNORE INTO token_usage_events(
+                       task_id, run_id, source_total, token_delta, effective_token_delta, input_delta,
+                       cached_input_delta, output_delta, reasoning_output_delta
+                   ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    row["task_id"], run_id, token_used, token_used - previous,
+                    max(0, effective_used - previous_effective),
+                    deltas["input_tokens"], deltas["cached_input_tokens"],
+                    deltas["output_tokens"], deltas["reasoning_output_tokens"],
+                ),
+            )
+        if token_used > previous or any(normalized_usage[key] > int(row[key] or 0) for key in normalized_usage):
+            connection.execute(
+                """UPDATE task_runs SET token_used=MAX(token_used, ?),
+                       effective_token_used=MAX(effective_token_used, ?),
+                       input_tokens=MAX(input_tokens, ?),
+                       cached_input_tokens=MAX(cached_input_tokens, ?),
+                       output_tokens=MAX(output_tokens, ?),
+                       reasoning_output_tokens=MAX(reasoning_output_tokens, ?),
+                       updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                (
+                    token_used, effective_used, normalized_usage["input_tokens"],
+                    normalized_usage["cached_input_tokens"], normalized_usage["output_tokens"],
+                    normalized_usage["reasoning_output_tokens"], run_id,
+                ),
+            )
+            connection.execute(
+                """UPDATE tasks SET token_used=(
+                       SELECT COALESCE(SUM(r.token_used), 0) FROM task_runs r WHERE r.task_id=tasks.id
+                   ), effective_token_used=(
+                       SELECT COALESCE(SUM(r.effective_token_used), 0) FROM task_runs r WHERE r.task_id=tasks.id
+                   ), updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                (row["task_id"],),
+            )
+            self._event(connection, "run", run_id, "token_usage_updated", {
+                "task_id": row["task_id"], "token_used": token_used,
+                "effective_token_used": effective_used, **normalized_usage,
+            })
 
     def _bind_conversation_in_connection(
         self, connection: Any, task_id: str, role: str, thread_id: str,

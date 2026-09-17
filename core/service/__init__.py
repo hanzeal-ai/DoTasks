@@ -24,9 +24,11 @@ from .scheduling import TaskSchedulingMixin
 from .integration import TaskIntegrationMixin
 from .settings import TaskSettingsMixin
 from .visuals import TaskVisualMixin
+from .mobile import MobileConversationMixin
 
 
 class TaskboardService(
+    MobileConversationMixin,
     TaskSettingsMixin,
     TaskVisualMixin,
     TaskPlanningMixin,

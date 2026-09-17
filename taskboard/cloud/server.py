@@ -26,6 +26,7 @@ from taskboard.codex_projects import sanitize_codex_projects
 from taskboard.config import CLOUD_MODE, ServerConfig
 from taskboard.http_security import HTTPRequestError
 from taskboard.mcp_server import tool_handlers_for
+from taskboard.mobile_bridge import mobile_handlers_for
 from taskboard.project_guard import ProjectWorkspaceGuard
 from taskboard.server import TaskboardHandler
 from taskboard.web_auth import WebSessions
@@ -459,7 +460,7 @@ class RelayHandler(TaskboardHandler):
                 if payload.get("agent_id") != agent_id:
                     raise HTTPRequestError(HTTPStatus.FORBIDDEN, "Agent ID mismatch")
                 name = str(payload.get("name") or "")
-                handlers = tool_handlers_for(self.service)
+                handlers = {**tool_handlers_for(self.service), **mobile_handlers_for(self.service)}
                 handler = handlers.get(name)
                 if handler is None:
                     raise ValueError(f"Unknown tool: {name}")
