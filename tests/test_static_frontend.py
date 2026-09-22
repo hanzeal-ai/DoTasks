@@ -30,7 +30,9 @@ const module = await import(`data:text/javascript;charset=utf-8,${{encodeURIComp
 
     def test_header_does_not_show_integration_statuses(self):
         css = (WEB_SOURCE / "styles.css").read_text(encoding="utf-8")
-        self.assertIn(".integration-statuses { display: none; }", css)
+        html = (WEB_SOURCE / "App.jsx").read_text(encoding="utf-8")
+        self.assertNotIn('id="health"', html)
+        self.assertNotIn('className="integration-statuses"', html)
 
     def test_project_chat_controls_are_removed_from_the_rendered_app(self):
         index = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
@@ -226,7 +228,6 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
             "new-requirement-dialog",
             "dispatcher-toggle",
             "completed-tasks",
-            "settings-button",
         ):
             self.assertIn(f'id="{control_id}"', html)
         self.assertIn("const taskColumns = columns.map(column =>", app)
@@ -244,18 +245,19 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
         self.assertIn("left.requirement_task_key", app)
         self.assertIn('class="requirement-task"', app)
         self.assertIn("<span>${visible.length}</span>", app)
-        self.assertIn('document.querySelector("#content").innerHTML', app)
+        self.assertIn('setContent("#content",', app)
         self.assertLess(html.index('id="board-nav"'), html.index('id="requirements-nav"'))
         self.assertLess(html.index('id="requirements-nav"'), html.index('id="token-panel"'))
         self.assertIn("任务看板", html)
         self.assertIn("需求看板", html)
         self.assertIn("Token 看板", html)
-        self.assertIn("Codex 原生任务调度", html)
+        self.assertNotIn("Codex 原生任务调度", html)
+        self.assertIn("<AccountMenu", html)
         self.assertLess(html.index('id="dispatcher-toggle"'), html.index('id="completed-tasks"'))
-        self.assertLess(html.index('id="completed-tasks"'), html.index('id="settings-button"'))
+        self.assertNotIn('id="settings-button"', html)
         self.assertIn('event.target.closest("#board-nav")', app)
         self.assertIn('event.target.closest("#requirements-nav")', app)
-        self.assertIn('event.target.closest("#settings-button")', app)
+        self.assertIn('event.detail === "settings"', app)
         self.assertIn('event.target.closest("#completed-tasks")', app)
         self.assertIn('column.key === "attention"', app)
         self.assertIn('event.target.closest("#dispatcher-toggle")', app)
@@ -318,7 +320,7 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
     def test_settings_button_opens_task_token_budget_configuration(self):
         html = (WEB_SOURCE / "App.jsx").read_text(encoding="utf-8")
         app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")
-        self.assertLess(html.index('id="completed-tasks"'), html.index('id="settings-button"'))
+        self.assertNotIn('id="settings-button"', html)
         self.assertIn('id="task-settings-form"', app)
         self.assertIn('name="task_token_budget"', app)
         self.assertIn('name="max_batch_appended_tasks"', app)

@@ -1,3 +1,5 @@
+import { openDialog, closeDialog, isDialogOpen } from "./components/taskboard-dialog";
+import { setContent } from "./ui-markup.js";
 import {
   durationBetween,
   escapeHtml,
@@ -24,7 +26,6 @@ const state = {
   tokenView: "charts",
 };
 const NAVIGATION_STORAGE_KEY = "dotasks:navigation:v1";
-let integrationRequestId = 0;
 let boardEventSource = null;
 let refreshTimer = null;
 let loadingBoard = false;
@@ -119,42 +120,11 @@ function toast(message) {
   setTimeout(() => element.classList.remove("show"), 2400);
 }
 
-function setIntegrationStatus(id, status, title) {
-  const element = document.querySelector(`#${id}`);
-  element.className = `integration-status ${status}`;
-  element.title = title;
-}
-
-async function syncIntegrationStatuses() {
-  const requestId = ++integrationRequestId;
-  setIntegrationStatus("obsidian-status", "pending", "正在检查 Obsidian");
-  setIntegrationStatus("location-status", "pending", "正在检查代码定位");
-  try {
-    const project = "";
-    const integrations = await api("/api/integrations");
-    if (requestId !== integrationRequestId) return;
-    const obsidian = integrations.obsidian;
-    setIntegrationStatus("obsidian-status", obsidian.exists ? "connected" : "disconnected", obsidian.exists ? `Obsidian 已连接：${obsidian.vault}` : `Obsidian 未连接：${obsidian.vault}`);
-    const location = integrations.location;
-    const stale = location.state === "stale";
-    const status = stale ? "warning" : location.available ? "connected" : "disconnected";
-    const title = !project ? "代码定位：请选择一个具体项目" : stale ? "代码定位证据已过期" : location.available ? `代码定位已完成：${location.summary || project}` : `代码定位未完成：${location.summary || location.reason || project}`;
-    setIntegrationStatus("location-status", status, title);
-  } catch (error) {
-    if (requestId !== integrationRequestId) return;
-    setIntegrationStatus("obsidian-status", "disconnected", `Obsidian 状态检查失败：${error.message}`);
-    setIntegrationStatus("location-status", "disconnected", `代码定位状态检查失败：${error.message}`);
-  }
-}
-
 function syncSidebar() {
   document.querySelector("#execution-log-nav").classList.toggle("selected", state.view === "logs");
-  document.querySelector("#execution-log-count").textContent = String(executionLogs().length);
   document.querySelector("#board-nav").classList.toggle("selected", state.view === "board");
   document.querySelector("#requirements-nav").classList.toggle("selected", state.view === "requirements");
   document.querySelector("#token-panel").classList.toggle("selected", state.view === "tokens");
-  document.querySelector("#board-count").textContent = String(state.board?.tasks?.length || 0);
-  document.querySelector("#requirements-count").textContent = String(state.board?.requirements?.length || 0);
 }
 
 function executionLogs() {
@@ -165,8 +135,8 @@ function executionLogs() {
 
 function renderExecutionLog() {
   const logs = executionLogs();
-  document.querySelector("#content").innerHTML = '<section id="execution-log-list" class="execution-log-list" aria-label="执行日志"></section>';
-  document.querySelector("#execution-log-list").innerHTML = logs.length
+  setContent("#content", '<section id="execution-log-list" class="execution-log-list" aria-label="执行日志"></section>');
+  setContent("#execution-log-list", logs.length
     ? logs.map(item => {
       const reason = executionLogReason(item);
       const problem = /failed|blocked|expired|interrupted|exhausted|stopped/.test(item.event_type)
@@ -182,7 +152,7 @@ function renderExecutionLog() {
         : `<b>${escapeHtml(item.task_id)}</b>`;
       return `<article class="execution-log-item${problem ? " problem" : ""}"><div class="execution-log-line"><time>[${escapeHtml(formatLogTimestamp(item.created_at))}]</time>${taskLabel}<strong>${escapeHtml(executionLogLabel(item, statusLabels))}</strong>${item.thread_id ? `<button type="button" class="execution-log-thread" data-open-thread="${escapeHtml(item.thread_id)}" title="打开会话 ${escapeHtml(item.thread_id)}">${escapeHtml(threadId)}</button>` : `<code title="此时尚未创建会话">${escapeHtml(threadId)}</code>`}</div>${reason ? `<p><span>${reasonKind}：</span>${escapeHtml(reason)}</p>` : ""}</article>`;
     }).join("")
-    : '<p class="execution-log-empty">暂无任务执行日志</p>';
+    : '<p class="execution-log-empty">暂无任务执行日志</p>');
 }
 
 function syncHeader() {
@@ -191,7 +161,6 @@ function syncHeader() {
   const settingsView = state.view === "settings";
   const completedCount = (state.board?.tasks || []).filter(task => task.status === "done").length;
   const taskChangeCount = (state.board?.pending_task_changes || []).length;
-  document.querySelector("#view-eyebrow").textContent = state.view === "logs" ? "EXECUTION LOG" : tokenView ? "TOKEN USAGE" : requirementsView ? "REQUIREMENTS" : settingsView ? "SETTINGS" : "TASKBOARD";
   document.querySelector("#view-title").textContent = state.view === "logs" ? "执行日志" : tokenView ? "Token 使用看板" : requirementsView ? "需求看板" : settingsView ? "设置" : "任务面板";
   document.querySelector("#view-title").title = "";
   document.querySelector("#completed-tasks").hidden = false;
@@ -201,12 +170,9 @@ function syncHeader() {
   document.querySelector("#dispatcher-toggle").hidden = false;
   document.querySelector("#new-task-button").hidden = state.view !== "board";
   document.querySelector("#new-requirement-button").hidden = !requirementsView;
-  const settingsButton = document.querySelector("#settings-button");
-  settingsButton.hidden = false;
-  settingsButton.classList.toggle("selected", settingsView);
 }
 
-async function load({refreshAuxiliary = true} = {}) {
+async function load() {
   if (loadingBoard) return;
   loadingBoard = true;
   try {
@@ -216,34 +182,18 @@ async function load({refreshAuxiliary = true} = {}) {
       state.settings = await api("/api/settings");
     }
     const dispatcher = state.board.dispatcher || {};
-    document.querySelector("#health").textContent = dispatcher.control_plane === "cloud"
-      ? !dispatcher.enabled
-        ? "云端已连接 · 调度已暂停"
-        : dispatcher.running
-          ? "云端与本地 Agent 已连接"
-          : "云端已连接 · 本地 Agent 离线"
-      : dispatcher.enabled
-        ? "本地服务已连接"
-        : "本地服务已连接 · 调度已暂停";
-    document.querySelector("#health").title = dispatcher.last_error || "";
-    document.querySelector("#health").classList.add("ok");
     const dispatcherToggle = document.querySelector("#dispatcher-toggle");
     dispatcherToggle.textContent = dispatcher.enabled ? "暂停调度" : "恢复调度";
     dispatcherToggle.dataset.action = dispatcher.enabled ? "pause" : "resume";
     syncSidebar();
     render();
     const pendingChange = state.board?.pending_task_changes?.[0];
-    const changeDialog = document.querySelector("#task-change-dialog");
-    if (pendingChange && !changeDialog.open && !autoOpenedTaskChanges.has(pendingChange.id)) {
+    if (pendingChange && !isDialogOpen("task-change-dialog") && !autoOpenedTaskChanges.has(pendingChange.id)) {
       autoOpenedTaskChanges.add(pendingChange.id);
+      openDialog("task-change-dialog");
       renderTaskChangeConfirmations();
-      changeDialog.showModal();
-    }
-    if (refreshAuxiliary) {
-      void syncIntegrationStatuses();
     }
   } catch (error) {
-    document.querySelector("#health").textContent = "连接失败";
     toast(error.message);
   } finally {
     loadingBoard = false;
@@ -252,9 +202,8 @@ async function load({refreshAuxiliary = true} = {}) {
 
 function scheduleBoardRefresh() {
   clearTimeout(refreshTimer);
-  // Token events can be frequent. Refresh the board data, but keep the much
-  // slower Codex project scan and integration probes on navigation/actions.
-  refreshTimer = setTimeout(() => void load({refreshAuxiliary: false}), 250);
+  // Coalesce frequent token updates into a single board refresh.
+  refreshTimer = setTimeout(() => void load(), 250);
 }
 
 function connectBoardEvents() {
@@ -269,8 +218,6 @@ function connectBoardEvents() {
         window.location.replace("/login");
       }
     } catch (_error) {
-      document.querySelector("#health").textContent = "连接失败";
-      document.querySelector("#health").classList.remove("ok");
     }
   });
 }
@@ -318,6 +265,11 @@ function taskRecoveryButton(task, options = {}) {
   return `<button class="small" type="button" data-transition="${taskId}" data-status="${escapeHtml(action.status)}">${label}</button>`;
 }
 
+function taskLogButton(task) {
+  return task.status === "failed" || task.last_failure_reason || task.last_review_reasons?.length || task.dispatch_blockers?.length
+    ? `<button class="small" type="button" data-task-logs="${escapeHtml(task.id)}">查看日志</button>` : "";
+}
+
 function taskCard(task) {
   const needsAttention = taskNeedsAttention(task, attentionStatuses, attentionAutoDispatchStatuses);
   const actionButton = taskRecoveryButton(task, {restartWaitingConfirmation: needsAttention});
@@ -330,10 +282,9 @@ function taskCard(task) {
   const reviewFailedTag = task.review_failed_at && !["done", "cancelled"].includes(task.status) ? '<span class="tag conflict">验收不达标</span>' : "";
   const dispatchPausedLabels = {ready: "自动领取已暂停", rework: "自动返工已暂停", code_review: "自动 Code Review 已暂停"};
   const dispatchPausedTag = dispatchPausedLabels[task.status] && !task.auto_dispatch ? `<span class="tag conflict">${dispatchPausedLabels[task.status]}</span>` : "";
-  const dispatchReason = ["ready", "rework"].includes(task.status) && task.dispatch_blockers?.length ? `<p class="status-reason">${escapeHtml(task.dispatch_blockers[0].message)}</p>` : "";
-  const attentionReason = task.status === "rework" && (task.last_review_reasons?.length || task.last_failure_reason) ? `<p class="status-reason">返工原因：${escapeHtml((task.last_review_reasons || []).join("；") || task.last_failure_reason)}</p>` : ["waiting_confirmation", "blocked", "failed"].includes(task.status) && task.last_failure_reason ? `<p class="status-reason">${task.status === "failed" ? "失败" : task.status === "blocked" ? "阻塞" : "待确认"}原因：${escapeHtml(task.last_failure_reason)}</p>` : dispatchReason;
+  const logButton = taskLogButton(task);
   const bugTag = task.type === "bug" ? `<span class="tag conflict">BUG</span>` : "";
-  return `<article class="card"><div class="card-top"><span>${task.id}</span><span class="card-stage"><span>${escapeHtml(statusLabels[task.status] || task.status)}</span>${taskStageTimer(task)}</span></div><h3 title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</h3><p>${escapeHtml(task.goal || "尚未补充任务目标")}</p>${attentionReason}<div class="card-meta"><span class="tag priority-${task.priority}">${task.priority}</span>${bugTag}${(task.modules || []).slice(0,2).map(module => `<span class="tag">${escapeHtml(module)}</span>`).join("")}${reviewFailedTag}${dispatchPausedTag}${dispatchBlockerTag}${conflictTag}<span class="tag">Token ${token}%</span></div><div class="card-actions">${actionButton}${cancelButton}${taskConversationControl(task)}${contextButton}</div></article>`;
+  return `<article class="card"><div class="card-top"><span>${task.id}</span><span class="card-stage"><span>${escapeHtml(statusLabels[task.status] || task.status)}</span>${taskStageTimer(task)}</span></div><h3 title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</h3><p>${escapeHtml(task.goal || "")}</p><div class="card-meta"><span class="tag priority-${task.priority}">${task.priority}</span>${bugTag}${(task.modules || []).slice(0,2).map(module => `<span class="tag">${escapeHtml(module)}</span>`).join("")}${reviewFailedTag}${dispatchPausedTag}${dispatchBlockerTag}${conflictTag}<span class="tag">Token ${token}%</span></div><div class="card-actions">${actionButton}${cancelButton}${logButton}${taskConversationControl(task)}${contextButton}</div></article>`;
 }
 
 const requirementStatusLabels = {
@@ -346,7 +297,7 @@ const requirementStatusLabels = {
 
 function requirementTaskItem(task) {
   const typeTag = task.type === "bug" ? '<span class="tag conflict">BUG</span>' : "";
-  return `<article class="requirement-task"><div class="requirement-task-main"><div class="requirement-task-heading"><span>${escapeHtml(task.id)}</span><strong title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</strong></div><p>${escapeHtml(task.goal || "尚未补充任务目标")}</p><div class="card-meta">${typeTag}<span class="tag priority-${escapeHtml(task.priority)}">${escapeHtml(task.priority)}</span>${(task.modules || []).slice(0, 2).map(module => `<span class="tag">${escapeHtml(module)}</span>`).join("")}</div></div><div class="requirement-task-side"><span class="requirement-task-status">${escapeHtml(statusLabels[task.status] || task.status)}</span><button class="small" type="button" data-context="${escapeHtml(task.id)}">查看上下文</button></div></article>`;
+  return `<article class="requirement-task"><div class="requirement-task-main"><div class="requirement-task-heading"><span>${escapeHtml(task.id)}</span><strong title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</strong></div><p>${escapeHtml(task.goal || "")}</p><div class="card-meta">${typeTag}<span class="tag priority-${escapeHtml(task.priority)}">${escapeHtml(task.priority)}</span>${(task.modules || []).slice(0, 2).map(module => `<span class="tag">${escapeHtml(module)}</span>`).join("")}</div></div><div class="requirement-task-side">${taskLogButton(task)}<span class="requirement-task-status">${escapeHtml(statusLabels[task.status] || task.status)}</span><button class="small" type="button" data-context="${escapeHtml(task.id)}">查看上下文</button></div></article>`;
 }
 
 function requirementConversationControl(requirement) {
@@ -357,7 +308,7 @@ function requirementConversationControl(requirement) {
 
 function requirementCard(requirement, tasks) {
   const status = requirementStatusLabels[requirement.status] || requirement.status;
-  const summary = requirement.goal || requirement.description || requirement.original_content || "尚未补充需求目标";
+  const summary = requirement.goal || requirement.description || requirement.original_content || "";
   const childTasks = tasks
     .filter(task => task.requirement_id === requirement.id)
     .sort((left, right) => String(left.requirement_task_key || left.created_at || left.id).localeCompare(String(right.requirement_task_key || right.created_at || right.id)));
@@ -383,11 +334,24 @@ function requirementCard(requirement, tasks) {
 }
 
 function traceSection(title, items, renderItem) {
-  return `<section class="trace-section"><h3>${title}</h3>${items.length ? `<div class="trace-list">${items.map(renderItem).join("")}</div>` : '<div class="trace-empty">暂无记录</div>'}</section>`;
+  return items.length ? `<section class="trace-section"><h3>${title}</h3><div class="trace-list">${items.map(renderItem).join("")}</div></section>` : "";
+}
+
+async function showTaskLogs(taskId) {
+  const details = await api(`/api/tasks/${encodeURIComponent(taskId)}/details`);
+  openDialog("task-detail-dialog");
+  document.querySelector("#detail-title").textContent = `${details.task.id} · 执行日志`;
+  const currentReason = details.task.last_failure_reason || (details.task.last_review_reasons || []).join("；");
+  const reason = currentReason ? `<section class="trace-section"><h3>当前异常</h3><p class="status-reason">${escapeHtml(currentReason)}</p></section>` : "";
+  const blockers = (details.task.dispatch_blockers || []).length
+    ? traceSection("调度等待原因", details.task.dispatch_blockers, item => `<p>${escapeHtml(item.message)}</p>`) : "";
+  const events = [...(details.events || [])].reverse();
+  setContent("#task-detail-content", (reason + blockers + traceSection("执行日志", events, item => `<article class="trace-item"><div><strong>${escapeHtml(executionLogLabel(item, statusLabels))}</strong><time>${escapeHtml(formatLogTimestamp(item.created_at))}</time></div><p>${escapeHtml(executionLogReason(item))}</p></article>`)) || '<div class="trace-empty">暂无执行日志</div>');
 }
 
 async function showTaskDetails(taskId) {
   const details = await api(`/api/tasks/${taskId}/details`);
+  openDialog("task-detail-dialog");
   document.querySelector("#detail-title").textContent = `${details.task.id} · ${details.task.title}`;
   const conversations = traceSection("Codex 原生任务", details.conversations, item => `<article class="trace-item"><div><strong>${escapeHtml(item.title || item.role)}</strong><span>${escapeHtml(item.role)} · ${escapeHtml(item.status)}</span></div><code>${escapeHtml(item.thread_id)}</code>${item.run_ids?.length ? `<p>关联运行：${item.run_ids.map(escapeHtml).join("、")}</p>` : ""}${item.summary ? `<p>${escapeHtml(item.summary)}</p>` : ""}<div class="trace-actions"><button class="small" data-copy-thread="${escapeHtml(item.thread_id)}">复制原生任务 ID</button></div></article>`);
   const runs = traceSection("执行轮次", details.runs, item => {
@@ -404,8 +368,7 @@ async function showTaskDetails(taskId) {
   const acceptanceChecks = traceSection("历史验收检查", details.acceptance_checks || [], item => `<article class="trace-item"><div><strong>${escapeHtml(item.criterion)}</strong><span>${escapeHtml(item.status)} · ${item.duration_ms}ms</span></div><code>${escapeHtml(item.command)}</code>${item.output ? `<p>${escapeHtml(item.output)}</p>` : ""}</article>`);
   const revisions = traceSection("需求修订", details.revisions || [], item => `<article class="trace-item"><div><strong>v${item.version} · ${escapeHtml(item.after_snapshot?.title || details.task.title)}</strong><span>${escapeHtml(item.created_at)}</span></div><p>${escapeHtml(item.reason || "需求已调整")}</p></article>`);
   const events = traceSection("异常与状态记录", (details.events || []).filter(item => ["execution_failed", "review_interrupted", "review_preparation_failed", "context_build_failed", "lease_expired"].includes(item.event_type) || (item.event_type === "transitioned" && item.payload?.reason)), item => `<article class="trace-item"><div><strong>${escapeHtml(item.event_type)}</strong><span>${escapeHtml(item.created_at)}</span></div><p>${escapeHtml(item.payload?.reason || item.payload?.error || "")}</p></article>`);
-  document.querySelector("#task-detail-content").innerHTML = dispatchBlockers + conflicts + targets + revisions + reviews + acceptanceChecks + events + conversations + runs + relations;
-  document.querySelector("#task-detail-dialog").showModal();
+  setContent("#task-detail-content", (dispatchBlockers + conflicts + targets + revisions + reviews + acceptanceChecks + events + conversations + runs + relations) || '<div class="trace-empty">暂无任务记录</div>');
 }
 
 function renderBoard() {
@@ -416,14 +379,14 @@ function renderBoard() {
       : tasks.filter(task => column.statuses.includes(task.status));
     return `<section class="column column-${column.key}"><div class="column-head">${column.title}<span>${visible.length}</span></div><div class="cards">${visible.length ? visible.map(taskCard).join("") : '<div class="empty">暂无任务</div>'}</div></section>`;
   }).join("");
-  document.querySelector("#content").innerHTML = `<div class="board">${taskColumns}</div>`;
+  setContent("#content", `<div class="board">${taskColumns}</div>`);
   refreshStageTimers();
 }
 
 function renderRequirementsBoard() {
   const requirements = state.board?.requirements || [];
   const tasks = state.board?.tasks || [];
-  document.querySelector("#content").innerHTML = `<div class="requirements-board">${requirements.length ? requirements.map(requirement => requirementCard(requirement, tasks)).join("") : '<div class="requirements-empty"><strong>暂无需求</strong><p>通过 DoTasks 确认的需求会显示在这里。</p></div>'}</div>`;
+  setContent("#content", `<div class="requirements-board">${requirements.length ? requirements.map(requirement => requirementCard(requirement, tasks)).join("") : '<div class="requirements-empty"><strong>暂无需求</strong></div>'}</div>`);
 }
 
 function renderTokenTrend(daily) {
@@ -478,11 +441,11 @@ function renderTokenCharts(tasks) {
   });
   const projects = [...projectTotals.entries()].filter(([, value]) => value > 0).sort((a, b) => b[1] - a[1]).map(([project, value]) => ({
     label: projectLabel(project),
-    meta: project,
+    meta: project === projectLabel(project) ? "" : project,
     title: project,
     value,
   }));
-  return `<div class="token-summary token-period-summary"><article><span>当天 Token</span><strong>${formatMetricTokenCount(periods.today)}</strong></article><article><span>本周 Token</span><strong>${formatMetricTokenCount(periods.week)}</strong></article><article><span>本月 Token</span><strong>${formatMetricTokenCount(periods.month)}</strong></article></div><div class="token-chart-grid"><article class="token-chart-card token-trend-card"><div class="token-chart-head"><div><span>使用趋势</span><h2>本月每日 Token</h2></div><small>按 Token 增量记录时间统计</small></div>${renderTokenTrend(analytics.daily || [])}</article><article class="token-chart-card"><div class="token-chart-head"><div><span>任务排行</span><h2>${taskUsage.length > 10 ? "Token 消耗前 10 任务" : "各任务 Token 使用量"}</h2></div><small>${taskUsage.length > 10 ? `共 ${taskUsage.length} 个已记录任务` : "按总使用量降序"}</small></div>${renderTokenBarList(topTasks, "暂无任务 Token 记录")}</article><article class="token-chart-card"><div class="token-chart-head"><div><span>项目分布</span><h2>各项目 Token 使用量</h2></div><small>按任务所属项目汇总</small></div>${renderTokenBarList(projects, "暂无项目 Token 记录")}</article></div>`;
+  return `<div class="token-summary token-period-summary"><article><span>当天 Token</span><strong>${formatMetricTokenCount(periods.today)}</strong></article><article><span>本周 Token</span><strong>${formatMetricTokenCount(periods.week)}</strong></article><article><span>本月 Token</span><strong>${formatMetricTokenCount(periods.month)}</strong></article></div><div class="token-chart-grid"><article class="token-chart-card token-trend-card"><div class="token-chart-head"><div><h2>本月每日 Token</h2></div><small>按 Token 增量记录时间统计</small></div>${renderTokenTrend(analytics.daily || [])}</article><article class="token-chart-card"><div class="token-chart-head"><div><h2>${taskUsage.length > 10 ? "Token 消耗前 10 任务" : "各任务 Token 使用量"}</h2></div><small>${taskUsage.length > 10 ? `共 ${taskUsage.length} 个已记录任务` : "按总使用量降序"}</small></div>${renderTokenBarList(topTasks, "暂无任务 Token 记录")}</article><article class="token-chart-card"><div class="token-chart-head"><div><h2>各项目 Token 使用量</h2></div><small>按任务所属项目汇总</small></div>${renderTokenBarList(projects, "暂无项目 Token 记录")}</article></div>`;
 }
 
 function renderTokenDetails(tasks) {
@@ -510,26 +473,26 @@ function renderTokenPanel() {
   const tasks = state.board?.tasks || [];
   const viewSwitch = `<div class="token-view-switch" role="tablist" aria-label="Token 面板展示方式"><button type="button" role="tab" data-token-view="charts" aria-selected="${state.tokenView === "charts"}" class="${state.tokenView === "charts" ? "selected" : ""}">图表展示</button><button type="button" role="tab" data-token-view="details" aria-selected="${state.tokenView === "details"}" class="${state.tokenView === "details" ? "selected" : ""}">明细展示</button></div>`;
   const content = state.tokenView === "details" ? renderTokenDetails(tasks) : renderTokenCharts(tasks);
-  document.querySelector("#content").innerHTML = `<section class="token-page"><div class="token-page-content">${viewSwitch}${content}</div></section>`;
+  setContent("#content", `<section class="token-page"><div class="token-page-content">${viewSwitch}${content}</div></section>`);
 }
 
 function renderCompletedTasks() {
   const tasks = (state.board?.tasks || []).filter(task => task.status === "done");
   document.querySelector("#completed-dialog-count").textContent = String(tasks.length);
-  document.querySelector("#completed-tasks-content").innerHTML = tasks.length ? `<div class="attention-list">${tasks.map(task => {
+  setContent("#completed-tasks-content", tasks.length ? `<div class="attention-list">${tasks.map(task => {
     const taskId = escapeHtml(task.id);
     return `<article class="attention-task completed-task"><div class="attention-task-head"><div class="attention-task-title"><span>${taskId}</span><strong title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</strong></div><span class="attention-task-status">${escapeHtml(statusLabels[task.status] || task.status)}</span></div><p>${escapeHtml(task.delivery_summary || task.goal || "任务已完成")}</p><div class="attention-task-meta"><span>${escapeHtml(task.priority || "")}</span><span>完成于 ${escapeHtml(formatTimestamp(task.updated_at || task.created_at))}</span><div class="attention-task-actions">${taskConversationControl(task)}<button class="small" type="button" data-details="${taskId}">查看详情</button><button class="small conversation-button danger" type="button" data-delete-completed-task="${taskId}" aria-label="删除完成任务" title="删除完成任务">${deleteIcon()}</button></div></div></article>`;
-  }).join("")}</div>` : '<div class="trace-empty">当前没有完成任务</div>';
+  }).join("")}</div>` : '<div class="trace-empty">当前没有完成任务</div>');
 }
 
 function renderTaskChangeConfirmations() {
   const changes = state.board?.pending_task_changes || [];
   document.querySelector("#task-change-dialog-count").textContent = String(changes.length);
-  document.querySelector("#task-change-content").innerHTML = changes.length ? `<div class="attention-list">${changes.map(change => {
+  setContent("#task-change-content", changes.length ? `<div class="attention-list">${changes.map(change => {
     const proposed = change.proposed_task || {};
     const reasons = change.evidence?.reasons || change.evidence?.candidate?.reasons || [];
     return `<article class="attention-task task-change-card"><div class="attention-task-head"><div class="attention-task-title"><span>${escapeHtml(change.id)}</span><strong>${escapeHtml(change.candidate_task_id)} · ${escapeHtml(change.candidate_title || "当前任务")}</strong></div><span class="attention-task-status">${escapeHtml(statusLabels[change.candidate_status] || change.candidate_status || "执行中")}</span></div><div class="change-request-copy"><span>新需求</span><p>${escapeHtml(change.request_text)}</p></div><div class="change-proposal-copy"><span>任务将调整为</span><strong>${escapeHtml(proposed.title || change.candidate_title || "")}</strong><p>${escapeHtml(proposed.goal || "")}</p></div>${reasons.length ? `<p class="change-match-reason">匹配依据：${escapeHtml(reasons.join("；"))}</p>` : ""}<div class="change-choice-actions"><button class="primary" type="button" data-resolve-task-change="${escapeHtml(change.id)}" data-decision="revise">修订 ${escapeHtml(change.candidate_task_id)}</button><button class="ghost" type="button" data-resolve-task-change="${escapeHtml(change.id)}" data-decision="create_new">创建新任务</button></div>${change.error ? `<p class="status-reason">上次处理失败：${escapeHtml(change.error)}</p>` : ""}</article>`;
-  }).join("")}</div>` : '<div class="trace-empty">当前没有待确认的需求变更</div>';
+  }).join("")}</div>` : '<div class="trace-empty">当前没有待确认的需求变更</div>');
 }
 
 function renderSettings() {
@@ -537,7 +500,7 @@ function renderSettings() {
   const maxAppendedTasks = Number.isInteger(Number(state.settings?.max_batch_appended_tasks)) ? Number(state.settings.max_batch_appended_tasks) : 3;
   const parallelEnabled = Boolean(state.settings?.parallel_development_enabled);
   const maxParallelDevelopment = Number.isInteger(Number(state.settings?.max_parallel_development)) ? Number(state.settings.max_parallel_development) : 2;
-  document.querySelector("#content").innerHTML = `<section class="settings-page"><form id="task-settings-form" class="settings-panel"><div class="settings-panel-head"><div><p class="eyebrow">TASK DEFAULTS</p><h2>任务设置</h2></div></div><label class="settings-field" for="task-token-budget"><span>任务 Token 预算</span><input id="task-token-budget" name="task_token_budget" type="number" min="1" step="1" value="${budget}" required /><small>用于新建任务的有效 Token 上限；达到预算后任务将暂停并等待确认。已创建任务不受影响。</small></label><label class="settings-field" for="max-batch-appended-tasks"><span>批次最多追加任务数</span><input id="max-batch-appended-tasks" name="max_batch_appended_tasks" type="number" min="0" max="20" step="1" value="${maxAppendedTasks}" required /><small>默认 3，表示一个开发批次最多包含初始任务和 3 个追加任务；并行开发开启后不自动追加批次。</small></label><label class="settings-field settings-toggle" for="parallel-development-enabled"><span>开启并行开发</span><input id="parallel-development-enabled" name="parallel_development_enabled" type="checkbox" ${parallelEnabled ? "checked" : ""} /><small>任务从固定 Git 基线创建独立 Worktree；未托管改动只阻塞目标文件重叠的任务。</small></label><label class="settings-field" for="max-parallel-development"><span>最大并行开发数</span><input id="max-parallel-development" name="max_parallel_development" type="number" min="1" max="8" step="1" value="${maxParallelDevelopment}" required /><small>默认 2，最多 8；每个并行任务使用独立 Codex Worktree。</small></label><div class="settings-actions"><button class="primary" type="submit">保存设置</button></div></form></section>`;
+  setContent("#content", `<section class="settings-page"><form id="task-settings-form" class="settings-panel"><div class="settings-panel-head"><div><h2>任务设置</h2></div></div><label class="settings-field" for="task-token-budget"><span>任务 Token 预算</span><input id="task-token-budget" name="task_token_budget" type="number" min="1" step="1" value="${budget}" required /><small>仅影响新任务；达到预算后暂停并等待确认。</small></label><label class="settings-field" for="max-batch-appended-tasks"><span>批次最多追加任务数</span><input id="max-batch-appended-tasks" name="max_batch_appended_tasks" type="number" min="0" max="20" step="1" value="${maxAppendedTasks}" required /><small>不含初始任务；并行开发时不自动追加。</small></label><label class="settings-field settings-toggle" for="parallel-development-enabled"><span>开启并行开发</span><input id="parallel-development-enabled" name="parallel_development_enabled" type="checkbox" ${parallelEnabled ? "checked" : ""} /><small>每个任务使用独立 Worktree。</small></label><label class="settings-field" for="max-parallel-development"><span>最大并行开发数</span><input id="max-parallel-development" name="max_parallel_development" type="number" min="1" max="8" step="1" value="${maxParallelDevelopment}" required /><small>最多 8 个。</small></label><div class="settings-actions"><button class="primary" type="submit">保存设置</button></div></form></section>`);
 }
 
 function render() {
@@ -548,24 +511,33 @@ function render() {
   else if (state.view === "requirements") renderRequirementsBoard();
   else if (state.view === "settings") renderSettings();
   else renderBoard();
-  if (document.querySelector("#completed-tasks-dialog")?.open) renderCompletedTasks();
-  if (document.querySelector("#task-change-dialog")?.open) renderTaskChangeConfirmations();
+  if (isDialogOpen("completed-tasks-dialog")) renderCompletedTasks();
+  if (isDialogOpen("task-change-dialog")) renderTaskChangeConfirmations();
 }
 
-async function handleViewNavigation(event) {
-  const logout = event.target.closest("#logout-button");
-  if (logout) {
-    logout.disabled = true;
-    try {
+let accountActionPending = false;
+document.addEventListener("account-action", async event => {
+  if (accountActionPending) return;
+  accountActionPending = true;
+  try {
+    if (event.detail === "settings") {
+      if (!state.settings) state.settings = await api("/api/settings");
+      state.view = "settings";
+      persistNavigationState();
+      render();
+    } else if (event.detail === "logout") {
       await api("/api/auth/logout", {method: "POST", body: "{}"});
       boardEventSource?.close();
       window.location.replace("/login");
-    } catch (error) {
-      logout.disabled = false;
-      toast(error.message);
     }
-    return true;
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    accountActionPending = false;
   }
+});
+
+async function handleViewNavigation(event) {
   if (event.target.closest("#execution-log-nav")) {
     state.view = "logs";
     persistNavigationState();
@@ -576,29 +548,21 @@ async function handleViewNavigation(event) {
     state.view = "board";
     persistNavigationState();
     render();
-    void syncIntegrationStatuses();
+
     return true;
   }
   if (event.target.closest("#requirements-nav")) {
     state.view = "requirements";
     persistNavigationState();
     render();
-    void syncIntegrationStatuses();
+
     return true;
   }
   if (event.target.closest("#token-panel")) {
     state.view = "tokens";
     persistNavigationState();
     render();
-    void syncIntegrationStatuses();
-    return true;
-  }
-  if (event.target.closest("#settings-button")) {
-    state.view = "settings";
-    persistNavigationState();
-    if (!state.settings) state.settings = await api("/api/settings");
-    render();
-    void syncIntegrationStatuses();
+
     return true;
   }
   const tokenView = event.target.closest("[data-token-view]");
@@ -609,19 +573,24 @@ async function handleViewNavigation(event) {
     return true;
   }
   if (event.target.closest("#completed-tasks")) {
+    openDialog("completed-tasks-dialog");
     renderCompletedTasks();
-    document.querySelector("#completed-tasks-dialog").showModal();
     return true;
   }
   if (event.target.closest("#task-change-confirmations")) {
+    openDialog("task-change-dialog");
     renderTaskChangeConfirmations();
-    document.querySelector("#task-change-dialog").showModal();
     return true;
   }
   return false;
 }
 
 async function handleTaskAction(event) {
+  const taskLogs = event.target.closest("[data-task-logs]");
+  if (taskLogs) {
+    try { await showTaskLogs(taskLogs.dataset.taskLogs); } catch (error) { toast(error.message); }
+    return true;
+  }
   const dispatcherToggle = event.target.closest("#dispatcher-toggle");
   if (dispatcherToggle) {
     const action = dispatcherToggle.dataset.action;
@@ -660,11 +629,9 @@ async function handleTaskAction(event) {
       const path = String(project.path || "").trim();
       if (path && !projects.has(path)) projects.set(path, String(project.name || projectLabel(path)));
     });
-    const dialog = document.querySelector(
-      event.target.closest("#new-task-button")
-        ? "#new-task-dialog"
-        : "#new-requirement-dialog"
-    );
+    const dialogId = event.target.closest("#new-task-button") ? "new-task-dialog" : "new-requirement-dialog";
+    openDialog(dialogId);
+    const dialog = document.getElementById(dialogId);
     const select = dialog.querySelector("[data-project-select]");
     const emptyLabel = event.target.closest("#new-task-button")
       ? "无项目（创建到 Codex 最近）"
@@ -681,11 +648,10 @@ async function handleTaskAction(event) {
     manual.hidden = true;
     manual.required = false;
     manual.value = "";
-    dialog.showModal();
     return true;
   }
-  if (event.target.matches("[data-close]")) {
-    event.target.closest("dialog").close();
+  if (event.target.closest("[data-close]")) {
+    closeDialog(event.target.closest('[data-slot="dialog-content"]').id);
     return true;
   }
   const transition = event.target.closest("[data-transition]");
@@ -784,7 +750,7 @@ async function handleTaskAction(event) {
         method: "POST", body: JSON.stringify({decision}),
       });
       await load();
-      if (!(state.board?.pending_task_changes || []).length) dialog.close();
+      if (!(state.board?.pending_task_changes || []).length) closeDialog(dialog.id);
       else renderTaskChangeConfirmations();
       toast(decision === "revise" ? `${result.task?.id || result.result_task_id} 已转入返工` : `${result.task?.id || result.result_task_id} 已创建`);
     } catch (error) {
@@ -809,7 +775,7 @@ async function handleTaskAction(event) {
   const details = event.target.closest("[data-details]");
   if (details) {
     try {
-      event.target.closest("#completed-tasks-dialog")?.close();
+      closeDialog("completed-tasks-dialog");
       await showTaskDetails(details.dataset.details);
     } catch (error) { toast(error.message); }
     return true;
@@ -918,7 +884,7 @@ document.addEventListener("submit", async event => {
         }),
       });
       form.reset();
-      document.querySelector("#new-task-dialog").close();
+      closeDialog("new-task-dialog");
       await load();
       toast(`${result.task_id} 已加入任务队列${project ? "，正在等待定位" : "，将创建无项目 Codex 会话"}`);
     } catch (error) {
@@ -957,7 +923,7 @@ document.addEventListener("submit", async event => {
         }),
       });
       form.reset();
-      document.querySelector("#new-requirement-dialog").close();
+      closeDialog("new-requirement-dialog");
       await load();
       toast(`${result.requirement_id} 已保存到云端${project ? "" : "；未选择项目，未自动调度"}`);
     } catch (error) {
@@ -975,7 +941,7 @@ document.addEventListener("submit", async event => {
     const maxParallelInput = document.querySelector("#max-parallel-development");
     const taskTokenBudget = Number(input.value);
     const maxBatchAppendedTasks = Number(appendedInput.value);
-    const parallelDevelopmentEnabled = parallelEnabledInput.checked;
+    const parallelDevelopmentEnabled = parallelEnabledInput.getAttribute("aria-checked") === "true";
     const maxParallelDevelopment = Number(maxParallelInput.value);
     if (!Number.isInteger(taskTokenBudget) || taskTokenBudget <= 0) {
       input.setCustomValidity("请输入大于 0 的整数");

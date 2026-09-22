@@ -182,7 +182,9 @@ class RelayHTTPServerTest(unittest.TestCase):
         self.assertIn("SameSite=Strict", headers["Set-Cookie"])
         authenticated = {**public, "Cookie": cookie}
         self.assertEqual(200, self.request("GET", "/api/board", headers=authenticated)[0])
-        self.assertTrue(json.loads(self.request("GET", "/api/auth/status", headers=authenticated)[2])["authenticated"])
+        profile = json.loads(self.request("GET", "/api/auth/status", headers=authenticated)[2])
+        self.assertTrue(profile["authenticated"])
+        self.assertEqual("operator", profile["username"])
         status, headers, _ = self.request("POST", "/api/auth/logout", b"{}", {
             **authenticated, "Content-Type": "application/json"})
         self.assertEqual(200, status)
@@ -192,6 +194,10 @@ class RelayHTTPServerTest(unittest.TestCase):
             self.assertEqual(401, self.request("GET", "/api/board", headers={
                 "Host": "dotasks.test", "Authorization": self.browser_headers["Authorization"],
                 "Cookie": invalid_cookie})[0])
+            profile = json.loads(self.request("GET", "/api/auth/status", headers={
+                **public, "Cookie": invalid_cookie})[2])
+            self.assertFalse(profile["authenticated"])
+            self.assertNotIn("username", profile)
         self.assertEqual(401, self.request("GET", "/api/board", headers=authenticated)[0])
         self.assertEqual(401, self.request("GET", "/api/board", headers={
             **self.browser_headers, "Sec-Fetch-Mode": "cors"})[0])

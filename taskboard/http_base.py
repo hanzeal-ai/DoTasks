@@ -117,7 +117,10 @@ class BaseDoTasksHandler(BaseHTTPRequestHandler):
         sessions = self.server.web_sessions
         if method == "GET" and path == "/api/auth/status":
             authenticated = not enabled or sessions.valid(token)
-            self._json(HTTPStatus.OK, {"enabled": enabled, "authenticated": authenticated})
+            status = {"enabled": enabled, "authenticated": authenticated}
+            if authenticated and enabled:
+                status["username"] = self.config.http_user
+            self._json(HTTPStatus.OK, status)
             return True
         if method != "POST" or path == "/api/auth/status":
             raise HTTPRequestError(HTTPStatus.METHOD_NOT_ALLOWED, "Method not allowed")
