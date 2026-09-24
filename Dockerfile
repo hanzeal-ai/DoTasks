@@ -25,6 +25,13 @@ RUN groupadd --system --gid 10001 dotasks \
 COPY core ./core
 COPY taskboard ./taskboard
 COPY --from=web-build /src/static ./static
+COPY skills ./skills
+COPY scripts/mcp-server scripts/package-cli.py scripts/install-cli scripts/install-online.sh scripts/deploy-cloud-ip ./scripts/
+RUN python -B scripts/package-cli.py \
+    && mkdir -p static/downloads/cli \
+    && cp -R dist/cli/. static/downloads/cli/ \
+    && cp scripts/install-online.sh static/install.sh \
+    && rm -rf dist
 
 USER dotasks
 EXPOSE 8765

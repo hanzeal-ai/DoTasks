@@ -14,6 +14,7 @@ HTTP_USER=dotasks
 HTTP_PASSWORD=
 AGENT_ID=default
 AGENT_TOKEN=
+ACCOUNT_MODE=
 FORCE_ENV=0
 REUSE_ENV=0
 PRINT_SECRETS=1
@@ -37,6 +38,7 @@ Options:
   --http-password <value>    Browser password (default: generated)
   --agent-id <id>            Local Agent ID (default: default)
   --agent-token <value>      Local Agent token (default: generated)
+  --account-mode <mode>      single (default) or multi (HTTPS shared registration)
   --reuse-env                Preserve credentials and optionally update the image
   --force-env                Replace the existing configuration and credentials
   --no-print-secrets         Keep generated credentials out of CI logs
@@ -51,7 +53,7 @@ fail() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --public-ip|--public-url|--port|--image|--http-user|--http-password|--agent-id|--agent-token)
+    --public-ip|--public-url|--port|--image|--http-user|--http-password|--agent-id|--agent-token|--account-mode)
       [ "$#" -ge 2 ] || fail "$1 requires a value"
       case "$1" in
         --public-ip) PUBLIC_IP=$2 ;;
@@ -62,6 +64,7 @@ while [ "$#" -gt 0 ]; do
         --http-password) HTTP_PASSWORD=$2 ;;
         --agent-id) AGENT_ID=$2 ;;
         --agent-token) AGENT_TOKEN=$2 ;;
+        --account-mode) ACCOUNT_MODE=$2 ;;
       esac
       shift 2
       ;;
@@ -129,6 +132,9 @@ write_env() {
   {
     printf 'DOTASKS_IMAGE=%s\n' "$IMAGE"
     printf 'DOTASKS_PUBLIC_URL=%s\n' "$PUBLIC_URL"
+    if [ "$ACCOUNT_MODE" = multi ]; then
+      printf 'DOTASKS_ACCOUNT_MODE=multi\n'
+    fi
     printf 'DOTASKS_HTTP_USER=%s\n' "$HTTP_USER"
     printf 'DOTASKS_HTTP_PASSWORD=%s\n' "$HTTP_PASSWORD"
     printf 'DOTASKS_AGENT_ID=%s\n' "$AGENT_ID"
@@ -193,11 +199,17 @@ if [ -f "$ENV_FILE" ] && [ "$FORCE_ENV" -eq 0 ]; then
   HTTP_PASSWORD=$(read_env DOTASKS_HTTP_PASSWORD)
   AGENT_ID=$(read_env DOTASKS_AGENT_ID)
   AGENT_TOKEN=$(read_env DOTASKS_AGENT_TOKEN)
+  EXISTING_ACCOUNT_MODE=$(read_env DOTASKS_ACCOUNT_MODE)
+  EXISTING_ACCOUNT_MODE=${EXISTING_ACCOUNT_MODE:-single}
+  [ -z "$ACCOUNT_MODE" ] || [ "$ACCOUNT_MODE" = "$EXISTING_ACCOUNT_MODE" ] || fail "--reuse-env cannot change account mode; perform an explicit migration"
+  ACCOUNT_MODE=$EXISTING_ACCOUNT_MODE
   ENV_MESSAGE="Reused credentials from $ENV_FILE"
 else
   [ -n "$IMAGE" ] || fail "--image is required for the first deployment"
-  [ -n "$HTTP_PASSWORD" ] || HTTP_PASSWORD=$(generate_secret)
-  [ -n "$AGENT_TOKEN" ] || AGENT_TOKEN=$(generate_secret)
+  if [ "${ACCOUNT_MODE:-single}" = single ]; then
+    [ -n "$HTTP_PASSWORD" ] || HTTP_PASSWORD=$(generate_secret)
+    [ -n "$AGENT_TOKEN" ] || AGENT_TOKEN=$(generate_secret)
+  fi
   ENV_MESSAGE="Created $ENV_FILE with mode 0600"
 fi
 
@@ -209,6 +221,14 @@ case "$IMAGE_NAME" in
   *:*) ;;
   *) fail "DOTASKS_IMAGE must include an explicit version tag" ;;
 esac
+ACCOUNT_MODE=${ACCOUNT_MODE:-single}
+case "$ACCOUNT_MODE" in
+  single|multi) ;;
+  *) fail "account mode must be single or multi" ;;
+esac
+if [ "$ACCOUNT_MODE" = multi ]; then
+  [ -n "$PUBLIC_URL_INPUT" ] || fail "multi account mode requires --public-url with HTTPS"
+else
 [ -n "$HTTP_USER" ] || fail "DOTASKS_HTTP_USER is missing from .env"
 [ "${#HTTP_PASSWORD}" -ge 8 ] || fail "DOTASKS_HTTP_PASSWORD must contain at least 8 characters"
 [ -n "$AGENT_ID" ] || fail "DOTASKS_AGENT_ID is missing from .env"
@@ -216,6 +236,7 @@ esac
 case "$HTTP_PASSWORD$AGENT_TOKEN" in
   *[!A-Za-z0-9._~-]*) fail "password and token may only contain URL-safe characters" ;;
 esac
+fi
 write_env
 echo "$ENV_MESSAGE"
 
@@ -233,10 +254,11 @@ services:
       DOTASKS_PORT: 8765
       DOTASKS_HOME: /data/dotasks
       DOTASKS_PUBLIC_URL: ${DOTASKS_PUBLIC_URL:?set DOTASKS_PUBLIC_URL}
-      DOTASKS_HTTP_USER: ${DOTASKS_HTTP_USER:?set DOTASKS_HTTP_USER}
-      DOTASKS_HTTP_PASSWORD: ${DOTASKS_HTTP_PASSWORD:?set DOTASKS_HTTP_PASSWORD}
+      DOTASKS_ACCOUNT_MODE: ${DOTASKS_ACCOUNT_MODE:-single}
+      DOTASKS_HTTP_USER: ${DOTASKS_HTTP_USER:-}
+      DOTASKS_HTTP_PASSWORD: ${DOTASKS_HTTP_PASSWORD:-}
       DOTASKS_AGENT_ID: ${DOTASKS_AGENT_ID:-default}
-      DOTASKS_AGENT_TOKEN: ${DOTASKS_AGENT_TOKEN:?set DOTASKS_AGENT_TOKEN}
+      DOTASKS_AGENT_TOKEN: ${DOTASKS_AGENT_TOKEN:-}
     ports:
       - "${DOTASKS_BIND_ADDRESS:-127.0.0.1}:${DOTASKS_BIND_PORT:-8765}:8765"
     volumes:
@@ -264,6 +286,9 @@ fi
 compose up -d --remove-orphans
 
 HEALTH_URL="http://127.0.0.1:$PORT/api/health"
+if [ "$ACCOUNT_MODE" = multi ]; then
+  HEALTH_URL="http://127.0.0.1:$PORT/api/auth/status"
+fi
 HEALTH_BODY=
 attempt=0
 while [ "$attempt" -lt 30 ]; do
@@ -281,8 +306,10 @@ done
 echo
 echo "DoTasks Cloud is running: $PUBLIC_URL"
 echo "Image: $IMAGE"
-echo "Browser username: $HTTP_USER"
-if [ "$PRINT_SECRETS" -eq 1 ]; then
+if [ "$ACCOUNT_MODE" = multi ]; then
+  echo "Shared account mode: users register through dotasks init --cloud-url $PUBLIC_URL"
+elif [ "$PRINT_SECRETS" -eq 1 ]; then
+  echo "Browser username: $HTTP_USER"
   echo "Browser password: $HTTP_PASSWORD"
   echo
   echo "On the Mac that runs DoTasks, configure the Local Agent once:"

@@ -69,7 +69,8 @@ class RemoteToolClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=70) as response:
+            timeout = 600 if name in {"submit_task_delivery", "review_code"} else 70
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 body = response.read()
         except urllib.error.HTTPError as exc:
             body = exc.read()

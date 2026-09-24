@@ -5,7 +5,7 @@ requires-python = ">=3.14"
 dependencies = []
 
 [project.scripts]
-dotasks = "taskboard.server:main"
+dotasks = "taskboard.cli:main"
 dotasks-mcp = "taskboard.mcp_server:main"
 dotasks-cloud = "taskboard.cloud.server:main"
 dotasks-agent = "taskboard.agent:main"

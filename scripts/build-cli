@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
+cd "$PROJECT_ROOT"
+npm --prefix web run build
+PYTHON_BIN=${DOTASKS_PYTHON_BIN:-python3}
+exec "$PYTHON_BIN" -B "$SCRIPT_DIR/package-cli.py"
