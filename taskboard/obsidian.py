@@ -7,6 +7,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from .decision_client import DecisionClient
+
 
 def _safe_name(value: str) -> str:
     value = re.sub(r"[\\/:*?\"<>|]", "-", value).strip()
@@ -25,7 +27,8 @@ def _search_tokens(value: str) -> set[str]:
 
 
 class ObsidianAdapter:
-    def __init__(self, project_home: Path):
+    def __init__(self, project_home: Path, decision_client: DecisionClient | None = None):
+        self.decisions = decision_client or DecisionClient(project_home)
         configured = os.environ.get("DOTASKS_OBSIDIAN_VAULT")
         self.vault = (
             Path(configured).expanduser().resolve()
@@ -308,6 +311,9 @@ keywords: {experience.get('keywords', [])}
             (item for item in notes.values() if int(item["score"]) > 0),
             key=lambda item: (-int(item["score"]), item["task_id"]),
         )[:limit]
+        # Advice reorders only this bounded set. Ancestors, membership, lexical
+        # scores and the authoritative dependency classifier remain unchanged.
+        direct = self.decisions.rank_history(query, direct)
         reverse: dict[str, set[str]] = {}
         for item in notes.values():
             for edge in item["history_edges"]:

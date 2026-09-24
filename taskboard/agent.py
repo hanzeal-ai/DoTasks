@@ -10,6 +10,7 @@ import platform
 import signal
 import socket
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -125,6 +126,8 @@ class RelayAgent:
         self.uploaded_vault_files: dict[str, str] = {}
         self.next_vault_sync_at = 0.0
         self.pending_result = self._load_pending_result()
+        from .team_agent import TeamAgent
+        self.team_agent = TeamAgent(self.config)
         self.executor = executor or LocalCodexExecutor(
             self.config.data_home,
             service=RemoteTaskboardService(
@@ -282,6 +285,31 @@ class RelayAgent:
                 "headers": {"Content-Type": "application/json; charset=utf-8"},
                 "body": json.dumps({"error": "Unsupported relay command"}).encode(),
             }
+        elif path == "/api/agent/team-workspace" and method == "POST":
+            from .team_local import workspace_request
+            try:
+                payload = json.loads(base64.b64decode(str(command.get("body") or ""), validate=True))
+                response = workspace_request(self.config.data_home, payload)
+                result = {"status": 200, "headers": {"Content-Type": "application/json"},
+                          "body": json.dumps(response).encode()}
+            except (ValueError, TypeError, KeyError, OSError, subprocess.SubprocessError):
+                result = {"status": 400, "headers": {}, "body": b'{"error":"Workspace validation failed"}'}
+        elif path == "/api/agent/verify" and method == "POST":
+            from core.service.review import TaskReviewMixin
+            from .project_guard import ProjectWorkspaceGuard
+
+            try:
+                payload = json.loads(base64.b64decode(str(command.get("body") or ""), validate=True))
+                project = ProjectWorkspaceGuard.require_project_directory(payload.get("project"))
+                verification = payload.get("command")
+                timeout = int(payload.get("timeout_seconds", 60))
+                if not isinstance(verification, str) or not verification.strip() or len(verification) > 100000 or not 1 <= timeout <= 60:
+                    raise ValueError("Invalid local verification request")
+                status, code, output, duration = TaskReviewMixin._run_project_command(verification, project, timeout)
+                result = {"status": HTTPStatus.OK, "headers": {"Content-Type": "application/json"},
+                          "body": json.dumps({"status": status, "exit_code": code, "output": output[:80000], "duration_ms": duration}).encode()}
+            except (ValueError, TypeError, KeyError, AttributeError, OSError):
+                result = {"status": HTTPStatus.BAD_REQUEST, "headers": {}, "body": b'{"error":"Invalid verification request"}'}
         else:
             result = self._local_request(
                 method,
@@ -381,6 +409,7 @@ class RelayAgent:
                 }:
                     self.drain_commands()
                     self.executor.wake()
+                    self.team_agent.wake()
         finally:
             stream.close()
             connection.close()
@@ -388,6 +417,7 @@ class RelayAgent:
     def run_forever(self) -> None:
         failures = 0
         self.executor.start()
+        self.team_agent.start()
         try:
             while True:
                 try:
@@ -406,6 +436,7 @@ class RelayAgent:
                     time.sleep(delay)
         finally:
             self.executor.stop()
+            self.team_agent.stop()
 
 
 def main() -> None:

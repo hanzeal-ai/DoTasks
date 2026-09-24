@@ -10,7 +10,7 @@ import { SidebarMenu, SidebarMenuItem, SidebarMenuButton } from "./components/ui
 import { NativeSelect } from "./components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
 
-export default function App({ authenticationEnabled = false, username = "本地用户" }) {
+export default function App({ authenticationEnabled = false, username = "本地用户", teamsEnabled = false }) {
   useEffect(() => {
     void import("./taskboard-app.js");
   }, []);
@@ -24,6 +24,7 @@ export default function App({ authenticationEnabled = false, username = "本地�
             <span>DoTasks</span>
           </div>
           <nav className="sidebar-nav" aria-label="工作区导航">
+            {teamsEnabled && <a className="sidebar-item" href="/team">团队协作</a>}
             <SidebarMenu className="sidebar-primary-actions">
               <SidebarMenuItem><SidebarMenuButton
                 variant="ghost"

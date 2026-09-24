@@ -208,6 +208,7 @@ def prepare_worker_codex_home(
     runtime_home: str | Path,
     python_executable: str | Path | None = None,
     shared_codex_home: str | Path | None = None,
+    *, readonly: bool = False, readonly_executable: str | None = None,
 ) -> Path:
     """Prepare an isolated Codex store with only the DoTasks callback MCP."""
     data_path = Path(data_home).expanduser().resolve()
@@ -261,11 +262,29 @@ def prepare_worker_codex_home(
         "",
         "[mcp_servers.dotasks.env]",
         f"DOTASKS_HOME = {json.dumps(str(data_path))}",
+        f"DOTASKS_AGENT_CONFIG = {json.dumps(str(data_path / 'cloud-agent.json'))}",
         'DOTASKS_REMOTE_SERVICE = "1"',
         f"PYTHONPATH = {json.dumps(str(runtime_path))}",
         'PYTHONDONTWRITEBYTECODE = "1"',
         "",
     ]
+    if readonly:
+        executable_paths=[]
+        if readonly_executable:
+            binary=Path(shutil.which(readonly_executable) or readonly_executable).expanduser().absolute()
+            parents=sorted({binary.parent,binary.resolve().parent})
+            if any(parent in {Path('/'),Path.home(),Path.home().parent} for parent in parents):
+                raise ValueError('Codex must be installed in a dedicated executable directory for read-only analysis')
+            executable_paths=[f'{json.dumps(str(parent))} = "read"' for parent in parents]
+        config_lines = [*base_lines, 'approval_policy = "never"',
+                        'default_permissions = "dotasks-analysis"', 'web_search = "disabled"',
+                        '[permissions.dotasks-analysis.filesystem]', '":root" = "deny"',
+                        '":minimal" = "read"',
+                        *executable_paths,
+                        '[permissions.dotasks-analysis.filesystem.":workspace_roots"]', '"." = "read"',
+                        '[permissions.dotasks-analysis.network]', 'enabled = false',
+                        '[features]', 'apps = false', 'plugins = false', 'multi_agent = false',
+                        '[shell_environment_policy]', 'inherit = "none"', '']
     config = target / "config.toml"
     temporary = config.with_name(f".{config.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     temporary.write_text("\n".join(config_lines), encoding="utf-8")
@@ -283,6 +302,7 @@ class CodexAppServerClient:
         runtime_home: str | Path,
         executable: str | None = None,
         timeout: float = 30.0,
+        readonly: bool = False,
     ):
         bundled = "/Applications/ChatGPT.app/Contents/Resources/codex"
         self.executable = (
@@ -296,6 +316,7 @@ class CodexAppServerClient:
         self.shared_codex_home = _default_codex_home()
         self.worker_codex_home: Path | None = None
         self.timeout = timeout
+        self.readonly = readonly
         self.process: subprocess.Popen[str] | None = None
         self.last_error = ""
         self._request_id = 0
@@ -319,6 +340,8 @@ class CodexAppServerClient:
             self.runtime_home,
             sys.executable,
             shared_codex_home=self.shared_codex_home,
+            readonly=self.readonly,
+            readonly_executable=self.executable if self.readonly else None,
         )
         self.worker_codex_home = worker_home
         environment = os.environ.copy()
@@ -377,6 +400,10 @@ class CodexAppServerClient:
                 process.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 process.kill()
+                process.wait(timeout=3)
+        for stream in (process.stdout,process.stderr):
+            if stream:
+                stream.close()
         self._fail_pending("Codex App Server stopped")
         self._sync_completed_threads()
 

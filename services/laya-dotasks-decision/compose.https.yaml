@@ -1,0 +1,19 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      DECISION_DOMAIN: ${DECISION_DOMAIN:?set DECISION_DOMAIN for HTTPS deployment}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      laya-dotasks-decision:
+        condition: service_healthy
+volumes:
+  caddy-data:
+  caddy-config:

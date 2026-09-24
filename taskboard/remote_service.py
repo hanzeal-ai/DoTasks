@@ -45,6 +45,9 @@ class RemoteToolClient:
         if not path.is_file():
             return None
         stored = json.loads(path.read_text(encoding="utf-8"))
+        if stored.get("team_context"):
+            from .team_agent import TeamClient
+            return TeamClient(stored["cloud_url"], stored["agent_id"], stored["agent_token"], **stored["team_context"])
         return cls(
             str(os.environ.get("DOTASKS_CLOUD_URL") or stored.get("cloud_url") or ""),
             str(os.environ.get("DOTASKS_AGENT_ID") or stored.get("agent_id") or "default"),
@@ -69,7 +72,8 @@ class RemoteToolClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=70) as response:
+            timeout = 600 if name in {"submit_task_delivery", "review_code"} else 70
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 body = response.read()
         except urllib.error.HTTPError as exc:
             body = exc.read()

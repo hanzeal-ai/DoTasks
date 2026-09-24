@@ -64,6 +64,13 @@ class DeployCloudIpScriptTest(unittest.TestCase):
             text=True,
         )
 
+    def test_loaded_image_does_not_contact_registry(self):
+        self.run_script('--loaded-image')
+        log = self.log.read_text()
+        self.assertIn('image inspect registry.example.com/team/dotasks:2026.09.03', log)
+        self.assertNotIn(' pull\n', log)
+        self.assertIn('--pull never', log)
+
     def test_creates_private_env_builds_and_checks_health(self) -> None:
         result = self.run_script()
 
@@ -182,6 +189,23 @@ class DeployCloudIpScriptTest(unittest.TestCase):
         self.assertNotIn("browser-password-123456", result.stdout)
         self.assertNotIn("agent-token-12345678901234567890", result.stdout)
         self.assertIn("Credentials remain only in", result.stdout)
+
+    def test_shared_cloud_mode_is_preserved_on_image_updates(self) -> None:
+        arguments = ['/bin/sh', str(SCRIPT), '--public-url', 'https://dotasks.hanzeal.com',
+                     '--image', 'registry.example.com/team/dotasks:multi', '--account-mode', 'multi']
+        first = subprocess.run(arguments, cwd=self.project, env=self.environment, capture_output=True, text=True, check=True)
+        self.assertIn('dotasks init', first.stdout)
+        self.assertNotIn('Browser password:', first.stdout)
+        self.assertIn('DOTASKS_ACCOUNT_MODE=multi', (self.project / '.env').read_text())
+        update = ['/bin/sh', str(SCRIPT), '--public-url', 'https://dotasks.hanzeal.com', '--reuse-env']
+        subprocess.run(update, cwd=self.project, env=self.environment, capture_output=True, text=True, check=True)
+        self.assertIn('DOTASKS_ACCOUNT_MODE=multi', (self.project / '.env').read_text())
+        self.assertIn('DOTASKS_ACCOUNT_MODE:', (self.project / '.dotasks-cloud/compose.yaml').read_text())
+
+    def test_shared_cloud_rejects_plain_http(self) -> None:
+        result = self.run_script('--account-mode', 'multi', check=False)
+        self.assertNotEqual(0, result.returncode)
+        self.assertFalse((self.project / '.env').exists())
 
     def test_rejects_mismatched_reused_env(self) -> None:
         (self.project / ".env").write_text(

@@ -1,0 +1,350 @@
+{
+  "date": "2026-09-24",
+  "policy_version": "dotasks-decisions-v2",
+  "scope": "Synthetic deployment diagnostics, not domain benchmark or calibration",
+  "local": {
+    "os": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "architecture": "arm64",
+    "device": "cpu",
+    "threads": 2,
+    "report": {
+      "failure_cases": [
+        {
+          "expected": "environment",
+          "actual": "project",
+          "probabilities": {
+            "environment": 0.0923,
+            "project": 0.458,
+            "implementation": 0.2496,
+            "unknown": 0.2
+          }
+        },
+        {
+          "expected": "project",
+          "actual": "project",
+          "probabilities": {
+            "environment": 0.0381,
+            "project": 0.8492,
+            "implementation": 0.068,
+            "unknown": 0.0447
+          }
+        },
+        {
+          "expected": "implementation",
+          "actual": "implementation",
+          "probabilities": {
+            "environment": 0.0808,
+            "project": 0.1008,
+            "implementation": 0.5907,
+            "unknown": 0.2276
+          }
+        },
+        {
+          "expected": "unknown",
+          "actual": "unknown",
+          "probabilities": {
+            "environment": 0.0086,
+            "project": 0.1654,
+            "implementation": 0.1801,
+            "unknown": 0.6459
+          }
+        }
+      ],
+      "history_cases": [
+        {
+          "expected_first": "second",
+          "result": {
+            "schema_version": 1,
+            "policy_version": "dotasks-decisions-v2",
+            "model_id": "convaiinnovations/laya-multilingual",
+            "model_revision": "e4e9ddf21a7b1903b7acffd8814ad4307bf63a67",
+            "runtime_version": "0.3.20",
+            "request_id": "e1eea9d6-831f-41c3-85ca-0277702b15ad",
+            "latency_ms": 127,
+            "advisory_only": true,
+            "truncated": false,
+            "score_kind": "ordinal_0_1",
+            "candidates": [
+              {
+                "id": "second",
+                "relevance": 0.7225
+              },
+              {
+                "id": "first",
+                "relevance": 0.7179
+              }
+            ]
+          }
+        },
+        {
+          "expected_first": "second",
+          "result": {
+            "schema_version": 1,
+            "policy_version": "dotasks-decisions-v2",
+            "model_id": "convaiinnovations/laya-multilingual",
+            "model_revision": "e4e9ddf21a7b1903b7acffd8814ad4307bf63a67",
+            "runtime_version": "0.3.20",
+            "request_id": "05c29876-c92f-486c-b316-637181a2a9b8",
+            "latency_ms": 103,
+            "advisory_only": true,
+            "truncated": false,
+            "score_kind": "ordinal_0_1",
+            "candidates": [
+              {
+                "id": "second",
+                "relevance": 0.84315
+              },
+              {
+                "id": "first",
+                "relevance": 0.721
+              }
+            ]
+          }
+        },
+        {
+          "expected_first": "first",
+          "result": {
+            "schema_version": 1,
+            "policy_version": "dotasks-decisions-v2",
+            "model_id": "convaiinnovations/laya-multilingual",
+            "model_revision": "e4e9ddf21a7b1903b7acffd8814ad4307bf63a67",
+            "runtime_version": "0.3.20",
+            "request_id": "b7b0ed11-5fc2-4ff8-9df9-e4beff15e203",
+            "latency_ms": 108,
+            "advisory_only": true,
+            "truncated": false,
+            "score_kind": "ordinal_0_1",
+            "candidates": [
+              {
+                "id": "second",
+                "relevance": 0.73405
+              },
+              {
+                "id": "first",
+                "relevance": 0.68495
+              }
+            ]
+          }
+        },
+        {
+          "expected_first": "second",
+          "result": {
+            "schema_version": 1,
+            "policy_version": "dotasks-decisions-v2",
+            "model_id": "convaiinnovations/laya-multilingual",
+            "model_revision": "e4e9ddf21a7b1903b7acffd8814ad4307bf63a67",
+            "runtime_version": "0.3.20",
+            "request_id": "809f2143-a5f0-4efe-840f-3639084f7e0b",
+            "latency_ms": 107,
+            "advisory_only": true,
+            "truncated": false,
+            "score_kind": "ordinal_0_1",
+            "candidates": [
+              {
+                "id": "second",
+                "relevance": 0.74475
+              },
+              {
+                "id": "first",
+                "relevance": 0.66195
+              }
+            ]
+          }
+        }
+      ],
+      "matched_failure_cases": 3,
+      "total_failure_cases": 4,
+      "latency_ms": [
+        303,
+        71,
+        75,
+        69,
+        130,
+        107,
+        110,
+        110
+      ],
+      "matched_history_cases": 3,
+      "total_history_cases": 4,
+      "median_latency_ms": 108.5
+    }
+  },
+  "linux": {
+    "platform": "linux/amd64 emulated on Apple Silicon Docker Desktop",
+    "image_id": "sha256:71062a82b36ad047f3fa91e8e8b416cb3d568e8b7aaa42f9bb7b1d4dd9ff0924",
+    "network": "none",
+    "read_only_rootfs": true,
+    "user": "decision (10001)",
+    "memory_limit": "4 GiB",
+    "cpus": 2,
+    "report": {
+      "failure_cases": [
+        {
+          "expected": "environment",
+          "actual": "project",
+          "probabilities": {
+            "environment": 0.0923,
+            "project": 0.458,
+            "implementation": 0.2496,
+            "unknown": 0.2
+          }
+        },
+        {
+          "expected": "project",
+          "actual": "project",
+          "probabilities": {
+            "environment": 0.0381,
+            "project": 0.8492,
+            "implementation": 0.068,
+            "unknown": 0.0447
+          }
+        },
+        {
+          "expected": "implementation",
+          "actual": "implementation",
+          "probabilities": {
+            "environment": 0.0808,
+            "project": 0.1008,
+            "implementation": 0.5907,
+            "unknown": 0.2276
+          }
+        },
+        {
+          "expected": "unknown",
+          "actual": "unknown",
+          "probabilities": {
+            "environment": 0.0086,
+            "project": 0.1654,
+            "implementation": 0.1801,
+            "unknown": 0.6459
+          }
+        }
+      ],
+      "history_cases": [
+        {
+          "expected_first": "second",
+          "result": {
+            "schema_version": 1,
+            "policy_version": "dotasks-decisions-v2",
+            "model_id": "convaiinnovations/laya-multilingual",
+            "model_revision": "e4e9ddf21a7b1903b7acffd8814ad4307bf63a67",
+            "runtime_version": "0.3.20",
+            "request_id": "752b9dcb-31c3-49b3-a27b-c0139c40abba",
+            "latency_ms": 2644,
+            "advisory_only": true,
+            "truncated": false,
+            "score_kind": "ordinal_0_1",
+            "candidates": [
+              {
+                "id": "second",
+                "relevance": 0.7225
+              },
+              {
+                "id": "first",
+                "relevance": 0.7179
+              }
+            ]
+          }
+        },
+        {
+          "expected_first": "second",
+          "result": {
+            "schema_version": 1,
+            "policy_version": "dotasks-decisions-v2",
+            "model_id": "convaiinnovations/laya-multilingual",
+            "model_revision": "e4e9ddf21a7b1903b7acffd8814ad4307bf63a67",
+            "runtime_version": "0.3.20",
+            "request_id": "e219c426-e18b-4ab8-b199-28fc8c7c94a5",
+            "latency_ms": 2020,
+            "advisory_only": true,
+            "truncated": false,
+            "score_kind": "ordinal_0_1",
+            "candidates": [
+              {
+                "id": "second",
+                "relevance": 0.84315
+              },
+              {
+                "id": "first",
+                "relevance": 0.721
+              }
+            ]
+          }
+        },
+        {
+          "expected_first": "first",
+          "result": {
+            "schema_version": 1,
+            "policy_version": "dotasks-decisions-v2",
+            "model_id": "convaiinnovations/laya-multilingual",
+            "model_revision": "e4e9ddf21a7b1903b7acffd8814ad4307bf63a67",
+            "runtime_version": "0.3.20",
+            "request_id": "886b09d0-4fd0-4a7b-8e03-2ad5702c3de4",
+            "latency_ms": 1844,
+            "advisory_only": true,
+            "truncated": false,
+            "score_kind": "ordinal_0_1",
+            "candidates": [
+              {
+                "id": "second",
+                "relevance": 0.73405
+              },
+              {
+                "id": "first",
+                "relevance": 0.68495
+              }
+            ]
+          }
+        },
+        {
+          "expected_first": "second",
+          "result": {
+            "schema_version": 1,
+            "policy_version": "dotasks-decisions-v2",
+            "model_id": "convaiinnovations/laya-multilingual",
+            "model_revision": "e4e9ddf21a7b1903b7acffd8814ad4307bf63a67",
+            "runtime_version": "0.3.20",
+            "request_id": "d832fa4d-92c8-4551-80a1-20991a6cdada",
+            "latency_ms": 2203,
+            "advisory_only": true,
+            "truncated": false,
+            "score_kind": "ordinal_0_1",
+            "candidates": [
+              {
+                "id": "second",
+                "relevance": 0.74475
+              },
+              {
+                "id": "first",
+                "relevance": 0.66195
+              }
+            ]
+          }
+        }
+      ],
+      "matched_failure_cases": 3,
+      "total_failure_cases": 4,
+      "latency_ms": [
+        2787,
+        3243,
+        2913,
+        4980,
+        2661,
+        2025,
+        1849,
+        2208
+      ],
+      "matched_history_cases": 3,
+      "total_history_cases": 4,
+      "median_latency_ms": 2724.0
+    }
+  },
+  "decision_mode": "shadow",
+  "cloud_deployed": false,
+  "limitations": [
+    "No production task dataset evaluation",
+    "No Alibaba target-host performance test",
+    "No public TLS certificate issuance test",
+    "Model errors observed; automatic ranking remains disabled"
+  ]
+}

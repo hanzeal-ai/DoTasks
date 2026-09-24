@@ -161,6 +161,7 @@ class TaskReviewMixin:
     ) -> dict[str, Any]:
         run = self.get_run(run_id)
         task = self.get_task(run["task_id"])
+        self._execution_admission(task["id"], "delivery", run_id)
         batch = self._batch_for_run(run_id)
         batch_tasks = self._batch_member_tasks(batch["id"]) if batch else [task]
         batch_task_ids = [item["id"] for item in batch_tasks]
@@ -481,6 +482,7 @@ class TaskReviewMixin:
     ) -> dict[str, Any]:
         task = self.get_task(task_id)
         run = self.get_run(run_id)
+        self._execution_admission(task_id, "review", run_id)
         batch = self._batch_for_run(run_id)
         if (
             task.get("active_run_id") != run_id

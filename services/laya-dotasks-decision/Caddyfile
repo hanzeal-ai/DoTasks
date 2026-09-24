@@ -1,0 +1,6 @@
+{$DECISION_DOMAIN} {
+    request_body {
+        max_size 96KB
+    }
+    reverse_proxy laya-dotasks-decision:8791
+}

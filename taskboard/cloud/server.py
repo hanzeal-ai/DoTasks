@@ -68,7 +68,7 @@ class RelayConfig:
             public_url=public_url,
         )
         agent_token = str(os.environ.get("DOTASKS_AGENT_TOKEN") or "")
-        if len(agent_token) < 24:
+        if server.account_mode == "single" and len(agent_token) < 24:
             raise ValueError("DOTASKS_AGENT_TOKEN must contain at least 24 characters")
         agent_id = str(os.environ.get("DOTASKS_AGENT_ID") or "default").strip()
         if not agent_id or len(agent_id) > 100:
@@ -536,6 +536,9 @@ class RelayHTTPServer(ThreadingHTTPServer):
 
 
 def build_relay_server(config: RelayConfig) -> RelayHTTPServer:
+    if config.server.account_mode == "multi":
+        from .tenant_server import build_account_server
+        return build_account_server(config)
     server_config = config.server.validate()
     data_home = server_config.data_home or (
         Path.home() / ".local" / "share" / "DoTasks"

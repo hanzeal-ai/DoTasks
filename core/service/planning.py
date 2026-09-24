@@ -609,6 +609,7 @@ class TaskPlanningMixin:
         }
         if unknown:
             raise ValueError(f"Unknown task fields: {', '.join(sorted(unknown))}")
+        self._execution_admission(existing_task_id, "intake")
         title = str(payload.get("title") or "").strip()
         if not title:
             raise ValueError("title is required")
@@ -1339,6 +1340,7 @@ class TaskPlanningMixin:
         self, payload: dict[str, Any], existing_task_id: str | None = None,
     ) -> dict[str, Any]:
         """Persist a requirement or create a ready independently executable task."""
+        self._execution_admission(existing_task_id, "intake")
         intake_kind = str(payload.get("intake_kind") or "").strip().lower()
         if intake_kind not in {"requirement", "task"}:
             raise ValueError("intake_kind must be requirement or task")

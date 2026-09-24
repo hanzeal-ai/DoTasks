@@ -1,0 +1,83 @@
+{
+  "metadata": {
+    "policy_version": "dotasks-decisions-v3",
+    "model_id": "convaiinnovations/laya-multilingual",
+    "model_revision": "e4e9ddf21a7b1903b7acffd8814ad4307bf63a67",
+    "runtime_version": "0.3.20"
+  },
+  "cases": [
+    {
+      "case": "normal",
+      "latency_ms": 124,
+      "result": {
+        "candidates": [
+          {
+            "id": "0",
+            "relevance": 0.82465
+          },
+          {
+            "id": "1",
+            "relevance": 0.72275
+          }
+        ],
+        "task_revision": 2,
+        "candidate_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "case": "similar",
+      "latency_ms": 120,
+      "result": {
+        "candidates": [
+          {
+            "id": "0",
+            "relevance": 0.75285
+          },
+          {
+            "id": "1",
+            "relevance": 0.7176
+          }
+        ],
+        "task_revision": 2,
+        "candidate_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "case": "ambiguous",
+      "latency_ms": 130,
+      "result": {
+        "candidates": [
+          {
+            "id": "1",
+            "relevance": 0.6821
+          },
+          {
+            "id": "0",
+            "relevance": 0.60055
+          }
+        ],
+        "task_revision": 2,
+        "candidate_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "case": "untrusted",
+      "latency_ms": 136,
+      "result": {
+        "candidates": [
+          {
+            "id": "1",
+            "relevance": 0.4176
+          },
+          {
+            "id": "0",
+            "relevance": 0.341
+          }
+        ],
+        "task_revision": 2,
+        "candidate_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  ],
+  "interpretation": "结构约束诊断；样本不足，不代表人员分配准确率。必须人工确认。"
+}

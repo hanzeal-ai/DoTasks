@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
+import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -165,6 +167,8 @@ class TaskLifecycleMixin:
     def transition_task(
         self, task_id: str, status: str, reason: str = "", **updates: Any
     ) -> dict[str, Any]:
+        if status in {"ready", "rework", "claimed", "implementing", "code_review", "done"}:
+            self._execution_admission(task_id, "transition")
         current = self.get_task(task_id)
         self._validate_transition(task_id, current, status, updates)
         changes, closes_active_run = self._transition_changes(
@@ -263,7 +267,20 @@ class TaskLifecycleMixin:
                         self._queue_obsidian_sync(connection, "task", task_id)
                     self.flush_integration_outbox()
                     return self.get_task(task_id)
-        return self.transition_task(task_id, status, reason)
+        result = self.transition_task(task_id, status, reason)
+        # Finish the authoritative transition before optional network I/O. Advice
+        # cannot prolong the old run's eligibility or change its recovery branch.
+        if status == "blocked" and not failure_category and category == "implementation":
+            advice = self.decisions.classify_failure(reason)
+            if advice is not None:
+                try:
+                    with self.db.transaction() as connection:
+                        self._event(connection, "run", run_id, "failure_decision_advisory", advice)
+                except sqlite3.Error:
+                    logging.getLogger(__name__).warning(
+                        "Optional failure decision audit could not be stored for run %s", run_id
+                    )
+        return result
 
     def _validate_transition(
         self,
@@ -939,6 +956,9 @@ class TaskLifecycleMixin:
             # touch the same file never run concurrently, even at different symbols.
             filters = ["status IN ('ready', 'rework')"]
             values: list[Any] = []
+            if getattr(self, "execution_scope_task_id", None):
+                filters.append("id=?")
+                values.append(self.execution_scope_task_id)
             if project:
                 filters.append("project = ?")
                 values.append(self._normalize_project(project))
@@ -973,6 +993,7 @@ class TaskLifecycleMixin:
             if not row:
                 return None
             task = decode_row(row)
+            self._execution_admission(task["id"], "claim")
             run_type = (
                 "rework"
                 if task["status"] == "rework" or task.get("retry_run_type") == "rework"
@@ -1193,6 +1214,9 @@ class TaskLifecycleMixin:
             if project:
                 where.append("t.project=?")
                 values.append(self._normalize_project(project))
+            if getattr(self, "execution_scope_task_id", None):
+                where.append("t.id=?")
+                values.append(self.execution_scope_task_id)
             row = connection.execute(
                 f"SELECT t.* FROM tasks t WHERE {' AND '.join(where)} ORDER BY t.created_at LIMIT 1",
                 values,
@@ -1200,6 +1224,7 @@ class TaskLifecycleMixin:
             if not row:
                 return None
             task = decode_row(row)
+            self._execution_admission(task["id"], "claim")
             if self._pause_for_stage_budget_preflight(
                 connection, task, "code_review"
             ):

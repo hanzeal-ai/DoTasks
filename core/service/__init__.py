@@ -9,6 +9,7 @@ from typing import Any
 from ..db import Database
 from taskboard.location import LocationAdapter
 from taskboard.obsidian import ObsidianAdapter
+from taskboard.decision_client import DecisionClient
 from taskboard.project_guard import ProjectWorkspaceGuard
 from .execution import TaskLifecycleMixin
 from .batching import TaskBatchMixin
@@ -62,9 +63,14 @@ class TaskboardService(
             data_home = Path(configured_home).expanduser() if configured_home else application_home
         self.data_home = data_home.resolve()
         self.db = Database(self.data_home / "data" / "taskboard.db")
-        self.obsidian = ObsidianAdapter(self.data_home)
+        self.decisions = DecisionClient(self.data_home)
+        self.obsidian = ObsidianAdapter(self.data_home, decision_client=self.decisions)
         self.location = LocationAdapter()
         self.workspace_guard = workspace_guard or ProjectWorkspaceGuard()
+
+    def _execution_admission(self, task_id: str | None, stage: str, run_id: str | None = None) -> None:
+        """Personal execution needs no team approval; team runtimes override this gate."""
+        return None
 
     def _normalize_project(self, project: str | Path | None) -> str:
         return self.workspace_guard.normalize_project(project)

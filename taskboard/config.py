@@ -36,6 +36,7 @@ class ServerConfig:
     public_url: str = ""
     http_user: str = ""
     http_password: str = ""
+    account_mode: str = "single"
     extra_trusted_hosts: tuple[str, ...] = ()
     extra_trusted_origins: tuple[str, ...] = ()
 
@@ -49,7 +50,9 @@ class ServerConfig:
                 raise ValueError("DoTasks local mode only supports loopback HTTP binding")
             return self
 
-        if not self.http_user or not self.http_password:
+        if self.account_mode not in {"single", "multi"}:
+            raise ValueError("DOTASKS_ACCOUNT_MODE must be single or multi")
+        if self.account_mode == "single" and (not self.http_user or not self.http_password):
             raise ValueError(
                 "DoTasks cloud mode requires DOTASKS_HTTP_USER and "
                 "DOTASKS_HTTP_PASSWORD"
@@ -116,6 +119,7 @@ class ServerConfig:
             public_url=str(public_url or os.environ.get("DOTASKS_PUBLIC_URL") or "").strip(),
             http_user=str(os.environ.get("DOTASKS_HTTP_USER") or "").strip(),
             http_password=str(os.environ.get("DOTASKS_HTTP_PASSWORD") or ""),
+            account_mode=str(os.environ.get("DOTASKS_ACCOUNT_MODE") or "single"),
             extra_trusted_hosts=_split_csv(os.environ.get("DOTASKS_TRUSTED_HOSTS")),
             extra_trusted_origins=_split_csv(os.environ.get("DOTASKS_TRUSTED_ORIGINS")),
         )

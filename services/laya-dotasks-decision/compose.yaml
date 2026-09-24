@@ -1,0 +1,28 @@
+services:
+  laya-dotasks-decision:
+    build: .
+    image: laya-dotasks-decision:0.1.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8791:8791"
+    environment:
+      LAYA_DECISION_THREADS: ${LAYA_DECISION_THREADS:-2}
+    volumes:
+      - ./models:/models:ro
+    secrets:
+      - decision_token
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 4g
+    cpus: 2
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+secrets:
+  decision_token:
+    file: ./secrets/decision-token

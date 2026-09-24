@@ -5,6 +5,7 @@ import fcntl
 import posixpath
 import sqlite3
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Iterator
 
@@ -475,6 +476,7 @@ SCHEMA_VERSION = 23
 
 class Database:
     def __init__(self, path: str | Path):
+        self._atomic_connection = ContextVar('dotasks_atomic_connection', default=None)
         self.path = Path(path).expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self.path.with_suffix(self.path.suffix + ".migrate.lock")
@@ -1303,6 +1305,10 @@ class Database:
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
         """Yield a read connection and always close its file descriptors."""
+        active = self._atomic_connection.get()
+        if active is not None:
+            yield active
+            return
         connection = self.connect()
         try:
             yield connection
@@ -1311,6 +1317,20 @@ class Database:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
+        active = self._atomic_connection.get()
+        if active is not None:
+            # Team HTTP units combine core writes and their idempotent response.
+            import uuid
+            savepoint = 'nested_' + uuid.uuid4().hex
+            active.execute('SAVEPOINT ' + savepoint)
+            try:
+                yield active
+                active.execute('RELEASE ' + savepoint)
+            except Exception:
+                active.execute('ROLLBACK TO ' + savepoint)
+                active.execute('RELEASE ' + savepoint)
+                raise
+            return
         connection = self.connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -1321,6 +1341,20 @@ class Database:
             raise
         finally:
             connection.close()
+
+    @contextmanager
+    def atomic(self) -> Iterator[sqlite3.Connection]:
+        """Opt-in request unit; normal personal-service transaction behavior is unchanged."""
+        if self._atomic_connection.get() is not None:
+            with self.transaction() as connection:
+                yield connection
+            return
+        with self.transaction() as connection:
+            token = self._atomic_connection.set(connection)
+            try:
+                yield connection
+            finally:
+                self._atomic_connection.reset(token)
 
     def next_id(self, connection: sqlite3.Connection, prefix: str) -> str:
         connection.execute(

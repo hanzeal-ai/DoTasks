@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from core.run_context import model_run_context
@@ -657,6 +659,42 @@ class WorkflowTest(unittest.TestCase):
         )
 
         self.assertEqual("blocked", exhausted["status"])
+
+    def test_failure_advice_cannot_trigger_repair_or_expand_targets(self):
+        task = self.task("advisory-block")
+        first = self.service.claim_next_task("worker")
+        self.service.bind_conversation(task["id"], "execution", "advice-thread", first["run"]["id"])
+        advice = {"category": "environment", "advisory_only": True}
+        def classify_after_transition(reason):
+            self.assertEqual("blocked", self.service.get_task(task["id"])["status"])
+            self.assertIsNone(self.service.get_task(task["id"])["active_run_id"])
+            return advice
+        with patch.object(self.service.decisions, "classify_failure", side_effect=classify_after_transition):
+            result = self.service.report_run_blocked(
+                task["id"], first["run"]["id"], "blocked", "未知运行错误",
+                failure_locations=[{"file": "new.py", "symbols": []}],
+            )
+        self.assertEqual("blocked", result["status"])
+        self.assertEqual(task["implementation_contract"], result["implementation_contract"])
+        with self.service.db.connection() as connection:
+            event = connection.execute("SELECT payload FROM events WHERE event_type='failure_decision_advisory'").fetchone()
+        self.assertIsNotNone(event)
+
+    def test_optional_decision_audit_error_does_not_fail_completed_transition(self):
+        task = self.task("advice-audit-error")
+        first = self.service.claim_next_task("worker")
+        self.service.bind_conversation(task["id"], "execution", "audit-error-thread", first["run"]["id"])
+        original = self.service._event
+        def fail_only_audit(connection, entity_type, entity_id, event_type, payload):
+            if event_type == "failure_decision_advisory":
+                raise sqlite3.OperationalError("database is locked")
+            return original(connection, entity_type, entity_id, event_type, payload)
+        with patch.object(self.service.decisions, "classify_failure", return_value={"category": "environment"}), \
+             patch.object(self.service, "_event", side_effect=fail_only_audit), \
+             self.assertLogs("core.service.execution", level="WARNING"):
+            result = self.service.report_run_blocked(task["id"], first["run"]["id"], "blocked", "未知错误")
+        self.assertEqual("blocked", result["status"])
+        self.assertEqual("blocked", self.service.get_task(task["id"])["status"])
 
     def test_pending_native_creation_keeps_scheduler_wakeup_unacknowledged(self):
         task = self.task("pending-native-creation")

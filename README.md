@@ -49,6 +49,9 @@ Codex Skill 充当编排器，本地服务作为任务系统记录：
 
 ## 代码结构
 
+可选的本地/云端 Laya 决策服务见 [laya-dotasks-decision](services/laya-dotasks-decision/README.md)。
+它提供历史候选相关性评分和失败原因建议，默认不启用；不会接管依赖关系、自动修复或审查放行。
+
 ```text
 core/       任务创建、调度、工作流与生命周期等核心业务
 taskboard/  HTTP、MCP 与本地集成适配层
@@ -253,9 +256,9 @@ HTTP 服务只允许绑定 `localhost` 或回环 IP。API 会校验 `Host` 与�
             thread/start + turn/start
 ```
 
-正式部署使用 GitHub Container Registry（GHCR）私有镜像，云服务器不需要保存源码。本地
-手工发布时，先使用具备 `write:packages` 权限的 GitHub Token 登录，然后构建并直接推送
-`linux/amd64` 镜像：
+自动部署直接传输 GitHub 托管机器构建的镜像包，云服务器不需要保存源码或运行 Runner。
+如需沿用手工 GHCR 发布路径，可先使用具备 `write:packages` 权限的 GitHub Token 登录，
+然后构建并推送 `linux/amd64` 镜像：
 
 ```bash
 docker login ghcr.io
@@ -263,21 +266,14 @@ docker login ghcr.io
   --image ghcr.io/hanzeal-ai/dotasks:<版本号>
 ```
 
-`.github/workflows/deploy-cloud.yml` 会在 `main` 每次推送后自动运行完整测试，使用提交 SHA
-构建不可变镜像并通过仓库自带的 `GITHUB_TOKEN` 推送 GHCR。构建完成后，ECS 上的 GitHub
-Self-hosted Runner 只下载单文件部署脚本、拉取镜像并更新容器；不会下载项目源码，也不需要
-从 GitHub 主动 SSH 进入 ECS。
+`.github/workflows/deploy-cloud.yml` 在 `main` 推送后由 GitHub 托管机器测试、构建
+Linux amd64 镜像，并通过受限 SSH 接收器上传和激活。流程沿用 CarryOn：专用部署用户、
+强制命令、固定服务器接收器、严格主机密钥校验，不需要服务器常驻 GitHub Runner。
+只有 `DEPLOY_ENABLED=true` 时才发布；PR 不部署。
 
-Self-hosted Runner 使用 GitHub 默认标签 `self-hosted`、`Linux`、`X64`，以 `admin` 用户安装
-为系统服务，并且该用户必须能直接执行 `docker info`。Runner 只需向 GitHub 和 GHCR 建立
-出站 HTTPS 连接。GitHub 仓库的 Actions Secrets 只需配置：
-
-- `ECS_PUBLIC_IP`：浏览器访问 DoTasks 使用的公网 IPv4。
-- `DOTASKS_PUBLIC_URL`：可选；启用反向代理后填写 `https://tasks.example.com`，流水线会优先
-  使用它并把应用端口收回到 `127.0.0.1`。
-
-服务器只需 Runner、Docker、Docker Compose 和 `curl`，不需要代码仓库。两个流水线阶段
-分别使用当次短期 `GITHUB_TOKEN` 发布和拉取 GHCR 私有镜像，不保存长期 GHCR Token。
+一次性安装、GitHub 配置、停用旧 Runner 的条件与失败恢复见
+[SSH 部署说明](deployment/README.md)。服务器接收器与 Compose 属于运维安装文件，
+普通应用发布不会覆盖它们。现有账号模式、凭据、监听地址和数据卷保持原配置。
 
 也可以只把 `scripts/deploy-cloud-ip` 上传到云服务器手工部署。服务器先使用具备
 `read:packages` 权限的 GitHub Token 登录 GHCR，然后执行：
@@ -324,17 +320,42 @@ chmod +x ./deploy-cloud-ip
 Actions Secrets 新增同值的 `DOTASKS_PUBLIC_URL`，再用 `--reuse-env` 部署。最后把 Mac Agent 的
 `--cloud-url` 重新配置成 HTTPS 地址，并删除公网 `8765` 安全组规则。
 
-在运行 DoTasks 的 Mac 上执行一次配置：
+新用户使用共享云端时，安装 CLI 后执行 `dotasks init`，创建账号并自动绑定、启动本机 Agent，
+随后在 `https://dotasks.hanzeal.com` 使用该账号密码登录。安装器自动配置 PATH；详细安装、
+部署准备、隔离契约和验证边界见 [CLI 注册与共享云端](docs/cli-onboarding.md)。
+默认云端已部署 multi 账号模式，提供在线安装及 `dotasks update` 升级入口。
+
+已有单账号实例或源码调试仍可通过 CLI 管理本地运行时：
 
 ```bash
-./scripts/start-agent configure \
-  --cloud-url http://<服务器公网IP>:8765 \
-  --agent-id default \
-  --agent-token '<与云端 .env 完全一致的 Agent Token>'
+# 在仓库根目录执行；将 scripts 加入 PATH 后即可使用 dotasks
+export PATH="$PWD/scripts:$PATH"
+dotasks configure --cloud-url https://<云端域名> --agent-id default
+# 首次配置会隐藏输入 Agent Token；已有字段保留，可用同名参数覆盖
+
+dotasks start                 # 后台运行，并启用登录自启
+dotasks status                # 服务状态、云端 API、调度状态及活动任务
+dotasks logs -f               # 持续查看 Agent 日志
+dotasks logs --service server # 查看本地 HTTP 服务日志
+dotasks doctor               # 配置、服务、Codex CLI 登录诊断
+dotasks stop                 # 停止服务，并关闭登录自启
 ```
 
-源码运行时另开终端执行 `./scripts/start-agent`。通过 `./scripts/build-helper --install`
-安装的 Helper 会同时保活本地服务和 Agent；未配置云端时 Agent 静默等待，不影响本地模式。
+安装独立 CLI 请按上述安装文档操作。CLI 直接管理本地 HTTP 服务和 Agent 的两个 launchd 服务；
+无需安装 Helper App。安装器配置新终端的 PATH，后台管理目前支持 macOS。
+使用 `dotasks update --check` 检查版本，`dotasks update` 升级并保留账号和数据。
+
+`stop` 会中断后台执行，请在任务空闲时操作；再次 `start` 可恢复登录自启。
+修改配置后使用 `stop` / `start` 使其生效。服务不会继承当前终端的临时 Agent 配置变量，
+应通过 `configure` 保存。CLI 的数据目录和配置路径必须与后台运行时一致。
+`status` 的云端 API 检查不等于后台 Agent 的 WSS 在线状态，后者以云端看板为准；
+活动任务取自云端权威数据，包含等待执行的活动运行。
+`doctor` 检查当前终端环境，后台环境和项目访问权限仍需实际任务验证。
+CLI 返回 0 表示检查成功，1 表示异常；云端暂停调度会显示状态，但不是连接错误。
+
+源码调试仍可使用 `./scripts/start-agent` 前台运行 Agent（请勿与后台 Agent 同时启动），
+`dotasks serve` 前台运行本地 HTTP 服务；原有无参数 `dotasks` 和服务端参数入口保留。
+源代码变更不会自动更新已安装 CLI；正式版本使用 `dotasks update` 升级。
 Agent 配置保存在 `~/Library/Application Support/DoTasks/cloud-agent.json`，文件权限为
 `0600`。云端持久数据位于 Compose 的 `dotasks-data` 卷，图谱镜像位于卷内
 `obsidian-vault/<agent-id>/DoTasks/`。
