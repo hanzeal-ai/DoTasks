@@ -9,7 +9,7 @@ on:
       deploy:
         description: Deploy with the self-hosted runner (disable when using Alibaba CLI)
         type: boolean
-        default: true
+        default: false
 
 concurrency:
   group: dotasks-cloud-production
@@ -69,9 +69,18 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
+          outputs: type=docker,dest=${{ runner.temp }}/dotasks-cloud.tar
           tags: ${{ steps.image.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Package image for Alibaba CLI delivery
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dotasks-image-${{ github.sha }}
+          path: ${{ runner.temp }}/dotasks-cloud.tar
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Package standalone deployment script
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -82,7 +91,7 @@ jobs:
           retention-days: 1
 
   deploy:
-    if: github.event_name != 'workflow_dispatch' || inputs.deploy
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy
     needs: build
     runs-on:
       - self-hosted

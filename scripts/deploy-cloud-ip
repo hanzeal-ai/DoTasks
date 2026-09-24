@@ -18,6 +18,7 @@ ACCOUNT_MODE=
 FORCE_ENV=0
 REUSE_ENV=0
 PRINT_SECRETS=1
+LOADED_IMAGE=0
 
 usage() {
   cat <<'EOF'
@@ -41,6 +42,7 @@ Options:
   --account-mode <mode>      single (default) or multi (HTTPS shared registration)
   --reuse-env                Preserve credentials and optionally update the image
   --force-env                Replace the existing configuration and credentials
+  --loaded-image             Use a verified image already loaded into Docker
   --no-print-secrets         Keep generated credentials out of CI logs
   -h, --help                 Show this help
 EOF
@@ -67,6 +69,10 @@ while [ "$#" -gt 0 ]; do
         --account-mode) ACCOUNT_MODE=$2 ;;
       esac
       shift 2
+      ;;
+    --loaded-image)
+      LOADED_IMAGE=1
+      shift
       ;;
     --reuse-env)
       REUSE_ENV=1
@@ -280,10 +286,15 @@ compose() {
 }
 
 compose config >/dev/null
-if ! compose pull; then
-  fail "image pull failed; verify the image reference and run docker login ghcr.io"
+if [ "$LOADED_IMAGE" -eq 1 ]; then
+  docker image inspect "$IMAGE" >/dev/null || fail "loaded image not found"
+  compose up -d --remove-orphans --pull never
+else
+  if ! compose pull; then
+    fail "image pull failed; verify the image reference and run docker login ghcr.io"
+  fi
+  compose up -d --remove-orphans
 fi
-compose up -d --remove-orphans
 
 HEALTH_URL="http://127.0.0.1:$PORT/api/health"
 if [ "$ACCOUNT_MODE" = multi ]; then

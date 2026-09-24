@@ -2,14 +2,20 @@
 from __future__ import annotations
 import argparse
 import base64
+import hashlib
 import json
 import re
 import shlex
 import subprocess
 import time
+import tempfile
+import urllib.request
+import urllib.error
+from urllib.parse import urlparse
+import zipfile
 
 
-def remote_script(image, root):
+def remote_script(image, root, artifact=None):
     if not re.fullmatch(r'ghcr.io/[a-z0-9._/-]+:[0-9a-f]{40}', image):
         raise ValueError('Use an immutable GHCR commit tag')
     if not root.startswith('/') or '\n' in root:
@@ -88,7 +94,71 @@ VERIFY
 trap - ERR
 echo "Deployment verified; rollback configuration and data backup: $BACKUP"
 '''
+    if artifact:
+        url, digest = artifact
+        if urlparse(url).scheme != 'https' or not re.fullmatch(r'[0-9a-f]{64}', digest):
+            raise ValueError('Invalid image artifact')
+        transfer = '''python3 - <<'IMAGE_TRANSFER'
+import hashlib, pathlib, shutil, subprocess, tempfile, urllib.request, zipfile
+with tempfile.TemporaryDirectory(prefix='dotasks-image-') as temporary:
+    archive=pathlib.Path(temporary)/'image.zip'
+    digest=hashlib.sha256()
+    total=0
+    with urllib.request.urlopen(__URL__,timeout=60) as source, archive.open('wb') as target:
+        while block:=source.read(1024*1024):
+            total+=len(block)
+            if total>1024*1024*1024: raise ValueError('Image artifact too large')
+            digest.update(block)
+            target.write(block)
+    if digest.hexdigest()!=__DIGEST__: raise ValueError('Image artifact checksum mismatch')
+    with zipfile.ZipFile(archive) as package:
+        if package.namelist()!=['dotasks-cloud.tar'] or package.infolist()[0].file_size>2*1024*1024*1024:
+            raise ValueError('Unexpected image artifact')
+        with package.open('dotasks-cloud.tar') as source, (pathlib.Path(temporary)/'image.tar').open('wb') as target:
+            shutil.copyfileobj(source,target)
+    subprocess.run(['docker','load','-i',str(pathlib.Path(temporary)/'image.tar')],check=True)
+IMAGE_TRANSFER
+docker image inspect "$IMAGE" >/dev/null'''
+        script = script.replace('docker pull "$IMAGE"', transfer.replace('__URL__', repr(url)).replace('__DIGEST__', repr(digest)))
+        script = script.replace('--reuse-env --no-print-secrets', '--reuse-env --no-print-secrets --loaded-image')
     return script.replace('__ROOT__', shlex.quote(root)).replace('__IMAGE__', shlex.quote(image))
+
+
+def github_artifact(artifact_id, image):
+    """Authorize locally; send only a short-lived artifact URL, never a GitHub token."""
+    endpoint = f'/repos/hanzeal-ai/DoTasks/actions/artifacts/{artifact_id}'
+    metadata = json.loads(subprocess.run(['gh', 'api', endpoint], capture_output=True, text=True, check=True).stdout)
+    revision = image.rsplit(':', 1)[1]
+    if metadata['name'] != 'dotasks-image-' + revision or metadata.get('expired') or metadata.get('workflow_run', {}).get('head_sha') != revision:
+        raise ValueError('Artifact does not match the requested immutable release')
+    token = subprocess.run(['gh', 'auth', 'token'], capture_output=True, text=True, check=True).stdout.strip()
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs): return None
+    def location():
+        request = urllib.request.Request('https://api.github.com' + endpoint + '/zip', headers={'Authorization': 'Bearer ' + token})
+        try:
+            urllib.request.build_opener(NoRedirect()).open(request, timeout=30)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 302: raise RuntimeError('Unable to obtain artifact download') from None
+            url = exc.headers['Location']
+            if urlparse(url).scheme != 'https': raise ValueError('Invalid artifact download URL')
+            return url
+        raise RuntimeError('Expected a signed artifact download URL')
+    digest = hashlib.sha256()
+    total = 0
+    with tempfile.TemporaryFile() as archive:
+        with urllib.request.urlopen(location(), timeout=60) as response:
+            while block := response.read(1024 * 1024):
+                total += len(block)
+                if total > 1024 * 1024 * 1024: raise ValueError('Image artifact too large')
+                digest.update(block)
+                archive.write(block)
+        archive.seek(0)
+        with zipfile.ZipFile(archive) as package:
+            if package.namelist() != ['dotasks-cloud.tar']:
+                raise ValueError('Unexpected image artifact contents')
+    # Refresh after hashing so the server gets the full signed-URL validity window.
+    return location(), digest.hexdigest()
 
 
 def main():
@@ -98,12 +168,15 @@ def main():
     parser.add_argument('--image', required=True)
     parser.add_argument('--deploy-root', default='/home/admin/dotasks')
     parser.add_argument('--working-user', default='admin')
+    parser.add_argument('--github-artifact-id', type=int, help='Transfer a matching Actions image artifact instead of pulling GHCR')
     parser.add_argument('--execute', action='store_true', help='Execute only after independent release review')
     args = parser.parse_args()
     content = remote_script(args.image, args.deploy_root)
     if not args.execute:
         print(content)
         return
+    if args.github_artifact_id:
+        content = remote_script(args.image, args.deploy_root, github_artifact(args.github_artifact_id, args.image))
     common = ['--region', args.region, '--biz-region-id', args.region, '--instance-id', args.instance_id]
     def call(operation, *options):
         completed = subprocess.run(['aliyun', 'swas-open', operation, *common, *options], capture_output=True, text=True, check=True, timeout=60)
