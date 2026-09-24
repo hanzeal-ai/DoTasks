@@ -327,7 +327,7 @@ Actions Secrets 新增同值的 `DOTASKS_PUBLIC_URL`，再用 `--reuse-env` 部�
 新用户使用共享云端时，安装 CLI 后执行 `dotasks init`，创建账号并自动绑定、启动本机 Agent，
 随后在 `https://dotasks.hanzeal.com` 使用该账号密码登录。安装器自动配置 PATH；详细安装、
 部署准备、隔离契约和验证边界见 [CLI 注册与共享云端](docs/cli-onboarding.md)。
-该流程需要云端先部署 multi 账号模式，目前仓库提供的是实现和本地构建产物。
+默认云端已部署 multi 账号模式，提供在线安装及 `dotasks update` 升级入口。
 
 已有单账号实例或源码调试仍可通过 CLI 管理本地运行时：
 
