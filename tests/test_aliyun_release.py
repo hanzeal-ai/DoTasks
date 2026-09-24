@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 import io
 import json
@@ -19,6 +20,8 @@ class AlibabaReleaseTest(unittest.TestCase):
             script = release.remote_script(image, '/home/admin/dotasks', artifact)
             subprocess.run(['bash', '-n'], input=script, text=True, check=True)
             if artifact:
+                transfer = script.split("<<'IMAGE_TRANSFER'\n", 1)[1].split('\nIMAGE_TRANSFER', 1)[0]
+                ast.parse(transfer, feature_version=(3, 6))
                 self.assertNotIn('docker pull', script)
                 self.assertIn('--loaded-image', script)
                 self.assertIn('Image artifact checksum mismatch', script)

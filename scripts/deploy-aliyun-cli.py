@@ -105,7 +105,9 @@ with tempfile.TemporaryDirectory(prefix='dotasks-image-') as temporary:
     digest=hashlib.sha256()
     total=0
     with urllib.request.urlopen(__URL__,timeout=60) as source, archive.open('wb') as target:
-        while block:=source.read(1024*1024):
+        while True:
+            block=source.read(1024*1024)
+            if not block: break
             total+=len(block)
             if total>1024*1024*1024: raise ValueError('Image artifact too large')
             digest.update(block)
