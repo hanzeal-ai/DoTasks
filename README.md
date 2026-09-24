@@ -253,9 +253,9 @@ HTTP 服务只允许绑定 `localhost` 或回环 IP。API 会校验 `Host` 与�
             thread/start + turn/start
 ```
 
-正式部署使用 GitHub Container Registry（GHCR）私有镜像，云服务器不需要保存源码。本地
-手工发布时，先使用具备 `write:packages` 权限的 GitHub Token 登录，然后构建并直接推送
-`linux/amd64` 镜像：
+自动部署直接传输 GitHub 托管机器构建的镜像包，云服务器不需要保存源码或运行 Runner。
+如需沿用手工 GHCR 发布路径，可先使用具备 `write:packages` 权限的 GitHub Token 登录，
+然后构建并推送 `linux/amd64` 镜像：
 
 ```bash
 docker login ghcr.io
@@ -263,21 +263,14 @@ docker login ghcr.io
   --image ghcr.io/hanzeal-ai/dotasks:<版本号>
 ```
 
-`.github/workflows/deploy-cloud.yml` 会在 `main` 每次推送后自动运行完整测试，使用提交 SHA
-构建不可变镜像并通过仓库自带的 `GITHUB_TOKEN` 推送 GHCR。构建完成后，ECS 上的 GitHub
-Self-hosted Runner 只下载单文件部署脚本、拉取镜像并更新容器；不会下载项目源码，也不需要
-从 GitHub 主动 SSH 进入 ECS。
+`.github/workflows/deploy-cloud.yml` 在 `main` 推送后由 GitHub 托管机器测试、构建
+Linux amd64 镜像，并通过受限 SSH 接收器上传和激活。流程沿用 CarryOn：专用部署用户、
+强制命令、固定服务器接收器、严格主机密钥校验，不需要服务器常驻 GitHub Runner。
+只有 `DEPLOY_ENABLED=true` 时才发布；PR 不部署。
 
-Self-hosted Runner 使用 GitHub 默认标签 `self-hosted`、`Linux`、`X64`，以 `admin` 用户安装
-为系统服务，并且该用户必须能直接执行 `docker info`。Runner 只需向 GitHub 和 GHCR 建立
-出站 HTTPS 连接。GitHub 仓库的 Actions Secrets 只需配置：
-
-- `ECS_PUBLIC_IP`：浏览器访问 DoTasks 使用的公网 IPv4。
-- `DOTASKS_PUBLIC_URL`：可选；启用反向代理后填写 `https://tasks.example.com`，流水线会优先
-  使用它并把应用端口收回到 `127.0.0.1`。
-
-服务器只需 Runner、Docker、Docker Compose 和 `curl`，不需要代码仓库。两个流水线阶段
-分别使用当次短期 `GITHUB_TOKEN` 发布和拉取 GHCR 私有镜像，不保存长期 GHCR Token。
+一次性安装、GitHub 配置、停用旧 Runner 的条件与失败恢复见
+[SSH 部署说明](deployment/README.md)。服务器接收器与 Compose 属于运维安装文件，
+普通应用发布不会覆盖它们。现有账号模式、凭据、监听地址和数据卷保持原配置。
 
 也可以只把 `scripts/deploy-cloud-ip` 上传到云服务器手工部署。服务器先使用具备
 `read:packages` 权限的 GitHub Token 登录 GHCR，然后执行：

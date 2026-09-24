@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       deploy:
-        description: Deploy with the self-hosted runner (disable when using Alibaba CLI)
+        description: Deploy through the restricted SSH receiver
         type: boolean
         default: false
 
@@ -17,14 +17,11 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    outputs:
-      image_tag: ${{ steps.image.outputs.tag }}
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -45,127 +42,47 @@ jobs:
       - name: Run tests
         run: ./scripts/test
 
-      - name: Resolve immutable image tag
-        id: image
-        shell: bash
-        run: |
-          image_name="ghcr.io/${GITHUB_REPOSITORY,,}"
-          echo "name=$image_name" >> "$GITHUB_OUTPUT"
-          echo "tag=$image_name:$GITHUB_SHA" >> "$GITHUB_OUTPUT"
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Log in to GHCR for publishing
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-
-      - name: Build and publish image
+      - name: Build deployment image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: linux/amd64
-          push: true
+          push: false
           outputs: type=docker,dest=${{ runner.temp }}/dotasks-cloud.tar
-          tags: ${{ steps.image.outputs.tag }}
+          tags: dotasks-cloud:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Package image for Alibaba CLI delivery
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Package verified image
+        run: python3 deployment/package.py "$GITHUB_SHA" "$RUNNER_TEMP/dotasks-release.zip" "cloud=$RUNNER_TEMP/dotasks-cloud.tar"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: dotasks-image-${{ github.sha }}
-          path: ${{ runner.temp }}/dotasks-cloud.tar
+          name: dotasks-release-${{ github.sha }}
+          path: ${{ runner.temp }}/dotasks-release.zip
+          compression-level: 0
           if-no-files-found: error
-          retention-days: 1
-
-      - name: Package standalone deployment script
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: dotasks-deployment-${{ github.sha }}
-          path: scripts/deploy-cloud-ip
-          if-no-files-found: error
-          retention-days: 1
+          retention-days: 2
 
   deploy:
-    if: github.event_name == 'workflow_dispatch' && inputs.deploy
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true' && (github.event_name == 'push' || inputs.deploy)
     needs: build
-    runs-on:
-      - self-hosted
-      - Linux
-      - X64
-    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
-      packages: read
+      actions: read
     steps:
-      - name: Download standalone deployment script
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
-          name: dotasks-deployment-${{ github.sha }}
-          path: ${{ runner.temp }}/dotasks-deployment
-
-      - name: Log in to GHCR for deployment
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-
-      - name: Deploy immutable image on ECS
-        shell: bash
+          name: dotasks-release-${{ github.sha }}
+          path: ${{ runner.temp }}/dotasks-release
+      - name: Deploy through restricted SSH receiver
         env:
-          ECS_PUBLIC_IP: ${{ secrets.ECS_PUBLIC_IP }}
-          CONFIGURED_PUBLIC_URL: ${{ secrets.DOTASKS_PUBLIC_URL }}
-          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
-        run: |
-          if [[ -n "$CONFIGURED_PUBLIC_URL" ]]; then
-            endpoint=(--public-url "$CONFIGURED_PUBLIC_URL")
-          else
-            : "${ECS_PUBLIC_IP:?Set ECS_PUBLIC_IP or DOTASKS_PUBLIC_URL in GitHub Actions secrets}"
-            endpoint=(--public-ip "$ECS_PUBLIC_IP")
-          fi
-          deploy_root="$HOME/dotasks"
-          mkdir -p "$deploy_root"
-          # A manual root deployment can leave private configuration unreadable by this runner.
-          runner_uid=$(id -u)
-          runner_gid=$(id -g)
-          if [[ -L "$deploy_root" || $(stat -c %u "$deploy_root") != "$runner_uid" ]]; then
-            echo "Deployment directory must be owned by the runner and must not be a symlink" >&2
-            exit 1
-          fi
-          cd "$deploy_root"
-          for config_path in .env .dotasks-cloud .dotasks-cloud/compose.yaml; do
-            if [[ -L "$config_path" ]]; then
-              echo "Refusing symlink deployment configuration: $config_path" >&2
-              exit 1
-            fi
-            if [[ -e "$config_path" ]]; then
-              if { [[ "$config_path" == .dotasks-cloud ]] && [[ ! -d "$config_path" ]]; } ||
-                 { [[ "$config_path" != .dotasks-cloud ]] && [[ ! -f "$config_path" ]]; }; then
-                echo "Unexpected deployment configuration type: $config_path" >&2
-                exit 1
-              fi
-              config_owner=$(stat -c %u "$config_path")
-              if [[ "$config_owner" == 0 && "$runner_uid" != 0 ]]; then
-                sudo -n chown "$runner_uid:$runner_gid" -- "$deploy_root/$config_path"
-              elif [[ "$config_owner" != "$runner_uid" ]]; then
-                echo "Unexpected deployment configuration owner: $config_path" >&2
-                exit 1
-              fi
-              if [[ -d "$config_path" ]]; then chmod 700 "$config_path"; else chmod 600 "$config_path"; fi
-            fi
-          done
-          install -m 755 \
-            "$RUNNER_TEMP/dotasks-deployment/deploy-cloud-ip" \
-            "$deploy_root/deploy-cloud-ip"
-          reuse_env=()
-          if test -f .env; then reuse_env=(--reuse-env); fi
-          ./deploy-cloud-ip \
-            "${endpoint[@]}" \
-            --image "$IMAGE_TAG" \
-            "${reuse_env[@]}" \
-            --no-print-secrets
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: bash deployment/send.sh site "$GITHUB_SHA" "$RUNNER_TEMP/dotasks-release/dotasks-release.zip"
