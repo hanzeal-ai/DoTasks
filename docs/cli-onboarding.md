@@ -6,16 +6,15 @@
 
 1. 安装 Python 3.14+ 和 Codex CLI。当前安装包不捆绑或自动下载这两个运行时。
 2. 在线下载安装器后执行（命令如下），或解压 `DoTasksCLI.zip` 运行 `sh ./install-cli`。安装器配置 zsh/bash 的 PATH 和两个 launchd 服务，不安装 Helper App。
-3. 打开新终端执行 `dotasks init`，输入用户名和密码。如果 Codex 尚未登录，会进入官方登录流程，需要用户本人完成该授权。
+3. 在线安装器安装成功后自动执行 `dotasks init`，输入用户名和密码；离线安装后需自行执行该命令。如果 Codex 尚未登录，会进入官方登录流程，需要用户本人完成该授权。
 4. CLI 自动注册账号、绑定本机凭证、保存配置并执行 `start`。本地服务健康且云端确实收到 Agent 连接后才显示初始化成功，随后显示账号与密码，并自动在默认浏览器打开云端。
 5. 打开默认云端，在现有登录页输入刚才创建的用户名和密码。新账号默认启用任务调度。
 
 ```sh
-curl -fsS https://dotasks.hanzeal.com/install.sh -o /tmp/dotasks-install.sh
-sh /tmp/dotasks-install.sh
-# 打开新终端
-dotasks init
+curl -fsS https://dotasks.hanzeal.com/install.sh | sh
 ```
+
+安装器依次显示检查环境、下载、校验、安装与初始化进度。请在交互式终端执行；账号输入与授权从终端读取，不会把管道中的脚本当作输入。单独执行 `curl -fsS URL` 只显示脚本，不会安装。
 
 无需手动执行 `export`，无需复制 Agent Token。后台服务由 CLI 直接通过 macOS launchd 管理；目前只支持 macOS，仍需 Python 3.14 和已授权的 Codex CLI。
 
@@ -32,7 +31,7 @@ dotasks update          # 校验、切换版本、恢复原有运行状态
 
 ## 查看本机账号
 
-此节为新增本地实现，尚未包含在当前线上安装包中。
+生产 CLI 已包含此命令。
 
 ```sh
 dotasks account

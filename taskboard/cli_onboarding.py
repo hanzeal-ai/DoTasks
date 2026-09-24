@@ -66,7 +66,9 @@ def initialize(args) -> None:
         raise ValueError('此安装已有其他账号或云端的初始化记录；不能自动切换账号。')
     if default_config_path().exists() and not pending.get('agent_id'):
         raise ValueError('检测到已有 Agent 配置，不能覆盖现有绑定；请使用独立安装或先完成明确的账号迁移。')
+    print('检查 Codex 登录授权……', flush=True)
     ensure_codex_login()
+    print('Codex 登录授权已就绪。', flush=True)
     if not pending:
         pending = {'username': username, 'cloud_url': cloud, 'device_id': uuid.uuid4().hex,
                    'device_token': secrets.token_urlsafe(32)}
@@ -112,6 +114,7 @@ def initialize(args) -> None:
             'cloud_url': cloud, 'agent_id': config.agent_id, 'agent_token': config.agent_token,
             'local_url': config.local_url, 'vault': config.vault,
         })
+    print('启动本地服务和 Agent……', flush=True)
     service.start()
     deadline = time.monotonic() + 30
     print('等待本地服务和云端 Agent 连接……')
