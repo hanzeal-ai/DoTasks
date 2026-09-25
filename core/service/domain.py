@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ..search import search_tokens
+
 import json
 import re
 from typing import Any
@@ -124,21 +126,6 @@ GENERIC_MATCH_TERMS = {
 }
 
 
-def search_tokens(value: str) -> set[str]:
-    tokens: set[str] = set()
-    for raw in re.findall(
-        r"[A-Za-z0-9_]{2,}|[\u4e00-\u9fff]+", str(value or "").lower()
-    ):
-        tokens.add(raw)
-        if re.fullmatch(r"[\u4e00-\u9fff]+", raw) and len(raw) > 2:
-            for size in (2, 3, 4):
-                if len(raw) >= size:
-                    tokens.update(
-                        raw[index : index + size]
-                        for index in range(len(raw) - size + 1)
-                    )
-    return tokens
-
 
 def specific_modules(values: list[str] | tuple[str, ...] | set[str]) -> set[str]:
     """Return module keys that identify a business area rather than a code layer."""
@@ -204,3 +191,32 @@ def target_conflicts(connection: Any, task_id: str, locking_only: bool = False) 
         if target not in conflict["targets"]:
             conflict["targets"].append(target)
     return list(grouped.values())
+
+def insert_relation(connection: Any, source: str, target: str, relation_type: str, description: str = "") -> None:
+    if relation_type not in RELATION_TYPES:
+        raise ValueError(f"Invalid relation type: {relation_type}")
+    if source == target:
+        raise ValueError("A task cannot relate to itself")
+    if relation_type in {"depends_on", "blocks", "continues_from"}:
+        dependent, prerequisite = ((source, target) if relation_type != "blocks" else (target, source))
+        rows = connection.execute(
+            "SELECT source_task_id, target_task_id, relation_type FROM task_relations WHERE relation_type IN ('depends_on','blocks','continues_from')"
+        ).fetchall()
+        adjacency: dict[str, set[str]] = {}
+        for row in rows:
+            left, right = ((row["source_task_id"], row["target_task_id"])
+                           if row["relation_type"] != "blocks" else (row["target_task_id"], row["source_task_id"]))
+            adjacency.setdefault(left, set()).add(right)
+        pending = [prerequisite]
+        seen: set[str] = set()
+        while pending:
+            current = pending.pop()
+            if current == dependent:
+                raise ValueError("Dependency relation would create a cycle")
+            if current not in seen:
+                seen.add(current)
+                pending.extend(adjacency.get(current, set()))
+    connection.execute(
+        "INSERT OR IGNORE INTO task_relations(source_task_id, target_task_id, relation_type, description) VALUES(?, ?, ?, ?)",
+        (source, target, relation_type, description),
+    )

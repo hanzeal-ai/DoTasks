@@ -116,7 +116,7 @@ class TaskSchedulingMixin:
         return {
             "status": "claimed",
             "worker_id": worker_id,
-            "cycle_generation": int(snapshot["generation"]),
+            "cycle_generation": int(state["generation"]),
             "scheduler": snapshot,
             "code_review": code_review,
             "development": development,

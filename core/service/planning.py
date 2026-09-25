@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .domain import insert_relation
+
 from .domain import target_conflicts
 
 import json
@@ -789,7 +791,7 @@ class TaskPlanningMixin:
                 exists = connection.execute("SELECT 1 FROM tasks WHERE id=?", (target,)).fetchone()
                 if not exists:
                     raise ValueError(f"Related task not found: {target}")
-                self._insert_relation_in_connection(connection, source, target, relation_type, str(relation.get("description") or ""))
+                insert_relation(connection, source, target, relation_type, str(relation.get("description") or ""))
                 self._queue_obsidian_sync(
                     connection, "task", target,
                 )
@@ -812,7 +814,7 @@ class TaskPlanningMixin:
                     or conflict_task_id in batch_members
                 ):
                     continue
-                self._insert_relation_in_connection(
+                insert_relation(
                     connection, task_id, conflict_task_id, "conflicts_with",
                     "DoTasks detected overlapping locked file/symbol targets",
                 )
@@ -845,32 +847,6 @@ class TaskPlanningMixin:
         task = self.get_task(task_id)
         self.flush_integration_outbox()
         return task
-
-    @staticmethod
-    def _insert_relation_in_connection(connection: Any, source: str, target: str, relation_type: str, description: str = "") -> None:
-        if relation_type in {"depends_on", "blocks", "continues_from"}:
-            dependent, prerequisite = ((source, target) if relation_type != "blocks" else (target, source))
-            rows = connection.execute(
-                "SELECT source_task_id, target_task_id, relation_type FROM task_relations WHERE relation_type IN ('depends_on','blocks','continues_from')"
-            ).fetchall()
-            adjacency: dict[str, set[str]] = {}
-            for row in rows:
-                left, right = ((row["source_task_id"], row["target_task_id"])
-                               if row["relation_type"] != "blocks" else (row["target_task_id"], row["source_task_id"]))
-                adjacency.setdefault(left, set()).add(right)
-            pending = [prerequisite]
-            seen: set[str] = set()
-            while pending:
-                current = pending.pop()
-                if current == dependent:
-                    raise ValueError("Dependency relation would create a cycle")
-                if current not in seen:
-                    seen.add(current)
-                    pending.extend(adjacency.get(current, set()))
-        connection.execute(
-            "INSERT OR IGNORE INTO task_relations(source_task_id, target_task_id, relation_type, description) VALUES(?, ?, ?, ?)",
-            (source, target, relation_type, description),
-        )
 
     @staticmethod
     def _store_task_targets(connection: Any, task_id: str, targets: list[dict[str, Any]]) -> None:

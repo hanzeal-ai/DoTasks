@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import fcntl
 import sqlite3
 from contextlib import contextmanager
@@ -673,6 +674,7 @@ SCHEMA_VERSION = 23
 class Database:
     def __init__(self, path: str | Path):
         self._atomic_connection = ContextVar('dotasks_atomic_connection', default=None)
+        self._commit_callbacks = ContextVar('dotasks_commit_callbacks', default=None)
         self.path = Path(path).expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self.path.with_suffix(self.path.suffix + ".migrate.lock")
@@ -718,11 +720,14 @@ class Database:
             # Team HTTP units combine core writes and their idempotent response.
             import uuid
             savepoint = 'nested_' + uuid.uuid4().hex
+            callbacks = self._commit_callbacks.get()
+            callback_count = len(callbacks) if callbacks is not None else 0
             active.execute('SAVEPOINT ' + savepoint)
             try:
                 yield active
                 active.execute('RELEASE ' + savepoint)
             except Exception:
+                if callbacks is not None: del callbacks[callback_count:]
                 active.execute('ROLLBACK TO ' + savepoint)
                 active.execute('RELEASE ' + savepoint)
                 raise
@@ -745,12 +750,28 @@ class Database:
             with self.transaction() as connection:
                 yield connection
             return
+        callbacks = []
         with self.transaction() as connection:
+            callback_token = self._commit_callbacks.set(callbacks)
             token = self._atomic_connection.set(connection)
             try:
                 yield connection
             finally:
                 self._atomic_connection.reset(token)
+                self._commit_callbacks.reset(callback_token)
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception:
+                logging.getLogger(__name__).exception("Post-commit integration failed; committed business state is unchanged")
+
+    def defer_until_commit(self, callback) -> bool:
+        callbacks = self._commit_callbacks.get()
+        if callbacks is None:
+            return False
+        if callback not in callbacks:
+            callbacks.append(callback)
+        return True
 
     def next_id(self, connection: sqlite3.Connection, prefix: str) -> str:
         connection.execute(

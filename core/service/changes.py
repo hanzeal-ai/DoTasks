@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .domain import insert_relation
+
 import json
 from collections import Counter
 from typing import Any
@@ -484,16 +486,16 @@ class TaskChangeMixin:
                 (task_id,),
             )
             for related_id in dependency["depends_tasks"]:
-                self._insert_relation_in_connection(
+                insert_relation(
                     connection, task_id, related_id, "depends_on", "revised scheduling dependency",
                 )
             if dependency.get("continues_from_task_id"):
-                self._insert_relation_in_connection(
+                insert_relation(
                     connection, task_id, dependency["continues_from_task_id"],
                     "continues_from", "revised task continuation",
                 )
             for related_id in dependency["conflicts_tasks"]:
-                self._insert_relation_in_connection(
+                insert_relation(
                     connection, task_id, related_id, "conflicts_with", "revised scheduling conflict",
                 )
             after = {

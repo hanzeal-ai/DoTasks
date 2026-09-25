@@ -8,22 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from .decision_client import DecisionClient
+from core.search import search_tokens
 
 
 def _safe_name(value: str) -> str:
     value = re.sub(r"[\\/:*?\"<>|]", "-", value).strip()
     return value[:100] or "untitled"
 
-
-def _search_tokens(value: str) -> set[str]:
-    tokens: set[str] = set()
-    for raw in re.findall(r"[A-Za-z0-9_]{2,}|[\u4e00-\u9fff]+", str(value or "").lower()):
-        tokens.add(raw)
-        if re.fullmatch(r"[\u4e00-\u9fff]+", raw) and len(raw) > 2:
-            for size in (2, 3, 4):
-                if len(raw) >= size:
-                    tokens.update(raw[index:index + size] for index in range(len(raw) - size + 1))
-    return tokens
 
 
 class ObsidianAdapter:
@@ -192,7 +183,7 @@ keywords: {experience.get('keywords', [])}
     def search(self, query: str, limit: int = 8, project: str = "") -> list[dict[str, Any]]:
         if not self.root.exists() or not query.strip():
             return []
-        terms = _search_tokens(query)
+        terms = search_tokens(query)
         results: list[dict[str, Any]] = []
         roots = None
         if project:
@@ -256,7 +247,7 @@ keywords: {experience.get('keywords', [])}
         ])
         if not self.root.exists() or not query.strip():
             return []
-        terms = _search_tokens(query)
+        terms = search_tokens(query)
         roots = [self.project_root(project), self.root / "Tasks"] if project else [self.root]
         normalized_project = str(Path(project).expanduser().resolve()) if project else ""
         notes: dict[str, dict[str, Any]] = {}

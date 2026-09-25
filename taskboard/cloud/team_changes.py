@@ -1,3 +1,4 @@
+from core.service.domain import insert_relation
 """Human-authored revisions invalidate only affected approvals and their dependants."""
 import json
 
@@ -119,7 +120,7 @@ class TeamChangesMixin:
                 db.execute('DELETE FROM task_targets WHERE task_id=?',(tid,))
                 db.execute("DELETE FROM task_relations WHERE source_task_id=? AND relation_type='depends_on'",(tid,))
                 for dependency in spec['depends_on']:
-                    self._insert_relation_in_connection(db,tid,tasks[dependency]['id'],'depends_on','模块交付依赖')
+                    insert_relation(db,tid,tasks[dependency]['id'],'depends_on','模块交付依赖')
                 updated=self.task(tid,db)
                 if updated['owner_account_id']:
                     self.queue_analysis(db,req,updated)

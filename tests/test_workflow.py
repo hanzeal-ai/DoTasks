@@ -598,7 +598,11 @@ class WorkflowTest(unittest.TestCase):
         completed = self.service.complete_schedule_cycle(
             "codex-native-controller", cycle["cycle_generation"]
         )
-        self.assertFalse(completed["pending"])
+        self.assertEqual(cycle["cycle_generation"], completed["handled_generation"])
+        self.assertTrue(completed["pending"])
+        next_cycle = self.service.claim_schedule_cycle("codex-native-controller")
+        settled = self.service.complete_schedule_cycle("codex-native-controller", next_cycle["cycle_generation"])
+        self.assertFalse(settled["pending"])
 
     def test_attention_transition_creates_a_durable_scheduler_wakeup(self):
         task = self.task("attention-wakeup")

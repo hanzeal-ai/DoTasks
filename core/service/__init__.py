@@ -199,6 +199,8 @@ class TaskboardService(
 
     def flush_integration_outbox(self, limit: int = 20) -> dict[str, int]:
         """Best-effort external synchronization; database commits stay authoritative."""
+        if self.db.defer_until_commit(self.flush_integration_outbox):
+            return {"completed": 0, "failed": 0}
         with self.db.connection() as connection:
             rows = connection.execute(
                 """SELECT * FROM integration_outbox

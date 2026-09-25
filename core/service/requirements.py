@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .domain import insert_relation
+
 import json
 import uuid
 from typing import Any
@@ -556,7 +558,7 @@ class TaskRequirementMixin:
                     dependency_id = created.get(str(dependency).strip())
                     if not dependency_id:
                         raise ValueError(f"Unknown decomposed task dependency: {dependency}")
-                    self._insert_relation_in_connection(
+                    insert_relation(
                         connection, source_id, dependency_id, "depends_on",
                         f"需求 {requirement_id} 拆解依赖",
                     )

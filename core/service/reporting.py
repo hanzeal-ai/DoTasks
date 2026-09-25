@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .domain import quality_gate_required
+from .domain import quality_gate_required, insert_relation
 
 import json
 from datetime import datetime, timedelta, timezone
@@ -59,37 +59,7 @@ class TaskReportingMixin:
         self.get_task(source_task_id)
         self.get_task(target_task_id)
         with self.db.transaction() as connection:
-            if relation_type in {"depends_on", "blocks"}:
-                # Represent all scheduling edges as dependent -> prerequisite.
-                dependent, prerequisite = (
-                    (source_task_id, target_task_id)
-                    if relation_type == "depends_on" else (target_task_id, source_task_id)
-                )
-                rows = connection.execute(
-                    """SELECT source_task_id, target_task_id, relation_type FROM task_relations
-                       WHERE relation_type IN ('depends_on','blocks')"""
-                ).fetchall()
-                adjacency: dict[str, set[str]] = {}
-                for row in rows:
-                    left, right = (
-                        (row["source_task_id"], row["target_task_id"])
-                        if row["relation_type"] == "depends_on"
-                        else (row["target_task_id"], row["source_task_id"])
-                    )
-                    adjacency.setdefault(left, set()).add(right)
-                pending = [prerequisite]
-                seen: set[str] = set()
-                while pending:
-                    current = pending.pop()
-                    if current == dependent:
-                        raise ValueError("Dependency relation would create a cycle")
-                    if current not in seen:
-                        seen.add(current)
-                        pending.extend(adjacency.get(current, set()))
-            connection.execute(
-                "INSERT OR IGNORE INTO task_relations(source_task_id, target_task_id, relation_type, description) VALUES(?, ?, ?, ?)",
-                (source_task_id, target_task_id, relation_type, description),
-            )
+            insert_relation(connection, source_task_id, target_task_id, relation_type, description)
             self._event(connection, "task", source_task_id, "relation_added", {"target": target_task_id, "type": relation_type})
             self._queue_obsidian_sync(connection, "task", source_task_id)
             self._queue_obsidian_sync(connection, "task", target_task_id)

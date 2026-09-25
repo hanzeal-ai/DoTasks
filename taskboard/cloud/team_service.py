@@ -6,6 +6,8 @@ only by the version-bound execution adapter, not by the generic personal API.
 """
 from __future__ import annotations
 
+from core.service.domain import insert_relation
+
 import copy
 import hashlib
 import json
@@ -267,7 +269,7 @@ class TeamService(TaskSourceMixin, TeamAttachmentsMixin, TeamChangesMixin, TeamE
                 ids[spec['key']] = tid
             for spec in specs:
                 for dependency in spec['depends_on']:
-                    self._insert_relation_in_connection(db, ids[spec['key']], ids[dependency], 'depends_on', '模块交付依赖')
+                    insert_relation(db, ids[spec['key']], ids[dependency], 'depends_on', '模块交付依赖')
             snapshot = {'content': req['original_content'], 'modules':specs,'coordinator_id':req['coordinator_id']}
             db.execute('INSERT INTO team_versions(requirement_id,version,snapshot,actor_id) VALUES(?,?,?,?)', (req['id'],req['version'],dump(snapshot),self.actor))
             db.execute('UPDATE requirements SET status=\'submitted\',decomposition_plan=? WHERE id=?', (dump(specs),req['id']))
