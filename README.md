@@ -1,405 +1,125 @@
 # DoTasks
 
-一个由云端管理、本地执行的 Codex 任务调度系统：用户显式调用 DoTasks 时补全并确认需求，确认后进入任务队列；Local DoTasks Agent 根据云端 WSS 事件创建或恢复 Codex CLI/App Server 工作线程，DoTasks 保存队列、状态机、运行审计和验收结果。普通开发请求不会自动创建 DoTasks 任务。
+DoTasks 将明确提出的工作需求整理为可执行任务，通过云端看板协调任务状态，由开发者机器上的 LocalAgent 调用 Codex 执行、审查和回写结果。
 
-## 当前能力
+代码、Git 操作和工作区保留在本机；云端负责协作、任务队列与审计。任务创建以用户明确提出的 DoTasks 请求为入口。
 
-- 手动触发的最小边界确认闸门：显式要求使用 DoTasks 处理会话、PRD、变更或缺陷时，只对影响最小实现的必要边界一次性提问；回答足够后进入任务队列；
-- 建立项目任务时使用已定位的文件、符号和修改动作执行一次项目级 Obsidian 历史检索，并按 CodeGraph、GitNexus、直接源码匹配的顺序定位目标；每条验收标准必须映射到具体目标与检查方式；不选择项目的新任务直接创建为可调度的无项目 Codex 会话；
-- 任务状态机：待就绪、任务队列、调查、实现、验收、返工、待确认、暂停、完成、阻塞；
-- 原子状态更新，避免多个执行器重复领取；
-- Local Agent 事件驱动地调用 Codex CLI/App Server 创建、恢复和等待独立工作线程；不依赖 Codex Desktop 活跃窗口，也不创建周期性调度任务；
-- 多前置任务依赖闸门、目标位置锁、文件/符号冲突关系、可配置 Worktree 并行开发、串行补丁集成、自动续租和异常会话熔断；
-- 调度开关与任务暂停状态持久化，重启后不会意外恢复领取；
-- Code Review 不达标进入返工；普通任务验收不达标会创建关联 Bug，原任务等待 Bug 修复后重新验收；只有执行/返工会话意外退出、连接中断或未提交结果才进入执行失败；
-- 每个任务关联需求确认、实现、返工和验证等 Codex 会话；默认由同一验证会话连续完成 Code Review 与验收；
-- 独立实现/验收运行、交付摘要和验证结果；
-- 执行、Code Review、验收、返工和重试均保留独立运行记录；会话可复用，但运行审计不会合并；
-- 每个运行在首次调度时冻结版本化上下文和直接工具契约；开发 Agent 以自然语言任务说明作为唯一需求来源，只从 `targets[].file/mode/symbols` 获取修改位置锁，并接收验证命令，不接收内部定位动作、依赖、历史、定位证据或调度状态；Code Review Agent 只看到任务目标、约束、检查项和可信 Git Diff 范围；
-- 交付时缓存受限 Git Diff；Code Review 根据服务端基线和真实改动文件自行读取 Git Diff，自动化验收命令由服务端按“交付 + 标准 + 命令 + 工作区指纹”执行和缓存，必需检查未通过时禁止完成任务；
-- 实现提交必须记录实际改动文件/符号和逐条验收证据，并与领取时保存的真实 Git 工作区差异一致；验收前对实际改动执行第二次受限的 Obsidian/代码定位；
-- 完成后自动生成受模块和项目约束的经验记录；
-- 任务关系：变更自、依赖、缺陷来源、拆分、冲突等；
-- MCP工具：在任意Codex会话创建已确认任务、操作任务和编译上下文；
-- SQLite运行数据库；
-- 按项目隔离的 Obsidian Markdown 历史图谱、增量同步与轻量检索；
-- CodeGraph、GitNexus 自动探测与受限源码匹配查询计划；
-- React + Vite 本地看板，生产资源构建到 `static/`；
-- DoTasks 页面只保留任务看板、需求看板、Token、设置和调度开关；需求看板集中展示已确认需求及其拆分任务，不再维护项目或聊天会话；
-- 独立 CLI 提供版本化运行时，通过 macOS launchd 管理本地服务与 Agent 的登录自启和保活；
-- 每个执行任务均是 Codex CLI/App Server 工作线程；真实 `threadId` 回写 DoTasks 后用于审计与失败重试，但不会显示为 Codex Desktop 原生侧栏任务；
-- Token预算、上下文数量限制和会话摘要字段；完整历史对话默认不加载；看板分别展示原始 Token 与有效预算 Token，并按阶段展示输入、缓存输入、输出和推理 Token。
+[快速开始](#快速开始) · [开发与验证](#开发与验证) · [文档](#文档) · [反馈与贡献](#反馈与贡献)
 
-## 多会话执行
+## 功能
 
-Codex Skill 充当编排器，本地服务作为任务系统记录：
+- 将需求拆解为任务，记录依赖、验收条件和执行结果。
+- 通过 LocalAgent 领取任务，在本机调用 Codex 执行。
+- 使用任务租约、依赖关系及文件 / 符号锁协调执行。
+- 支持审查、返工和可选的独立 Git worktree。
+- 在 Web 看板中查看需求、任务、执行记录与用量。
+- 支持团队分工、外部任务来源，以及 Codex 插件和 MCP 接入。
+- 以 SQLite 保存业务状态，将 Obsidian 文件作为可读投影。
 
-1. Skill 先确认需求边界，判断应修订现有任务、创建单个新任务，还是拆成多个可独立交付和验收的任务；
-2. 每个任务通过 `prepare_task_location` 建立一次受限定位计划，按 CodeGraph、GitNexus、直接源码匹配选择首个可用方式，并保存精确的 `{file, mode, symbols, tasks}` 执行目标和验收方式；
-3. `finalize_task_intake` 是唯一任务创建入口：接收一次性定位分析包，由服务端根据精确文件/符号/动作查询项目历史图谱，形成 `depends_tasks`、`conflicts_tasks`、`history_tasks` 和 `history_edges` 后原子创建任务；
-4. 显式 DoTasks intake 创建 `auto_dispatch=true` 的 ready 实体后会写入持久化调度唤醒；云端命令触发 WSS 通知，本地 Agent 按 Review 优先、返工优先和开发并发容量创建或恢复 Codex CLI/App Server 工作线程；页面“新增任务”未选择项目时跳过代码定位，在 Agent 管理的临时工作区创建无项目会话，并在会话落盘后同步到 Codex App“最近”；
-5. 执行会话实现并用 `submit_task_delivery` 提交真实改动清单及逐条验收证据；
-6. 代码类任务由独立验证会话完成 Code Review：服务端先执行确定性检查，Review Agent 只根据目标、约束和真实 Git Diff 判断正确性、安全、权限边界、回归与无关修改；不通过则恢复原开发会话返工，通过后直接完成；
-7. 文档、调研、文案、规划和无运行时影响的元数据任务不创建 Code Review 会话；开发交付的逐条证据全部通过后直接完成；
-8. 完成任务通过页面右上角“完成任务”入口查看；执行失败、待确认、阻塞、暂停，以及自动 Code Review 熔断后的任务显示在看板末列“待处理”，等待人工重试、确认、解除阻塞或恢复调度。仍处于 `ready`/`rework` 的任务会直接显示依赖任务、冲突文件、项目排他、容量、重试退避或 Controller 等待原因。
+## 项目状态与运行条件
 
-交付时，上报位置必须命中任务建立阶段保存的目标锁，并覆盖领取后产生的真实 Git 工作区差异。执行或返工会话异常结束但没有提交交付时，服务最多自动恢复两次并优先续接原开发会话；仍未成功则关闭自动调度并进入“待处理”。Code Review 会话中断则保留在待审查并按独立熔断上限重试。看板的暂停按钮只持久关闭新的调度领取，不中断活动运行，也不改变任何任务状态；恢复调度会先消费 Review/返工等已有唤醒并在并发未满时补齐开发任务，已有的单任务暂停仍需逐个恢复。
+项目处于发布前阶段。LocalAgent 与独立 CLI 当前面向 macOS，实际执行任务需要本机安装并配置 Codex、Git 及目标项目所需工具。Web 看板可通过浏览器访问。
 
-看板详情显示任务关联的原生 Codex 任务 ID 和运行轮次；完整执行过程在 Codex App 原生任务中查看。
+从源码开发需要：
 
-## 页面反馈与团队需求
+- Python 3.14+。
+- Node.js 24 与 npm，用于 Web 开发和构建。
+- `uv`，用于项目统一测试入口。
+- Git；实际执行任务时还需要 Codex。
 
-在团队页“任务来源”中按项目配置来源提供的只读授权地址，保存后点击“拉取需求”。新记录生成待分析需求，已有记录不会重复创建或覆盖。来源范围由服务端授权校验；拉取不自动开始分析、执行或发布。使用方式与接口约定见 [任务来源](docs/task-sources.md)。
+独立 CLI 的安装与首次连接见 [CLI 上手指南](docs/cli-onboarding.md)，打包和分发方式见 [CLI 分发说明](docs/cli-distribution.md)。
 
-团队看板使用事件通知刷新，页面隐藏时关闭订阅，重新显示时补读快照；连接异常时每 30 秒补偿查询。附件限制由服务端提供：最多 4 个，图片每个 2 MiB、文本每个 256 KiB，合计 4 MiB，支持 PNG/JPEG/TXT/Markdown。
+## 快速开始
 
-## 代码结构
-
-可选的本地/云端 Laya 决策服务见 [laya-dotasks-decision](services/laya-dotasks-decision/README.md)。
-它提供历史候选相关性评分和失败原因建议，默认不启用；不会接管依赖关系、自动修复或审查放行。
-
-```text
-core/       任务创建、调度、工作流与生命周期等核心业务
-taskboard/  HTTP、MCP 与本地集成适配层
-taskboard/cloud/  云端任务控制面、安全入口、WSS 通知与 Obsidian 图谱镜像
-web/        React + Vite 前端源码
-static/     Vite 生成的生产静态资源
-scripts/    开发启动、测试和 CLI 打包入口
-```
-
-`core/` 不负责页面渲染，`web/` 只通过 `/api` 使用后端能力；任务创建与调度仍由 Python 核心层执行，不依赖 Vite 开发服务器。
-
-## macOS 安装与首次使用
-
-本地执行目前支持 macOS，需要 Git 和本机 Codex。独立下载包自带 Python；Homebrew 安装会自动提供 Python 依赖。
-云端管理任务状态，本机 Agent 执行 Codex 工作线程；Windows 浏览器可访问云端看板，
-但当前 CLI 安装与后台管理尚不支持 Windows。
-
-在交互式终端运行：
+### 启动本地看板
 
 ```sh
-curl -fsS https://dotasks.hanzeal.com/install.sh | sh
-```
-
-安装器校验版本化运行时、配置 PATH 和两个 launchd 服务，然后自动执行 `dotasks init`。
-按提示完成 Codex 登录并创建 DoTasks 账号；本地服务和云端 Agent 连接通过检查后，
-打开云端看板。安装、离线包、账号恢复及旧 Helper 迁移说明见
-[CLI 注册与共享云端](docs/cli-onboarding.md)。
-
-已安装用户检查和升级版本：
-
-```sh
-dotasks update --check
-dotasks update
-dotasks doctor
-dotasks logs
-```
-
-升级前暂停云端调度并等待活动任务结束。升级保留账号、凭证和任务数据。
-
-## 源码开发与插件
-
-开发前安装 Python 3.14+、Node.js 24、Git、uv 和 Codex CLI，然后运行：
-
-```sh
+git clone https://github.com/hanzeal-ai/DoTasks.git
+cd DoTasks
 npm --prefix web ci
-./scripts/test
-./scripts/build-cli
-```
-
-`./scripts/build-cli` 生成源码包供 Brew 和已有源码安装升级；`./scripts/build-portable-cli` 生成当前 macOS 架构的自带 Python 包。交付流程见 [CLI 分发](docs/cli-distribution.md)。
-安装和启动会改变本机后台服务，应在准备好切换版本后单独执行。
-
-仓库的 `.codex-plugin/`、`skills/` 和 `.mcp.json` 提供显式 DoTasks Skill 与 MCP。
-将仓库按 Codex 本地插件约定注册到 personal marketplace 后，可运行
-`codex plugin add dotasks@personal` 安装；插件源码更新后需重新安装，并新建 Codex
-会话加载新版本。插件安装和 CLI 运行时升级是两个独立操作。
-
-## 源码开发启动
-
-可以直接从仓库启动本地服务：
-
-```bash
+npm --prefix web run build
 ./scripts/start
 ```
 
-打开：<http://127.0.0.1:8765>
+打开 <http://127.0.0.1:8765>。该入口启动本地看板服务；要让任务实际执行，还需按 [CLI 上手指南](docs/cli-onboarding.md)配置 LocalAgent 和 Codex。
 
-开发前端时另开一个终端，通过 Vite 启动；`/api` 会代理到 `127.0.0.1:8765`：
+若默认 Python 不符合要求，可显式指定解释器：
 
-```bash
+```sh
+DOTASKS_PYTHON_BIN=/path/to/python3.14 ./scripts/start
+```
+
+### 开发 Web 界面
+
+保持后端运行，在另一个终端执行：
+
+```sh
 npm --prefix web run dev
 ```
 
-打开：<http://127.0.0.1:5173>
+打开 <http://127.0.0.1:5173>。开发服务器默认将 API 请求转发到本机 `8765` 端口；前端构建结果写入 `static/`，不要直接编辑生成文件。
 
-生产静态资源由以下命令生成到 `static/`；`build-cli` 会自动执行同一构建：
+## 工作流程与数据边界
 
-```bash
-npm --prefix web run build
-```
+1. 明确需求，确认任务范围、依赖与验收条件。
+2. 将任务交给调度器，由符合条件的 LocalAgent 领取。
+3. 在本地项目或独立 worktree 中执行并记录结果。
+4. 根据审查结果完成任务或进入返工，再由看板展示状态。
 
-新建运行数据库默认关闭调度。需要执行队列时，在看板中点击“恢复调度”；HTTP 层会同时开启调度并写入持久化 Agent 信号。恢复操作及之后每个任务/Run 状态流转都会写入 `scheduler_state`。云端通过 WSS 通知常驻 Local Agent，Agent 只在收到真实事件或已有工作线程结束时领取需求拆解、开发、返工和 Code Review；没有周期性 heartbeat，也不会在空队列上消耗模型 Token。工作线程使用阶段自包含 Prompt，并通过限定的 DoTasks MCP 回调完成当前阶段。
+任务业务状态以 SQLite 为准，Obsidian 文件用于阅读和协作展示。云端和 LocalAgent 通过 HTTPS / WSS 协调；本机 Codex 的具体执行与接入方式见上手文档。
 
-Local Agent 通过 `codex app-server` 的 `thread/start`、`thread/resume` 和 `turn/start` 创建或续接工作线程；拿到真实 `threadId` 后才调用 `bind_native_dispatch`，因此任务领取状态不会领先于真实执行会话。Worker 继续使用只暴露生命周期 MCP 的隔离 `CODEX_HOME`；进程停止并完成会话落盘后，Agent 会将对应会话文件原子同步到主 `CODEX_HOME` 并合并会话索引，使看板中的 `codex://threads/...` 链接可由 Codex 桌面端读取，同时避免两个 App Server 并发写同一会话。生命周期回调产生的新唤醒在当前工作线程结束后立即由 Agent 消费；线程异常退出且没有提交回调时，Agent 回写派发失败并交给现有重试/熔断策略。设置页可开启并行开发并配置 1–8 个开发槽位（默认关闭、默认并发数 2）；Worktree 模式仍从固定 `base_ref` 创建隔离工作区。每个派发保留独立 `dispatch_attempt_id`，过期回调不能绑定到新的派发尝试。
+云端部署与本地看板启动是不同的运行场景。部署配置、凭证及运维步骤集中在[部署指南](deployment/README.md)。
 
-指定端口：
+## 项目结构
 
-```bash
-./scripts/start --port 8877
-```
+| 路径                              | 职责                               |
+| --------------------------------- | ---------------------------------- |
+| `core/`                           | 任务、调度、存储与执行相关业务逻辑 |
+| `taskboard/`                      | 本地服务、CLI 与 LocalAgent 接入   |
+| `taskboard/cloud/`                | 云端协作与连接服务                 |
+| `web/`                            | React 看板源码                     |
+| `static/`                         | Web 构建产物                       |
+| `scripts/`                        | 启动、测试与打包入口               |
+| `skills/`、`.codex-plugin/`       | Codex 技能与插件配置               |
+| `services/laya-dotasks-decision/` | 可选决策服务                       |
+| `deployment/`                     | 部署配置与说明                     |
 
-HTTP 服务只允许绑定 `localhost` 或回环 IP。API 会校验 `Host` 与浏览器 `Origin`；带请求体的写操作只接受不超过 1 MiB 的 JSON 对象。DoTasks 不提供未经认证的局域网监听模式，如需跨设备访问，应在具备认证和 TLS 的受控代理后单独设计部署边界。
+## 开发与验证
 
-### 云端部署与本地 Agent
+项目统一测试入口：
 
-云端模式沿用同一套页面和 `/api` 交互，并由云端 SQLite（后续可替换 PostgreSQL）保存需求、
-任务、状态机、调度状态和 Dispatch Outbox。浏览器或手机直接读写云端数据，不再把 `/api`
-请求转发到 Mac，因此 Local Agent 离线时仍可新增需求和管理任务；待执行项会保留在云端队列。
-
-每次会影响调度的状态变化都会持久化唤醒信号，并通过 WSS 向 Local DoTasks Agent 发送轻量
-通知。Agent 收到通知后通过 HTTPS 调用云端调度接口领取需求拆解、开发、返工或 Review，
-再使用本地 Codex CLI/App Server 的 `thread/start`、`thread/resume` 和 `turn/start` 创建或
-续接工作线程；生命周期 MCP 回调同样写回云端。Git、Worktree、Diff、项目源码和 Codex
-执行器仍只在 Mac 上。WSS 仅作事件唤醒，不使用周期性模型任务，空队列不会消耗模型 Token。
-
-首次连接新版空云端时，Agent 会把本地 SQLite 做一致性快照并上传一次；云端已有需求或任务
-后不会再覆盖。配置了 Cloud Agent 的普通 DoTasks MCP 和工作线程 MCP 都会访问云端权威数据。
-
-```text
-浏览器/手机/MCP -> DoTasks Cloud
-                   任务数据库 / 状态机 / Dispatch Outbox
-                     | WSS 通知 + HTTPS 领取/回调
-                     v
-            Local DoTasks Agent
-                     | event wake
-                     v
-            Codex CLI / App Server
-            thread/start + turn/start
-```
-
-自动部署直接传输 GitHub 托管机器构建的镜像包，云服务器不需要保存源码或运行 Runner。
-如需沿用手工 GHCR 发布路径，可先使用具备 `write:packages` 权限的 GitHub Token 登录，
-然后构建并推送 `linux/amd64` 镜像：
-
-```bash
-docker login ghcr.io
-./scripts/publish-cloud-image \
-  --image ghcr.io/hanzeal-ai/dotasks:<版本号>
-```
-
-`.github/workflows/deploy-cloud.yml` 在 `main` 推送后由 GitHub 托管机器测试、构建
-Linux amd64 镜像，并通过受限 SSH 接收器上传和激活。流程沿用 CarryOn：专用部署用户、
-强制命令、固定服务器接收器、严格主机密钥校验，不需要服务器常驻 GitHub Runner。
-只有 `DEPLOY_ENABLED=true` 时才发布；PR 不部署。
-
-一次性安装、GitHub 配置、停用旧 Runner 的条件与失败恢复见
-[SSH 部署说明](deployment/README.md)。服务器接收器与 Compose 属于运维安装文件，
-普通应用发布不会覆盖它们。现有账号模式、凭据、监听地址和数据卷保持原配置。
-
-也可以只把 `scripts/deploy-cloud-ip` 上传到云服务器手工部署。服务器先使用具备
-`read:packages` 权限的 GitHub Token 登录 GHCR，然后执行：
-
-```bash
-docker login ghcr.io
-chmod +x ./deploy-cloud-ip
-./deploy-cloud-ip \
-  --public-ip <服务器公网IPv4> \
-  --image ghcr.io/hanzeal-ai/dotasks:<版本号>
-```
-
-服务器脚本会生成独立的网页登录密码和 Agent Token，以 `0600` 权限写入 `.env`，自动生成
-运行所需的 Compose 配置，然后拉取镜像、启动容器并执行带认证的健康检查。服务器既不构建
-镜像，也不需要 Dockerfile、前端产物或 Python 源码。
-
-云端网页通过登录页使用现有 `DOTASKS_HTTP_USER` / `DOTASKS_HTTP_PASSWORD` 登录。
-登录会话有效期为 12 小时，刷新页面保持登录；侧栏“退出登录”会撤销当前会话，同一会话的其他页面会返回登录页。
-服务重启会使全部网页会话失效。会话 Cookie 使用 HttpOnly、SameSite=Strict；HTTPS 公网地址自动启用 Secure。
-本地模式继续免登录，Agent Token 与现有程序客户端的显式 Basic 认证保持独立。
-部署该更新时需同时更新后端和 Web 构建产物；无需数据库迁移。回退时恢复上一版代码和静态产物并重启服务。
-
-发布新版本后，使用新镜像标签重新执行并保留原有密码、Token 和数据卷：
-
-```bash
-./deploy-cloud-ip \
-  --public-ip <服务器公网IPv4> \
-  --image ghcr.io/hanzeal-ai/dotasks:<新版本号> \
-  --reuse-env
-```
-
-不传新 `--image` 时，`--reuse-env` 会重新部署当前镜像。只有明确传入 `--force-env` 才会
-替换 `.env` 和凭据。可通过 `--port`、`--http-user`、`--http-password`、`--agent-id` 和
-`--agent-token` 覆盖默认值；回滚时传入旧版本镜像标签并使用 `--reuse-env`。
-
-阿里云安全组仍需手动添加入方向规则：TCP `8765`（或 `--port` 指定端口），来源只填写
-自己的出口公网 IP，不要对 `0.0.0.0/0` 开放。脚本结尾会输出网页地址、登录信息和 Mac
-端 Agent 配置命令。IP 方案使用明文 HTTP，只适合短期联调；正式长期使用时应恢复仅本机
-监听，并通过 HTTPS 反向代理暴露域名。网页密码与 Agent Token 不能复用。
-
-切换 HTTPS 时，先让域名的 A 记录指向 ECS，并在安全组开放 TCP `80`、`443`。反向代理需
-把域名转发到 `127.0.0.1:8765` 且支持 WebSocket。随后将服务器 `.env` 中的
-`DOTASKS_PUBLIC_URL` 改为完整 HTTPS 地址、`DOTASKS_BIND_ADDRESS` 改为 `127.0.0.1`，在 GitHub
-Actions Secrets 新增同值的 `DOTASKS_PUBLIC_URL`，再用 `--reuse-env` 部署。最后把 Mac Agent 的
-`--cloud-url` 重新配置成 HTTPS 地址，并删除公网 `8765` 安全组规则。
-
-新用户使用共享云端时，安装 CLI 后执行 `dotasks init`，创建账号并自动绑定、启动本机 Agent，
-随后在 `https://dotasks.hanzeal.com` 使用该账号密码登录。安装器自动配置 PATH；详细安装、
-部署准备、隔离契约和验证边界见 [CLI 注册与共享云端](docs/cli-onboarding.md)。
-默认云端已部署 multi 账号模式，提供在线安装及 `dotasks update` 升级入口。
-
-已有单账号实例或源码调试仍可通过 CLI 管理本地运行时：
-
-```bash
-# 在仓库根目录执行；将 scripts 加入 PATH 后即可使用 dotasks
-export PATH="$PWD/scripts:$PATH"
-dotasks configure --cloud-url https://<云端域名> --agent-id default
-# 首次配置会隐藏输入 Agent Token；已有字段保留，可用同名参数覆盖
-
-dotasks start                 # 后台运行，并启用登录自启
-dotasks status                # 服务状态、云端 API、调度状态及活动任务
-dotasks logs -f               # 持续查看 Agent 日志
-dotasks logs --service server # 查看本地 HTTP 服务日志
-dotasks doctor               # 配置、服务、Codex CLI 登录诊断
-dotasks stop                 # 停止服务，并关闭登录自启
-```
-
-安装独立 CLI 请按上述安装文档操作。CLI 直接管理本地 HTTP 服务和 Agent 的两个 launchd 服务；
-无需安装 Helper App。安装器配置新终端的 PATH，后台管理目前支持 macOS。
-使用 `dotasks update --check` 检查版本，`dotasks update` 升级并保留账号和数据。
-
-`stop` 会中断后台执行，请在任务空闲时操作；再次 `start` 可恢复登录自启。
-修改配置后使用 `stop` / `start` 使其生效。服务不会继承当前终端的临时 Agent 配置变量，
-应通过 `configure` 保存。CLI 的数据目录和配置路径必须与后台运行时一致。
-`status` 的云端 API 检查不等于后台 Agent 的 WSS 在线状态，后者以云端看板为准；
-活动任务取自云端权威数据，包含等待执行的活动运行。
-`doctor` 检查当前终端环境，后台环境和项目访问权限仍需实际任务验证。
-CLI 返回 0 表示检查成功，1 表示异常；云端暂停调度会显示状态，但不是连接错误。
-
-源码调试仍可使用 `./scripts/start-agent` 前台运行 Agent（请勿与后台 Agent 同时启动），
-本地 HTTP 服务由后台服务入口管理；无参数 `dotasks` 进入初始化流程。
-源代码变更不会自动更新已安装 CLI；正式版本使用 `dotasks update` 升级。
-Agent 配置保存在 `~/Library/Application Support/DoTasks/cloud-agent.json`，文件权限为
-`0600`。云端持久数据位于 Compose 的 `dotasks-data` 卷，图谱镜像位于卷内
-`obsidian-vault/<agent-id>/DoTasks/`。
-
-## Obsidian
-
-默认使用仓库内的测试 Vault：
-
-```text
-<仓库目录>/data/obsidian-vault
-```
-
-连接现有Vault：
-
-```bash
-export DOTASKS_OBSIDIAN_VAULT="/absolute/path/to/your/vault"
-./scripts/start
-```
-
-插件MCP进程也会读取这个环境变量。
-
-任务投影按稳定项目键写入 `DoTasks/Projects/<project-key>/Tasks/`。SQLite 任务和关系表是调度真源，Obsidian 保存可检索、可阅读的项目历史图谱；Vault 暂时不可用只会留下可重试的 Outbox 记录，不会回滚任务。
-
-## 代码定位
-
-任务上下文接口接收项目绝对路径，由 Codex Agent 自动探测定位能力：优先使用已有且索引有效的 CodeGraph，其次使用已有且已索引目标仓库的 GitNexus；两者都不可用时，直接通过受限文件名和源码文本匹配定位定义、调用方及相关测试。图索引不是需求确认的前置条件。
-
-系统不复制完整代码图。它把查询种子和预算交给独立执行会话；图工具返回当前源码、符号关系、影响范围和直接相关测试，源码匹配则从需求词、界面文案、路由、配置键和模块名逐步收窄。所有方式都必须上报项目、受限查询、非空文件列表和稳定符号；CLI 证据还必须包含精确 argv 与成功退出码。系统不会自行安装工具、初始化或刷新索引。
-
-## Codex插件
-
-插件入口位于当前目录：
-
-```text
-.codex-plugin/plugin.json
-.mcp.json
-skills/dotasks/SKILL.md
-skills/dotasks-controller/SKILL.md
-skills/dotasks-lifecycle/SKILL.md
-```
-
-`dotasks` 禁止模型自动调用。安装后，需要显式调用 `$dotasks`、明确提及 DoTasks，或选择插件入口，例如：
-
-```text
-整理这个需求并向我确认，确认后加入任务队列：我想在A页面增加一个导入。
-打开任务看板。
-显示等待我验收的任务。
-把TASK-0012标记为TASK-0004的变更任务。
-```
-
-Local Agent 生成的需求拆解、执行、返工和 Code Review 提示均为自包含阶段契约，不再附加或调用 lifecycle Skill；Prompt 直接给出实体 ID、运行 ID、允许的完成工具和回调要求。Agent 会等待已绑定的 CLI 工作线程结束并复核持久化 Dispatch；若线程已经结束却没有提交生命周期回调，会中断未提交的 Run 并按现有重试策略恢复，而不是让任务永久停留在执行或 Code Review 状态。
-
-插件提供 Skill、MCP 与会话工具。独立 CLI 通过 launchd 保活 HTTP 服务和 Local Agent；
-Agent 收到执行事件后为任务启动 Codex App Server 子进程。项目路径必须为存在的绝对目录，
-实际访问受当前用户文件权限、macOS TCC 和 Codex 工作区边界约束。
-
-本地看板默认监听 `http://127.0.0.1:8765`。开发入口为 `./scripts/start`，
-插件 MCP 与 CLI 服务通过相同的 `DOTASKS_HOME` 使用运行数据和项目路径校验。
-
-## Workflow
-
-任务创建必须先完成受限代码定位；随后由 `finalize_task_intake` 在一次模型可见调用中复用历史候选、判断依赖、保存契约并创建任务及关系。新任务按以下阶段运行：
-
-```text
-development -> code_review -> done
-```
-
-执行模型把任务标题、目标、范围和验收标准作为原生 Codex 会话的首要自然语言输入；结构化上下文只保留修改目标、验证命令、执行环境和可选批次，随后给出完成与阻塞的状态上报入口。工作区基线、调度降级原因、缓存身份和工具参数细节保存在服务端或生命周期 Skill 中，不重复注入开发 Prompt。相同类型、命令与超时的验证项会合并为一个命令组，命令只需运行一次，组内仍保留逐条验收标准与预期结果。执行阶段只暴露 `report_run_blocked`、`submit_task_delivery` 两个工具。代码类任务的 Code Review 只接收审查项和可信 Git Diff 范围，并只通过 `review_code` 提交结果；Diff 只能由现成 Git 命令获取，随后使用当前环境及项目已经配置的相关源码导航、lint、类型检查、静态分析、安全扫描和聚焦测试工具，不安装工具或编写临时扫描器。默认只检查代码质量、安全漏洞和高内聚低耦合，不检查任务目标或验收标准；非阻断风格建议不能触发返工。任务完成度继续由现有人工验收负责，不新增状态阶段。非代码类任务跳过 Code Review。若原生任务未加载 DoTasks MCP 工具，派发提示会提供同一本地服务的一次性 CLI 回退入口；执行异常最多自动恢复两次，Review 异常遵循独立中断上限，状态流转都会产生新的持久化调度唤醒。
-
-会话和页面创建的需求/任务都支持最多 8 张 PNG、JPEG、GIF 或 WebP 图片，每张不超过 10 MiB。图片先以内容哈希写入服务器托管存储，需求拆解时自动关联到所有子任务；Local Agent 在派发前下载并校验图片，向 Codex 会话提供本机可读路径。独立任务完成后立即删除图片；需求拆出的多个任务共享图片时，在最后一个子任务完成或取消后删除服务器文件。
-
-`review_code` 必须精确覆盖代码质量审查项，不包含验收标准：质量失败恢复原开发会话；完成三轮实现质量返工后再次失败会进入 `waiting_confirmation`，避免自动循环。通过时，Worktree 交付先在项目级集成锁内校验完整补丁和当前工作区指纹，串行应用成功后才进入 `done`。若项目工作区被 DoTasks 之外的操作改变，集成停止并保留可重试的 Review Run。是否属于代码任务由 intake 的 `quality_gates.code_review` 决定；可执行源码、测试、脚本、运行时配置、Schema/迁移、构建发布文件、依赖和共享契约均属于代码类。任务使用 `token_used` 保留原始统计，使用 `effective_token_used` 控制 `token_budget`；新建任务预算及并行配置可在页面右上角“设置”中调整，已创建任务的 Token 预算不随配置变化。默认近似公式为“非缓存输入 + 缓存输入 × 0.1 + 输出”，缓存权重可通过 `DOTASKS_CACHED_TOKEN_WEIGHT` 调整。有效 Token 达到预算时，活动运行会进入 `waiting_confirmation` 并关闭自动调度，避免无上限消耗。`depends_on` 只等待并新建线程，`continues_from` 和 `defect_of` 等待后复用前置开发线程。通用状态迁移不能绕过 Code Review 门禁。
-
-## 测试
-
-### Python runtime and dependency contract
-
-开发、Code Review、CLI 和云端镜像统一使用 `.python-version` 与
-`pyproject.toml` 声明的 Python 3.14 运行时。项目目前没有第三方 Python 运行依赖，
-因此不携带旧版本标准库兼容层或独立 `vendor` 目录。
-
-唯一受支持的 Python 测试入口是：
-
-```bash
+```sh
 ./scripts/test
 ```
 
-升级 Python 时，必须同时更新 `.python-version`、`pyproject.toml`、Docker 基础镜像
-及 `tests/test_dependency_contract.py`，然后通过 `./scripts/test` 与
-`./scripts/build-cli` 验证。其他独立校验：
+该脚本通过 `uv` 使用 Python 3.14 运行测试，并检查测试所需的 Node.js 环境。请复用此入口，避免不同解释器产生不一致结果。
 
-```bash
-CODEX_SYSTEM_SKILLS="${CODEX_HOME:-$HOME/.codex}/skills/.system"
-uv run --with pyyaml "$CODEX_SYSTEM_SKILLS/skill-creator/scripts/quick_validate.py" skills/dotasks
-uv run --with pyyaml "$CODEX_SYSTEM_SKILLS/skill-creator/scripts/quick_validate.py" skills/dotasks-lifecycle
-uv run --with pyyaml "$CODEX_SYSTEM_SKILLS/skill-creator/scripts/quick_validate.py" skills/dotasks-controller
-python3 "$CODEX_SYSTEM_SKILLS/plugin-creator/scripts/validate_plugin.py" .
+构建 CLI 包：
+
+```sh
+./scripts/build-cli
 ```
 
-## API摘要
+该命令先构建 Web 资源，再生成 CLI 包。自带运行时的独立安装包另见 [CLI 分发说明](docs/cli-distribution.md)。
 
-```text
-GET    /api/health
-GET    /api/board
-POST   /api/visual-artifacts
-POST   /api/task-intakes/enqueue
-POST   /api/task-intakes/finalize
-GET    /api/integrations
-GET    /api/tasks/{id}
-GET    /api/tasks/{id}/details
-POST   /api/tasks/{id}/transition
-POST   /api/tasks/{id}/relations
-GET    /api/tasks/{id}/context
-POST   /api/conversations/bind
-POST   /api/runs/{id}/delivery
-```
+## 文档
 
-## 集成边界
+| 场景                     | 文档                                                    |
+| ------------------------ | ------------------------------------------------------- |
+| CLI 安装、连接与日常使用 | [CLI 上手指南](docs/cli-onboarding.md)                  |
+| 独立运行时、打包与分发   | [CLI 分发说明](docs/cli-distribution.md)                |
+| 接入外部任务             | [任务来源](docs/task-sources.md)                        |
+| 移动端消息接入           | [移动消息说明](docs/mobile-messaging.md)                |
+| 团队协作实现与验收       | [团队协作交付说明](docs/team-collaboration-delivery.md) |
+| 云端部署                 | [部署指南](deployment/README.md)                        |
+| 可选决策服务             | [服务说明](services/laya-dotasks-decision/README.md)    |
 
-- 显式调用 DoTasks 时解析PRD附件；目前通过会话 Skill 整理并确认后创建结构化任务；
-- 原生任务由 `$dotasks-controller` 使用 Codex App 自带能力创建或恢复；DoTasks 不修改 Codex 客户端，也不使用 CDP、页面注入或私有数据库写入；
-- DoTasks 只保存原生 `threadId` 映射和阶段结果，不复制 Codex 会话内容；`clientThreadId` 仅表示异步创建中，绝不会被当成真实会话绑定；
-- 打包态和开发态使用相同的绝对路径、存在性和目录类型校验；访问能力继续受当前用户文件系统权限、macOS TCC 与 Codex 工作区边界控制；
-- CodeGraph、GitNexus 或源码匹配由独立执行会话完成，本地服务只生成受限查询计划并验证 Agent 上报状态；
-- 经验会自动创建并受限检索，跨任务去重和失效替换仍需显式维护；
+## 反馈与贡献
+
+通过 [Issues](https://github.com/hanzeal-ai/DoTasks/issues)反馈问题时，请提供系统与运行版本、复现步骤、任务所处状态及相关日志。请移除令牌、账号信息和私人项目内容。
+
+提交改动时，请保持任务状态、调度规则和权限契约只有一个权威定义；复用现有模块，避免在 UI、投影或适配层复制业务规则。Pull Request 应说明行为变化、影响范围和验证结果，并通过相关检查。
+
+## 许可证
+
+仓库尚未提供 `LICENSE` 文件，当前没有明确授予开源使用、修改或再分发的许可。许可证确定后应以仓库中的正式许可证文件为准。
