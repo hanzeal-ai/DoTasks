@@ -1,4 +1,4 @@
-"""Resumable account/device onboarding. Passwords are never persisted locally."""
+"""Resumable account/device onboarding. Passwords are stored only in macOS Keychain."""
 from __future__ import annotations
 
 import getpass
@@ -15,6 +15,7 @@ import uuid
 
 from .agent import AgentConfig, default_config_path, default_data_home, load_agent_config
 from .app_server import CodexAppServerClient
+from .cli_account import PasswordStore, show_account, open_cloud
 
 DEFAULT_CLOUD_URL = 'https://dotasks.hanzeal.com'
 
@@ -51,6 +52,7 @@ def ensure_codex_login() -> None:
 def initialize(args) -> None:
     from .cli import BackgroundService, read_json
 
+    display_password = None
     service = BackgroundService()
     service.validate_installation()
     cloud = args.cloud_url.rstrip('/')
@@ -89,8 +91,6 @@ def initialize(args) -> None:
             messages = {401: '账号不可注册或密码不正确', 409: '账号已绑定其他安装',
                         404: '云端尚未部署注册接口', 429: '请求过于频繁，请稍后重试'}
             raise RuntimeError(messages.get(exc.code, f'账号初始化失败（HTTP {exc.code}）')) from None
-        finally:
-            password = ''
         if response.get('cloud_url') != cloud or response.get('username') != username:
             raise ValueError('云端返回的账号或地址不匹配。')
         if not isinstance(response.get('agent_id'), str) or not isinstance(response.get('agent_token'), str):
@@ -100,6 +100,12 @@ def initialize(args) -> None:
         config = AgentConfig(cloud_url=cloud, agent_id=response['agent_id'], agent_token=response['agent_token'], data_home=str(default_data_home())).validate()
         # Save the resumable receipt first. If saving the config fails, the next
         # init retries the same device registration instead of creating another.
+        try:
+            PasswordStore().save(cloud, username, config.agent_id, password)
+        except (OSError, RuntimeError) as exc:
+            print(f'密码未能保存到钥匙串：{exc}；请妥善保管本次显示的密码。')
+        display_password = password
+        password = ''
         pending['agent_id'] = config.agent_id
         private_json(pending_path, pending)
         private_json(default_config_path(), {
@@ -114,7 +120,13 @@ def initialize(args) -> None:
             local = read_json(config.local_url + '/api/health')
             remote = read_json(cloud + '/_agent/v1/status', token=config.agent_token)
             if local.get('ok') is True and remote.get('agent_id') == config.agent_id and remote.get('connected') is True:
-                print(f'初始化完成。打开 {cloud}，使用账号 {username} 和刚才设置的密码登录。')
+                print('启动 Agent，检查云端连接……成功')
+                print('初始化完成。')
+                try:
+                    show_account(password=display_password)
+                except (OSError, RuntimeError) as exc:
+                    print(f'账户信息未能完整读取：{exc}')
+                open_cloud(cloud)
                 if not remote.get('dispatcher_enabled'):
                     print('账号的调度当前已暂停，可在云端看板恢复。')
                 return

@@ -149,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     onboarding = commands.add_parser("init", help="创建云端账号、授权本机并自动启动")
     onboarding.add_argument("--cloud-url", default=DEFAULT_CLOUD_URL)
     onboarding.add_argument("--username")
+    commands.add_parser("account", help="显示本机绑定账号和钥匙串中保存的密码")
     upgrade = commands.add_parser("update", help="校验并安装新版 CLI；失败时恢复旧版")
     upgrade.add_argument("--check", action="store_true", help="只检查新版本")
     settings = commands.add_parser("configure", help="交互配置云端地址和 Agent 凭证")
@@ -168,6 +169,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "init":
             from .cli_onboarding import initialize
             initialize(args)
+        elif args.command == "account":
+            from .cli_account import show_account
+            show_account()
         elif args.command == "update":
             from .cli_update import update
             update(check_only=args.check)

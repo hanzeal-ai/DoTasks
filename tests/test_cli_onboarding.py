@@ -32,6 +32,10 @@ class OnboardingTest(unittest.TestCase):
         self.args = ['init', '--username', 'alice']
         self.enterContext(patch('taskboard.cli_onboarding.secrets.token_urlsafe', return_value='secret-token-' * 4))
         self.password = 'correct horse battery staple'
+        self.store = self.enterContext(patch('taskboard.cli_onboarding.PasswordStore')).return_value
+        self.store.read.return_value = self.password
+        self.enterContext(patch('taskboard.cli_account.PasswordStore', return_value=self.store))
+        self.open_cloud = self.enterContext(patch('taskboard.cli_onboarding.open_cloud'))
         self.response = {'username': 'alice', 'cloud_url': cli_onboarding.DEFAULT_CLOUD_URL,
                          'agent_id': 'a' * 32, 'agent_token': 'secret-token-' * 4}
 
@@ -48,7 +52,10 @@ class OnboardingTest(unittest.TestCase):
         self.assertEqual(self.response['agent_token'], json.loads(config.read_text())['agent_token'])
         for file in self.home.rglob('*.json'):
             self.assertNotIn(self.password, file.read_text())
-        self.assertNotIn(self.password, self.output.getvalue())
+        self.assertIn("账号：alice", self.output.getvalue())
+        self.assertIn("密码：" + self.password, self.output.getvalue())
+        self.store.save.assert_called_once_with(cli_onboarding.DEFAULT_CLOUD_URL, "alice", self.response["agent_id"], self.password)
+        self.open_cloud.assert_called_once_with(cli_onboarding.DEFAULT_CLOUD_URL)
         self.assertNotIn(self.response['agent_token'], self.output.getvalue())
 
     def test_retry_after_lost_response_reuses_device_id(self):
@@ -84,6 +91,17 @@ class OnboardingTest(unittest.TestCase):
             self.assertEqual(1, cli.main(self.args))
         self.assertNotIn('初始化完成', self.output.getvalue())
         self.assertIn('凭证已保存', self.errors.getvalue())
+        self.assertNotIn(self.password, self.output.getvalue())
+        self.open_cloud.assert_not_called()
+
+    def test_keychain_failure_keeps_registration_and_prints_password_on_success(self):
+        self.store.save.side_effect = RuntimeError('locked')
+        with patch('taskboard.cli_onboarding.getpass.getpass', return_value=self.password), patch('taskboard.cli.read_json', side_effect=self.responses()):
+            self.assertEqual(0, cli.main(self.args))
+        self.assertIn('密码未能保存到钥匙串', self.output.getvalue())
+        self.assertIn('密码：' + self.password, self.output.getvalue())
+        self.start.assert_called_once()
+
 
 
 class InstallerTest(unittest.TestCase):
