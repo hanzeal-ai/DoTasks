@@ -6,16 +6,22 @@
 .team-shell button[data-variant="default"] {color:var(--primary-foreground,#fff)}
 .team-toolbar,.team-heading,.team-notice {display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap}
 .team-toolbar {margin-bottom:20px}.team-heading h2 {font-size:19px}.team-heading h3 {font-size:16px}
-.team-panel {background:var(--card,#fff);border:1px solid var(--border,#dce1e7);border-radius:12px;padding:20px;margin:16px 0}
+.team-panel {background:var(--card,#fff);border:1px solid var(--border,#dce1e7);border-radius:16px;padding:20px;margin:16px 0}
 .team-shell summary {cursor:pointer;font-weight:600;padding:10px 0}.team-shell p {margin:10px 0;line-height:1.6}
 .team-form {display:grid;gap:14px;padding:14px 0}.team-form>button {justify-self:start}
 .team-field {display:grid;gap:6px;min-width:0}.team-field>span {font-size:13px}.team-field textarea {min-height:80px}
 .team-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:16px;margin-top:16px}
-.team-task,.team-question {padding:16px;border:1px solid var(--border,#e0e4e8);border-radius:8px;min-width:0}
+.team-task,.team-question {padding:16px;border:1px solid var(--border,#e0e4e8);border-radius:12px;min-width:0}
 .team-task>button,.team-actions>button {margin:8px 8px 8px 0}.team-task ul,.team-panel ul {padding-left:22px;list-style:disc}
 .team-task pre,.team-command {display:block;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.6}
-.team-modules {display:grid;gap:16px}.team-modules fieldset {display:grid;gap:12px;border:1px solid var(--border,#dce1e7);padding:16px;border-radius:8px}
-.team-modules legend {padding:0 6px}.team-error {color:#a31c1c;background:#fff0f0;padding:12px;border-radius:8px}
+.team-modules {display:grid;gap:16px}.team-modules fieldset {display:grid;gap:12px;border:1px solid var(--border,#dce1e7);padding:16px;border-radius:12px}
+.team-modules legend {padding:0 6px}.team-error {color:#a31c1c;background:#fff0f0;padding:12px;border-radius:12px}
 .team-question {margin:12px 0;background:var(--muted,#f7f8fa)}.team-original {white-space:pre-wrap}.team-empty {padding:48px;text-align:center}
 .team-notice {padding:12px 0;border-bottom:1px solid var(--border,#dce1e7)}
 @media(max-width:640px){.team-shell main{padding:12px}.team-header{gap:12px;padding:12px}.team-header h1{font-size:18px}.team-panel{padding:14px}}
+
+.team-shell {font-size:14px}
+.team-header h1 {font-size:20px}
+.team-task h3 {font-size:15px;line-height:1.5}
+.team-shell summary {min-height:44px}
+@media(max-width:640px){.team-shell button,.team-shell input,.team-shell select{min-height:44px}.team-empty{padding:32px 16px}.team-header{flex-wrap:wrap}}

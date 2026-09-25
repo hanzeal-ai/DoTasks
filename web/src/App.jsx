@@ -85,7 +85,7 @@ export default function App({ authenticationEnabled = false, username = "本地�
         <main className="main-content">
           <header>
             <div className="header-heading">
-              <h1 id="view-title">任务面板</h1>
+              <h1 id="view-title">任务看板</h1>
             </div>
             <div className="header-actions">
               <Button
@@ -114,17 +114,18 @@ export default function App({ authenticationEnabled = false, username = "本地�
               </Button>
               <Button
                 id="task-change-confirmations"
-                className="primary change-confirmation-button"
+                variant="outline" className="ghost change-confirmation-button"
                 type="button"
                 hidden
               >
                 需求变更(<span id="task-change-count">0</span>)
               </Button>
-              <Button id="completed-tasks" className="primary" type="button">
-                完成任务(<span id="completed-count">0</span>)
+              <Button id="completed-tasks" variant="outline" className="ghost" type="button">
+                已完成任务(<span id="completed-count">0</span>)
               </Button>
             </div>
           </header>
+          <p id="dispatcher-status" className="dispatcher-status" role="status" hidden></p>
           <section id="content" className="board-columns"></section>
         </main>
       </div>
@@ -155,7 +156,7 @@ export default function App({ authenticationEnabled = false, username = "本地�
           <div className="dialog-head">
             <div>
               <DialogTitle asChild><h2>
-                完成任务(<span id="completed-dialog-count">0</span>)
+                已完成任务(<span id="completed-dialog-count">0</span>)
               </h2></DialogTitle>
             </div>
             <Button
@@ -206,7 +207,7 @@ export default function App({ authenticationEnabled = false, username = "本地�
       </Dialog>
 
       <Dialog id="new-requirement-dialog">
-        <form id="new-requirement-form">
+        <form id="new-requirement-form" className="intake-form">
           <div className="dialog-head">
             <div>
               <DialogTitle asChild><h2>新增需求</h2></DialogTitle>
@@ -222,9 +223,14 @@ export default function App({ authenticationEnabled = false, username = "本地�
               ×
             </Button>
           </div>
+          <div className="intake-fields">
           <label>
             标题
             <Input name="title" maxLength="120" required autoFocus />
+          </label>
+          <label>
+            需求目标
+            <Textarea name="goal" rows="5" required />
           </label>
           <label>
             Mac Codex 项目（可选）
@@ -240,10 +246,6 @@ export default function App({ authenticationEnabled = false, username = "本地�
             />
           </label>
           <label>
-            需求目标
-            <Textarea name="goal" rows="5" required />
-          </label>
-          <label>
             需求截图（最多 8 张，每张不超过 10 MiB）
             <Input
               name="visual_references"
@@ -252,7 +254,7 @@ export default function App({ authenticationEnabled = false, username = "本地�
               multiple
             />
           </label>
-          <label>
+          <details className="intake-options"><summary>其他设置</summary>          <label>
             优先级
             <NativeSelect name="priority" defaultValue="P2">
               <option value="P0">P0</option>
@@ -261,10 +263,12 @@ export default function App({ authenticationEnabled = false, username = "本地�
               <option value="P3">P3</option>
             </NativeSelect>
           </label>
+</details>
           <label className="inline-checkbox">
             <Checkbox name="auto_dispatch" defaultChecked />
             保存后自动调度拆解
           </label>
+          </div>
           <div className="form-actions">
             <Button
               variant="outline"
@@ -282,7 +286,7 @@ export default function App({ authenticationEnabled = false, username = "本地�
       </Dialog>
 
       <Dialog id="new-task-dialog">
-        <form id="new-task-form">
+        <form id="new-task-form" className="intake-form">
           <div className="dialog-head">
             <div>
               <DialogTitle asChild><h2>新增任务</h2></DialogTitle>
@@ -298,16 +302,14 @@ export default function App({ authenticationEnabled = false, username = "本地�
               ×
             </Button>
           </div>
+          <div className="intake-fields">
           <label>
             标题
             <Input name="title" maxLength="120" required autoFocus />
           </label>
           <label>
-            类型
-            <NativeSelect name="type" defaultValue="feature">
-              <option value="feature">任务</option>
-              <option value="bug">Bug</option>
-            </NativeSelect>
+            任务目标
+            <Textarea name="goal" rows="5" required />
           </label>
           <label>
             Mac Codex 项目（可选）
@@ -323,10 +325,6 @@ export default function App({ authenticationEnabled = false, username = "本地�
             />
           </label>
           <label>
-            任务目标
-            <Textarea name="goal" rows="5" required />
-          </label>
-          <label>
             任务截图（最多 8 张，每张不超过 10 MiB）
             <Input
               name="visual_references"
@@ -334,6 +332,13 @@ export default function App({ authenticationEnabled = false, username = "本地�
               accept="image/png,image/jpeg,image/gif,image/webp"
               multiple
             />
+          </label>
+          <details className="intake-options"><summary>其他设置</summary>          <label>
+            类型
+            <NativeSelect name="type" defaultValue="feature">
+              <option value="feature">任务</option>
+              <option value="bug">Bug</option>
+            </NativeSelect>
           </label>
           <label>
             优先级
@@ -344,10 +349,12 @@ export default function App({ authenticationEnabled = false, username = "本地�
               <option value="P3">P3</option>
             </NativeSelect>
           </label>
+</details>
           <label className="inline-checkbox">
             <Checkbox name="auto_dispatch" defaultChecked />
             保存后自动定位并执行
           </label>
+          </div>
           <div className="form-actions">
             <Button
               variant="outline"
@@ -358,7 +365,7 @@ export default function App({ authenticationEnabled = false, username = "本地�
               取消
             </Button>
             <Button type="submit" className="primary">
-              加入任务队列
+              创建并执行
             </Button>
           </div>
         </form>

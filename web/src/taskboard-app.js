@@ -24,6 +24,7 @@ const state = {
   settings: null,
   view: "board",
   tokenView: "charts",
+  boardColumn: "all",
 };
 const NAVIGATION_STORAGE_KEY = "dotasks:navigation:v1";
 let boardEventSource = null;
@@ -161,9 +162,9 @@ function syncHeader() {
   const settingsView = state.view === "settings";
   const completedCount = (state.board?.tasks || []).filter(task => task.status === "done").length;
   const taskChangeCount = (state.board?.pending_task_changes || []).length;
-  document.querySelector("#view-title").textContent = state.view === "logs" ? "执行日志" : tokenView ? "Token 使用看板" : requirementsView ? "需求看板" : settingsView ? "设置" : "任务面板";
+  document.querySelector("#view-title").textContent = state.view === "logs" ? "执行日志" : tokenView ? "Token 使用看板" : requirementsView ? "需求看板" : settingsView ? "设置" : "任务看板";
   document.querySelector("#view-title").title = "";
-  document.querySelector("#completed-tasks").hidden = false;
+  document.querySelector("#completed-tasks").hidden = !["board", "requirements"].includes(state.view);
   document.querySelector("#completed-count").textContent = String(completedCount);
   document.querySelector("#task-change-count").textContent = String(taskChangeCount);
   document.querySelector("#task-change-confirmations").hidden = taskChangeCount === 0;
@@ -185,6 +186,11 @@ async function load() {
     const dispatcherToggle = document.querySelector("#dispatcher-toggle");
     dispatcherToggle.textContent = dispatcher.enabled ? "暂停调度" : "恢复调度";
     dispatcherToggle.dataset.action = dispatcher.enabled ? "pause" : "resume";
+    const status = document.querySelector("#dispatcher-status");
+    status.hidden = dispatcher.enabled !== false && dispatcher.agent_configured !== false;
+    status.textContent = dispatcher.enabled === false
+      ? "调度已暂停 · 正在执行的任务继续运行"
+      : "本机执行器尚未配置连接，任务将等待执行器就绪";
     syncSidebar();
     render();
     const pendingChange = state.board?.pending_task_changes?.[0];
@@ -278,13 +284,13 @@ function taskCard(task) {
   const budgetToken = Number(task.effective_token_used ?? task.token_used) || 0;
   const token = task.token_budget ? Math.round((budgetToken / task.token_budget) * 100) : 0;
   const conflictTag = task.target_conflicts?.length ? `<span class="tag conflict">冲突 ${task.target_conflicts.length}</span>` : "";
-  const dispatchBlockerTag = task.dispatch_blockers?.length ? `<span class="tag conflict">等待调度</span>` : "";
+  const dispatchBlockerTag = task.dispatch_blockers?.length ? `<span class="tag conflict">${escapeHtml(task.dispatch_blockers.map(item => item.message || item.reason || item.kind || "等待调度").join("；"))}</span>` : "";
   const reviewFailedTag = task.review_failed_at && !["done", "cancelled"].includes(task.status) ? '<span class="tag conflict">验收不达标</span>' : "";
   const dispatchPausedLabels = {ready: "自动领取已暂停", rework: "自动返工已暂停", code_review: "自动 Code Review 已暂停"};
   const dispatchPausedTag = dispatchPausedLabels[task.status] && !task.auto_dispatch ? `<span class="tag conflict">${dispatchPausedLabels[task.status]}</span>` : "";
   const logButton = taskLogButton(task);
   const bugTag = task.type === "bug" ? `<span class="tag conflict">BUG</span>` : "";
-  return `<article class="card"><div class="card-top"><span>${task.id}</span><span class="card-stage"><span>${escapeHtml(statusLabels[task.status] || task.status)}</span>${taskStageTimer(task)}</span></div><h3 title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</h3><p>${escapeHtml(task.goal || "")}</p><div class="card-meta"><span class="tag priority-${task.priority}">${task.priority}</span>${bugTag}${(task.modules || []).slice(0,2).map(module => `<span class="tag">${escapeHtml(module)}</span>`).join("")}${reviewFailedTag}${dispatchPausedTag}${dispatchBlockerTag}${conflictTag}<span class="tag">Token ${token}%</span></div><div class="card-actions">${actionButton}${cancelButton}${logButton}${taskConversationControl(task)}${contextButton}</div></article>`;
+  return `<article class="card"><div class="card-top"><span>${task.id}</span><span class="card-stage"><span>${escapeHtml(statusLabels[task.status] || task.status)}</span>${taskStageTimer(task)}</span></div><h3><button type="button" data-details="${escapeHtml(task.id)}">${escapeHtml(task.title)}</button></h3><p>${escapeHtml(task.goal || "")}</p><div class="card-meta"><span class="tag priority-${task.priority}">${task.priority}</span>${bugTag}<span class="tag">${escapeHtml(projectLabel(task.project || "无项目"))}</span>${reviewFailedTag}${dispatchPausedTag}${dispatchBlockerTag}${conflictTag}</div><div class="card-actions">${actionButton}${taskConversationControl(task)}<details class="card-more"><summary>更多</summary><div>${contextButton}${logButton}${cancelButton}<span>Token 预算 ${token}%</span></div></details></div></article>`;
 }
 
 const requirementStatusLabels = {
@@ -377,19 +383,22 @@ function renderBoard() {
     const visible = column.key === "attention"
       ? tasks.filter(task => taskNeedsAttention(task, attentionStatuses, attentionAutoDispatchStatuses))
       : tasks.filter(task => column.statuses.includes(task.status));
-    return `<section class="column column-${column.key}"><div class="column-head">${column.title}<span>${visible.length}</span></div><div class="cards">${visible.length ? visible.map(taskCard).join("") : '<div class="empty">暂无任务</div>'}</div></section>`;
+    return `<section class="column column-${column.key}${state.boardColumn !== "all" && state.boardColumn !== column.key ? " mobile-column-hidden" : ""}"><div class="column-head">${column.title}<span>${visible.length}</span></div><div class="cards">${visible.length ? visible.map(taskCard).join("") : '<div class="empty">暂无任务</div>'}</div></section>`;
   }).join("");
-  setContent("#content", `<div class="board">${taskColumns}</div>`);
+  const filters = `<div class="board-filters" role="group" aria-label="任务状态"><button type="button" class="ghost" data-board-column="all" aria-pressed="${state.boardColumn === "all"}">全部</button>${columns.map(column => `<button type="button" class="ghost" data-board-column="${escapeHtml(column.key)}" aria-pressed="${state.boardColumn === column.key}">${escapeHtml(column.title)}</button>`).join("")}</div>`;
+  const active = tasks.some(task => !["done", "cancelled"].includes(task.status));
+  setContent("#content", active ? `${filters}<div class="board">${taskColumns}</div>` : `<div class="board-empty"><strong>还没有待执行的任务</strong><p>创建任务后，在这里查看执行进度和需要你处理的事项。</p><button type="button" class="ghost" data-create-task>创建任务</button></div>`);
   refreshStageTimers();
 }
 
 function renderRequirementsBoard() {
   const requirements = state.board?.requirements || [];
   const tasks = state.board?.tasks || [];
-  setContent("#content", `<div class="requirements-board">${requirements.length ? requirements.map(requirement => requirementCard(requirement, tasks)).join("") : '<div class="requirements-empty"><strong>暂无需求</strong></div>'}</div>`);
+  setContent("#content", `<div class="requirements-board">${requirements.length ? requirements.map(requirement => requirementCard(requirement, tasks)).join("") : '<div class="requirements-empty"><strong>创建你的第一个需求</strong><p>一个需求可以拆分为多个执行任务，并在这里集中跟踪进度。</p><button type="button" class="ghost" data-create-requirement>创建需求</button></div>'}</div>`);
 }
 
 function renderTokenTrend(daily) {
+  if (!daily.some(item => Number(item.token_used) > 0)) return '<div class="trace-empty">本月暂无用量，任务运行后将在这里展示趋势。</div>';
   const values = daily.map(item => Math.max(0, Number(item.token_used) || 0));
   const maximum = Math.max(1, ...values);
   const width = 760;
@@ -586,6 +595,13 @@ async function handleViewNavigation(event) {
 }
 
 async function handleTaskAction(event) {
+  const filter = event.target.closest("[data-board-column]");
+  if (filter) {
+    state.boardColumn = filter.dataset.boardColumn;
+    renderBoard();
+    document.querySelector(`[data-board-column="${CSS.escape(state.boardColumn)}"]`)?.focus({ preventScroll: true });
+    return true;
+  }
   const taskLogs = event.target.closest("[data-task-logs]");
   if (taskLogs) {
     try { await showTaskLogs(taskLogs.dataset.taskLogs); } catch (error) { toast(error.message); }
@@ -610,8 +626,8 @@ async function handleTaskAction(event) {
     return true;
   }
   if (
-    event.target.closest("#new-task-button")
-    || event.target.closest("#new-requirement-button")
+    event.target.closest("#new-task-button, [data-create-task]")
+    || event.target.closest("#new-requirement-button, [data-create-requirement]")
   ) {
     const historicProjects = [
       ...(state.board?.requirements || []).map(item => item.project),
@@ -629,11 +645,11 @@ async function handleTaskAction(event) {
       const path = String(project.path || "").trim();
       if (path && !projects.has(path)) projects.set(path, String(project.name || projectLabel(path)));
     });
-    const dialogId = event.target.closest("#new-task-button") ? "new-task-dialog" : "new-requirement-dialog";
+    const dialogId = event.target.closest("#new-task-button, [data-create-task]") ? "new-task-dialog" : "new-requirement-dialog";
     openDialog(dialogId);
     const dialog = document.getElementById(dialogId);
     const select = dialog.querySelector("[data-project-select]");
-    const emptyLabel = event.target.closest("#new-task-button")
+    const emptyLabel = event.target.closest("#new-task-button, [data-create-task]")
       ? "无项目（创建到 Codex 最近）"
       : "无项目（仅保存需求）";
     select.innerHTML = [
@@ -648,6 +664,7 @@ async function handleTaskAction(event) {
     manual.hidden = true;
     manual.required = false;
     manual.value = "";
+    syncIntakeAction(dialog.querySelector("form"));
     return true;
   }
   if (event.target.closest("[data-close]")) {
@@ -805,7 +822,24 @@ document.addEventListener("click", async event => {
   }
 });
 
+function syncIntakeAction(form) {
+  if (!form?.matches(".intake-form")) return;
+  const values = new FormData(form);
+  const auto = values.get("auto_dispatch") === "on";
+  const requirement = form.id === "new-requirement-form";
+  form.querySelector('button[type="submit"]').textContent = requirement
+    ? (auto && selectedProjectPath(values) ? "保存并调度" : "保存需求")
+    : (auto ? "创建并执行" : "加入任务队列");
+}
+document.addEventListener("click", event => {
+  if (event.target.closest('[data-slot="checkbox"]')) {
+    const form = event.target.closest("form");
+    setTimeout(() => syncIntakeAction(form), 0);
+  }
+}, true);
+document.addEventListener("reset", event => { setTimeout(() => syncIntakeAction(event.target), 0); });
 document.addEventListener("change", event => {
+  syncIntakeAction(event.target.closest("form"));
   const threadSelect = event.target.closest("[data-thread-select]");
   if (threadSelect?.value) {
     const threadId = threadSelect.value;
@@ -886,7 +920,9 @@ document.addEventListener("submit", async event => {
       form.reset();
       closeDialog("new-task-dialog");
       await load();
-      toast(`${result.task_id} 已加入任务队列${project ? "，正在等待定位" : "，将创建无项目 Codex 会话"}`);
+      toast(values.get("auto_dispatch") === "on"
+        ? `${result.task_id} 已加入任务队列${project ? "，将按调度状态执行" : "，将创建无项目 Codex 会话"}`
+        : `${result.task_id} 已保存，自动执行已关闭`);
     } catch (error) {
       toast(error.message);
     } finally {
