@@ -95,6 +95,20 @@ class CLIUpdateTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, '活动任务'):
                     cli_update.ensure_idle(config)
 
+    def test_running_or_uncertain_team_work_blocks_update(self):
+        home = cli_update.default_data_home()
+        home.mkdir(parents=True)
+        (home / 'onboarding.json').write_text('{}')
+        config = AgentConfig('https://dotasks.test', 'alice', 'x' * 32)
+        for board in (
+            {'actor_id': 'alice', 'jobs': [{'actor_id': 'alice', 'status': 'uncertain'}], 'tasks': []},
+            {'actor_id': 'alice', 'jobs': [], 'tasks': [{'owner_account_id': 'alice', 'active_run_id': 'run1'}]},
+        ):
+            replies = [{'result': {'tasks': [], 'requirements': []}}, {'teams': [{'id': 'team1'}]}, board]
+            with patch.object(cli_update, 'read_json', side_effect=replies):
+                with self.assertRaisesRegex(RuntimeError, '团队'):
+                    cli_update.ensure_idle(config)
+
     def test_partial_launch_failure_rolls_back_only_new_jobs(self):
         with patch('sys.platform', 'darwin'):
             service = BackgroundService()

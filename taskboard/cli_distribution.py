@@ -14,7 +14,15 @@ def runtime_root() -> Path:
 
 def runtime_python(runtime: Path) -> str:
     bundled = runtime / 'python/bin/python3'
-    return str(bundled) if bundled.is_file() else sys.executable
+    if bundled.is_file():
+        return str(bundled)
+    brew_python = os.environ.get('DOTASKS_BREW_PYTHON')
+    if brew_python:
+        executable = Path(brew_python)
+        if not executable.is_absolute() or executable.resolve() != Path(sys.executable).resolve():
+            raise RuntimeError('Homebrew Python 与当前解释器不一致。')
+        return str(executable)
+    return sys.executable
 
 
 def platform_key() -> str:
@@ -43,7 +51,19 @@ def prepare_initialization() -> None:
         return  # Source/developer entry points require the explicit installer.
     service = BackgroundService()
     if all(service.plist(name).is_file() for name in LABELS):
-        service.validate_installation()
+        installed = service.validate_installation()
+        brew = homebrew_runtime()
+        from .runtime_paths import default_data_home
+        managed = default_data_home() / 'cli/current'
+        expected = brew or managed
+        if installed != expected:
+            raise RuntimeError('后台服务属于另一种安装。先用原 CLI 执行 stop，再用新 CLI 的 install 命令迁移；账号与任务保留。')
+        if brew is None and installed.resolve() != root:
+            from .cli_install import validate_runtime
+            if validate_runtime(installed)['version'] != validate_runtime(root)['version']:
+                raise RuntimeError('已有其他版本。请用已安装的 dotasks update 升级，或停止服务后运行本包的 install。')
         return
+    if any(service.plist(name).exists() for name in LABELS):
+        raise RuntimeError('后台配置不完整，请停止服务后运行 dotasks install 修复。')
     print('安装本机后台服务……', flush=True)
     install(homebrew_runtime() or root, homebrew=homebrew_runtime() is not None)

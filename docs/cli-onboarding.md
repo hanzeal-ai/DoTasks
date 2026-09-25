@@ -2,32 +2,50 @@
 
 默认云端为 `https://dotasks.hanzeal.com`。在线安装及升级入口已于 2026-09-24 部署。
 
-## 新用户
+## macOS 新用户
 
-1. 安装 Python 3.14+ 和 Codex CLI。当前安装包不捆绑或自动下载这两个运行时。
-2. 在线下载安装器后执行（命令如下），或解压 `DoTasksCLI.zip` 运行 `sh ./install-cli`。安装器配置 zsh/bash 的 PATH 和两个 launchd 服务，不安装 Helper App。
-3. 在线安装器安装成功后自动执行 `dotasks init`，输入用户名和密码；离线安装后需自行执行该命令。如果 Codex 尚未登录，会进入官方登录流程，需要用户本人完成该授权。
-4. CLI 自动注册账号、绑定本机凭证、保存配置并执行 `start`。本地服务健康且云端确实收到 Agent 连接后才显示初始化成功，随后显示账号与密码，并自动在默认浏览器打开云端。
-5. 打开默认云端，在现有登录页输入刚才创建的用户名和密码。新账号默认启用任务调度。
+本地 Codex CLI（包括可识别的 Codex 桌面应用内置 CLI）需要已安装。DoTasks 使用你的本机 Codex 和登录状态，不捆绑另一份 Codex，也不修改全局 Codex 配置。
+
+### 在线安装
 
 ```sh
 curl -fsS https://dotasks.hanzeal.com/install.sh | sh
 ```
 
-安装器依次显示检查环境、下载、校验、安装与初始化进度。请在交互式终端执行；账号输入与授权从终端读取，不会把管道中的脚本当作输入。单独执行 `curl -fsS URL` 只显示脚本，不会安装。
+安装器使用 macOS 系统工具选择 Apple Silicon 或 Intel 包，校验大小、SHA-256 与解压路径，再运行包内 Python。无需预装 Python、Node.js 或 uv。安装成功后自动进入初始化：设置账号密码、检查 Codex 授权、启动本机服务，等待真实云端连接，然后展示账号密码并打开登录页。Codex 未登录时进入官方授权，需要本人完成。
 
-无需手动执行 `export`，无需复制 Agent Token。后台服务由 CLI 直接通过 macOS launchd 管理；目前只支持 macOS，仍需 Python 3.14 和已授权的 Codex CLI。
+### 下载后直接使用
+
+下载 [Apple Silicon 包](https://dotasks.hanzeal.com/downloads/cli/DoTasksCLI-macos-arm64.zip) 或 [Intel 包](https://dotasks.hanzeal.com/downloads/cli/DoTasksCLI-macos-x86_64.zip)。对应 `latest-macos-arm64.json` / `latest-macos-x86_64.json` 清单提供版本和 SHA-256。解压整个 ZIP 后，在终端执行包内 `./dotasks`，也可双击 `DoTasks.command`。不要只移动其中一个脚本：首次安装需要旁边的 runtime 目录；安装完成后可删除下载目录。
+
+当前版本未使用 Developer ID 签名或 Apple 公证。浏览器下载的文件首次打开可能被 macOS 拦截，可先尝试打开，再到“系统设置 → 隐私与安全性”点击“仍要打开”，并在提示中点击“打开”（[Apple 官方说明](https://support.apple.com/en-us/102445)）；也可以使用上面的官方在线安装命令。不要求关闭系统安全检查。
+
+### Homebrew
+
+公开 Tap 发布后：
 
 ```sh
-dotasks update --check  # 下载并校验最新版本，不切换
-dotasks update          # 校验、切换版本、恢复原有运行状态
+brew install hanzeal-ai/tap/dotasks
+dotasks
 ```
 
-升级保留账号、设备凭证和任务数据，拒绝已检测到的活动任务；新版本启动失败会恢复旧版本及服务配置。升级期间请暂停云端调度，避免空闲检查后有新任务进入。旧 Helper 用户在任务空闲时可运行 `sh /tmp/dotasks-install.sh --replace-helper`，关闭旧启动项并安装 CLI，随后执行 `dotasks start`；旧 App 文件保留供人工恢复。
+Brew 自动提供 Python 3.14，安装过程不创建账号、不启动服务。运行 `dotasks`（等同于 `dotasks init`）后才配置本机服务并初始化。程序位于 Brew 的 libexec，launchd 引用稳定的 opt 路径；数据继续放在 `~/Library/Application Support/DoTasks`。
 
-用户名为 3–64 位 ASCII 字母、数字、点、下划线或短横线，大小写统一为小写；密码为 12–128 个字符。DoTasks 自动绑定不替代 Codex 登录或 macOS 的系统授权。
+### 升级与迁移
 
-`dotasks init --cloud-url https://other.example` 支持其他共享云端。当前每个账号绑定一个安装；不提供改绑、密码找回或跨账号迁移。已有旧版 Agent 配置不会被 init 自动覆盖。
+任务空闲并暂停云端调度后升级。独立包使用 `dotasks update`，Brew 版本使用：
+
+```sh
+dotasks stop
+brew upgrade dotasks
+dotasks init
+```
+
+独立更新会检查个人及团队活动任务，失败恢复旧程序与启动配置；保留账号和任务数据。Brew 升级前必须停服，不能在任务执行期间让 Brew 清理旧版本；它不提供本项目的自动版本回退。卸载 Brew 程序前也先执行 `dotasks stop`，卸载不会清空账号数据。
+
+两种安装不能静默接管对方。迁移时先用旧 CLI 执行 `stop`，然后用新包 `./dotasks install` 或 `$(brew --prefix dotasks)/bin/dotasks install` 注册当前版本，最后运行新 CLI 的 `init`。迁移至 Brew 时仅移除本安装器创建的旧 `~/.local/bin/dotasks` 入口；保留旧运行时与业务数据。旧 Helper 迁移使用包内 `install-cli --replace-helper`。
+
+用户名为 3–64 位 ASCII 字母、数字、点、下划线或短横线，密码为 12–128 个字符。系统权限和 Codex 登录必须由本人确认；已有旧 Token 绑定不能自动转换成新账号，初始化会拒绝覆盖它。重复运行已完成的初始化不会重复注册。
 
 ## 查看本机账号
 
@@ -65,16 +83,9 @@ dotasks account
 
 输出 `dist/DoTasksCLI.zip`，包含 Python 源码运行时、静态前端和安装器；不包含 `.app`，不需要 Node/npm 或 Swift 编译器来安装。发布清单为 `dist/cli/latest.json`，包含版本、大小和 SHA-256。安装和升级只从同一 HTTPS 云端下载，拒绝重定向、校验错误和不安全 ZIP 路径。摘要随 HTTPS 清单发布，不是独立的发布者签名。
 
-云端镜像构建时生成客户端包并提供 `/install.sh` 和 `/downloads/cli/`。发布使用阿里云 CLI 的轻量服务器远程命令接口；先运行下列命令检查计划，独立审查通过后才加 `--execute`：
+云端镜像构建时生成客户端包并提供 `/install.sh` 和 `/downloads/cli/`。日常发布统一使用 GitHub 托管构建与受限 SSH 接收器，详见 [部署说明](../deployment/README.md)。`DEPLOY_ENABLED=true` 时主分支推送触发发布；手动工作流还需选中 deploy。旧 `deploy-aliyun-cli.py` 已退役，始终拒绝执行，不再生成可手工执行的旧发布计划。
 
-```sh
-python3 scripts/deploy-aliyun-cli.py \
-  --region cn-hangzhou \
-  --instance-id 768b01b0e1b44e1b8aa750cdcffd13e6 \
-  --image ghcr.io/hanzeal-ai/dotasks:<40位已验证提交SHA>
-```
-
-脚本保留旧配置及持久卷备份，停止 DoTasks 后切换到共享账号模式，验证下载入口和未登录访问限制。失败恢复旧镜像配置；数据备份保留供人工恢复，不自动覆盖新产生的数据。主分支推送仅构建镜像，不自动部署。发布可增加 `--github-artifact-id <id>` 使用同一提交的 Actions 镜像归档：本地认证获取短期下载地址，校验归档 SHA-256 后在阿里云服务器导入镜像，不向服务器传输 GitHub Token。
+发布前备份配置和停止写入后的持久化数据。新代码运行后若失败，保留数据并前向修复；恢复旧版本必须单独审查匹配的代码、数据和备份后新增写入。
 
 共享云端配置：
 

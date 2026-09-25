@@ -1,7 +1,6 @@
 """Build the platform-independent source runtime used by the macOS CLI."""
 from pathlib import Path
 import argparse
-import platform
 import subprocess
 import hashlib
 import json
@@ -24,7 +23,10 @@ if portable:
     from taskboard.cli_distribution import platform_key
     target_platform = platform_key()
     interpreter = args.python_runtime / 'bin/python3'
-    subprocess.run([str(interpreter), '-c', 'import sys; assert sys.version_info >= (3,14)'], check=True)
+    actual = json.loads(subprocess.check_output([str(interpreter), '-c', 'import json,sys,platform; print(json.dumps([sys.platform,platform.machine(),list(sys.version_info[:2])]))'], text=True))
+    expected_arch = {'macos-arm64': 'arm64', 'macos-x86_64': 'x86_64'}[target_platform]
+    if actual[0] != 'darwin' or actual[1] != expected_arch or actual[2] < [3,14]:
+        raise SystemExit('Bundled interpreter does not match the build platform.')
 
 dist = root / 'dist'
 dist.mkdir(exist_ok=True)
@@ -41,7 +43,10 @@ with tempfile.TemporaryDirectory(prefix='.cli-package-', dir=dist) as temporary:
         shutil.copytree(args.python_runtime, runtime / 'python', symlinks=False, ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.DS_Store'))
     files = {p.relative_to(runtime).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
              for p in sorted(runtime.rglob('*')) if p.is_file()}
-    fingerprint = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()[:12]
+    entrypoints = {'install-cli': hashlib.sha256((root / 'scripts/install-cli').read_bytes()).hexdigest()}
+    if portable:
+        entrypoints['dotasks'] = hashlib.sha256((root / 'scripts/portable-dotasks').read_bytes()).hexdigest()
+    fingerprint = hashlib.sha256(json.dumps({'files': files, 'entrypoints': entrypoints, 'format': 2}, sort_keys=True).encode()).hexdigest()[:12]
     version = f'{VERSION}-{fingerprint}'
     release = {'version': version, 'files': files}
     if portable:
@@ -56,7 +61,11 @@ with tempfile.TemporaryDirectory(prefix='.cli-package-', dir=dist) as temporary:
     with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as output:
         for path in sorted(package.rglob('*')):
             if path.is_file():
-                output.write(path, path.relative_to(package.parent))
+                entry = zipfile.ZipInfo(path.relative_to(package.parent).as_posix(), (2020, 1, 1, 0, 0, 0))
+                entry.create_system = 3
+                entry.external_attr = (0o100755 if path.stat().st_mode & 0o111 else 0o100644) << 16
+                entry.compress_type = zipfile.ZIP_DEFLATED if portable else zipfile.ZIP_STORED
+                output.writestr(entry, path.read_bytes())
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     target = dist / 'cli' / version
     target.mkdir(parents=True, exist_ok=True)
@@ -65,6 +74,7 @@ with tempfile.TemporaryDirectory(prefix='.cli-package-', dir=dist) as temporary:
     manifest = {'version': version, 'url': f'/downloads/cli/{version}/{archive.name}',
                 'sha256': digest, 'size': archive.stat().st_size}
     if portable:
+        shutil.copy2(archive, dist / 'cli' / archive.name)
         manifest['platform'] = target_platform
     (dist / ('cli/latest-' + target_platform + '.json' if portable else 'cli/latest.json')).write_text(json.dumps(manifest, indent=2) + '\n')
     print(f'Built {version}: {dist / archive.name}')

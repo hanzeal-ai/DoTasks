@@ -53,6 +53,8 @@ class BackgroundService:
         return self.job_state(f'{self.domain}/{LEGACY_LABEL}') != 'stopped'
 
     def validate_installation(self):
+        installed = None
+        interpreter = None
         for name in LABELS:
             path = self.plist(name)
             if not path.is_file():
@@ -64,6 +66,14 @@ class BackgroundService:
             if payload.get('Label') != LABELS[name] or len(args) < 4 or args[1:4] != ['-B', '-m', 'taskboard.' + ('server' if name == 'server' else 'agent')] or not os.access(args[0], os.X_OK):
                 raise RuntimeError('CLI 后台配置不完整，请重新安装。')
             runtime = Path(payload.get('WorkingDirectory', ''))
+            if not runtime.is_absolute():
+                raise RuntimeError('CLI 运行目录必须为绝对路径。')
+            if installed is not None and (runtime != installed or args[0] != interpreter):
+                raise RuntimeError('CLI 后台服务属于不同安装，请停止后重新安装。')
+            installed, interpreter = runtime, args[0]
+            bundled = runtime / 'python/bin/python3'
+            if bundled.is_file() and Path(args[0]).resolve() != bundled.resolve():
+                raise RuntimeError('后台服务未使用此安装包的 Python。')
             if not (runtime / 'taskboard' / 'cli.py').is_file():
                 raise RuntimeError('CLI 运行时缺失，请重新安装。')
             if Path(env.get('DOTASKS_HOME', '')).resolve() != default_data_home().resolve() or default_config_path().resolve() != (default_data_home() / 'cloud-agent.json').resolve():
@@ -71,6 +81,14 @@ class BackgroundService:
             for key in ('DOTASKS_CLOUD_URL', 'DOTASKS_AGENT_ID', 'DOTASKS_AGENT_TOKEN', 'DOTASKS_LOCAL_URL', 'DOTASKS_OBSIDIAN_VAULT'):
                 if os.environ.get(key) and os.environ[key] != env.get(key):
                     raise RuntimeError('请使用 dotasks configure 保存配置并取消临时 Agent 环境变量。')
+
+        from .cli_distribution import homebrew_runtime, runtime_root
+        brew = homebrew_runtime()
+        if (runtime_root() / 'release.json').is_file():
+            expected = brew or default_data_home() / 'cli/current'
+            if installed != expected:
+                raise RuntimeError('后台服务属于另一种安装；请先停止旧服务，再运行当前 CLI 的 install。')
+        return installed
 
     def start(self):
         self.validate_installation()

@@ -26,12 +26,15 @@ COPY core ./core
 COPY taskboard ./taskboard
 COPY --from=web-build /src/static ./static
 COPY skills ./skills
-COPY scripts/mcp-server scripts/package-cli.py scripts/install-cli scripts/install-online.sh scripts/deploy-cloud-ip ./scripts/
+COPY scripts/mcp-server scripts/package-cli.py scripts/install-cli scripts/install-online.sh scripts/deploy-cloud-ip scripts/verify-cli-assets.py ./scripts/
 RUN python -B scripts/package-cli.py \
     && mkdir -p static/downloads/cli \
     && cp -R dist/cli/. static/downloads/cli/ \
     && cp scripts/install-online.sh static/install.sh \
     && rm -rf dist
+
+COPY portable-cli/ ./static/downloads/cli/
+RUN python -B scripts/verify-cli-assets.py static/downloads/cli
 
 USER dotasks
 EXPOSE 8765

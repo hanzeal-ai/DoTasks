@@ -38,7 +38,7 @@ def validate_runtime(runtime: Path) -> dict:
     for path in runtime.rglob('*'):
         if path.is_symlink():
             raise ValueError('CLI runtime must not contain symlinks')
-        if path.is_file() and path.name != 'release.json':
+        if path.is_file() and path != runtime / 'release.json':
             actual[path.relative_to(runtime).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
     if actual != files:
         raise ValueError('CLI runtime file checksums do not match its manifest')
@@ -83,14 +83,19 @@ def install(runtime: Path, *, replace_helper=False, configure_path=True, homebre
     target = stable_runtime if homebrew else root / 'releases' / release['version']
     launcher = stable_runtime.parent / 'dotasks' if homebrew else home / '.local/bin/dotasks'
     profiles = ([home / '.zshrc'] if shell == 'zsh' else [home / '.bashrc', home / '.bash_profile']) if configure_path else []
-    outputs = ([] if homebrew else [launcher]) + [service.plist(name) for name in LABELS] + profiles
+    old_launcher = home / '.local/bin/dotasks'
+    if homebrew and old_launcher.exists() and (old_launcher.is_symlink() or MARKER not in old_launcher.read_text()):
+        raise RuntimeError('~/.local/bin/dotasks 不属于本安装器，请先处理命令冲突。')
+    outputs = ([old_launcher] if homebrew and old_launcher.exists() else [] if homebrew else [launcher]) + [service.plist(name) for name in LABELS] + profiles
     for path in outputs:
         if path.is_symlink() or (path.exists() and not path.is_file()):
             raise RuntimeError(f'拒绝覆盖非普通文件：{path}')
     if not homebrew and launcher.exists() and MARKER not in launcher.read_text():
         raise RuntimeError('命令目录已有其他 dotasks，拒绝覆盖。')
     snapshots = {p: (p.read_bytes(), p.stat().st_mode & 0o777) if p.exists() else None for p in outputs}
-    target.parent.mkdir(parents=True, exist_ok=True)
+    data.mkdir(parents=True, exist_ok=True)
+    if not homebrew:
+        target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
         if validate_runtime(target) != release:
             raise ValueError('Installed version has conflicting content')
@@ -134,6 +139,8 @@ def install(runtime: Path, *, replace_helper=False, configure_path=True, homebre
                 'StandardOutPath': str(log_home / f'{name}.out.log'), 'StandardErrorPath': str(log_home / f'{name}.err.log')}))
             path.chmod(0o600)
             service.run('disable', service.target(name))
+        if homebrew:
+            old_launcher.unlink(missing_ok=True)
         for profile in profiles:
             content = profile.read_text() if profile.exists() else ''
             if PATH_LINE not in content.splitlines():

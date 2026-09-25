@@ -132,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
     onboarding = commands.add_parser("init", help="创建云端账号、授权本机并自动启动")
     onboarding.add_argument("--cloud-url", default=DEFAULT_CLOUD_URL)
     onboarding.add_argument("--username")
+    installer = commands.add_parser("install", help="安装或迁移当前 CLI 的后台服务，保留账号数据")
+    installer.add_argument("--replace-helper", action="store_true")
     commands.add_parser("account", help="显示本机绑定账号和钥匙串中保存的密码")
     upgrade = commands.add_parser("update", help="校验并安装新版 CLI；失败时恢复旧版")
     upgrade.add_argument("--check", action="store_true", help="只检查新版本")
@@ -153,7 +155,12 @@ def main(argv: list[str] | None = None) -> int:
     log_parser.add_argument("-n", "--lines", type=int, default=50)
     args = parser.parse_args(argv)
     try:
-        if args.command == "init":
+        if args.command == "install":
+            from .cli_distribution import homebrew_runtime, runtime_root
+            from .cli_install import install
+            brew = homebrew_runtime()
+            install(brew or runtime_root(), homebrew=brew is not None, replace_helper=args.replace_helper)
+        elif args.command == "init":
             from .cli_onboarding import initialize
             from .cli_distribution import prepare_initialization
             prepare_initialization()

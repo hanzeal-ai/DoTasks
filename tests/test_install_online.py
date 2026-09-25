@@ -1,81 +1,157 @@
-"""Exercise the shipped online installer without network or user installation."""
-from contextlib import redirect_stdout
+"""Execute the no-Python bootstrap through a real pipe and controlling terminal."""
 import hashlib
-import io
 import json
+import os
 from pathlib import Path
+import pty
+import select
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 import unittest
-from unittest.mock import Mock, patch
 import zipfile
 
+ROOT = Path(__file__).resolve().parents[1]
 
+
+@unittest.skipUnless(shutil.which('unzip') and shutil.which('shasum'), 'system ZIP/checksum tools')
 class OnlineInstallerTest(unittest.TestCase):
     def setUp(self):
-        script = (Path(__file__).resolve().parents[1] / 'scripts/install-online.sh').read_text()
-        self.program = script.split("<<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
-        archive = io.BytesIO()
-        with zipfile.ZipFile(archive, 'w') as package:
-            package.writestr('DoTasksCLI/runtime/release.json', json.dumps({'version': 'test-v1'}))
-            package.writestr('DoTasksCLI/install-cli', '# fixture')
-        self.archive = archive.getvalue()
-        self.manifest = {'version': 'test-v1', 'url': '/downloads/cli/test.zip',
-                         'size': len(self.archive), 'sha256': hashlib.sha256(self.archive).hexdigest()}
-        self.terminal = io.StringIO('alice\n')
-        self.output = io.StringIO()
-        self.opener = Mock()
-        self.enterContext(patch('urllib.request.build_opener', return_value=self.opener))
-        real_open = open
-        self.open_terminal = self.enterContext(patch('builtins.open', side_effect=lambda path, *args, **kwargs: self.terminal if path == '/dev/tty' else real_open(path, *args, **kwargs)))
-        self.run = self.enterContext(patch('subprocess.run'))
-        self.enterContext(patch.object(sys, 'argv', ['-', '--replace-helper']))
-        self.enterContext(redirect_stdout(self.output))
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.bin = self.root / 'bin'
+        self.bin.mkdir()
+        self.archive = self.root / 'release.zip'
+        self.version = '0.4.1-' + 'a' * 12
+        self.environment = dict(os.environ, HOME=str(self.root), PATH=str(self.bin) + ':/usr/bin:/bin', FIXTURE=str(self.root))
+        self.script('uname', 'import sys; print("Darwin" if sys.argv[1]=="-s" else "arm64")')
+        self.script('plutil', 'import json,sys; print(json.load(open(sys.argv[-1]))[sys.argv[2]])')
+        self.script('curl', '''import os,sys,pathlib,shutil
+root=pathlib.Path(os.environ['FIXTURE']); args=sys.argv[1:]
+url=next(a for a in args if a.startswith('https://'))
+assert url.startswith('https://dotasks.hanzeal.com/downloads/cli/')
+shutil.copyfile(root/('manifest.json' if url.endswith('.json') else 'release.zip'),args[args.index('-o')+1])
+''')
+        self.make_archive()
+
+    def script(self, name, code):
+        path = self.bin / name
+        path.write_text('#!' + sys.executable + '\n' + code + '\n')
+        path.chmod(0o755)
+
+    def make_archive(self, *, unsafe=False, install_failure=False):
+        with zipfile.ZipFile(self.archive, 'w') as package:
+            package.writestr('DoTasksCLI/runtime/release.json', json.dumps({'version': self.version, 'platform': 'macos-arm64'}))
+            script = '''#!/bin/sh
+set -eu
+mkdir -p "$HOME/.local/bin"
+cat > "$HOME/.local/bin/dotasks" <<'INIT'
+#!/bin/sh
+[ "$1" = init ] || exit 2
+echo INITIALIZE_INPUT
+read name
+[ "$name" = alice ] || exit 3
+echo INITIALIZE_OK
+INIT
+chmod +x "$HOME/.local/bin/dotasks"
+'''
+            package.writestr('DoTasksCLI/install-cli', 'exit 17\n' if install_failure else script)
+            if unsafe:
+                package.writestr('DoTasksCLI/../../escaped', 'bad')
+        data = self.archive.read_bytes()
+        self.manifest = {'version': self.version, 'platform': 'macos-arm64', 'url': f'/downloads/cli/{self.version}/DoTasksCLI-macos-arm64.zip', 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+        self.save_manifest()
+
+    def save_manifest(self):
+        (self.root / 'manifest.json').write_text(json.dumps(self.manifest))
 
     def execute(self):
-        self.opener.open.side_effect = [io.BytesIO(json.dumps(self.manifest).encode()), io.BytesIO(self.archive)]
-        exec(compile(self.program, 'install-online.sh', 'exec'), {})
+        result = subprocess.run([sys.executable, str(Path(__file__).resolve()), '--pty-child'],
+                                env=self.environment, capture_output=True, text=True, timeout=25, check=True)
+        return json.loads(result.stdout)
 
-    def test_install_then_init_reads_terminal_instead_of_script_stdin(self):
-        def run(argv, **kwargs):
-            if argv[-1] == 'init':
-                self.assertIs(kwargs['stdin'], self.terminal)
-                self.assertEqual('alice\n', kwargs['stdin'].readline())
-            return subprocess.CompletedProcess(argv, 0)
-        self.run.side_effect = run
-        with patch.object(sys, 'stdin', io.StringIO('script, not username')):
-            self.execute()
-        install, initialize = self.run.call_args_list
-        self.assertEqual('--replace-helper', install.args[0][-1])
-        self.assertEqual([str(Path.home() / '.local/bin/dotasks'), 'init'], initialize.args[0])
-        self.assertTrue(self.terminal.closed)
-        for stage in ('[2/5]', '[3/5]', '[4/5]', '[5/5]'):
-            self.assertIn(stage, self.output.getvalue())
+    def test_pipe_installs_then_initializes_without_python_in_path(self):
+        code, output = self.execute()
+        self.assertEqual(0, code, output)
+        self.assertIn('INITIALIZE_OK', output)
+        for number in range(1, 6):
+            self.assertIn(f'[{number}/5]', output)
 
-    def test_failed_install_does_not_start_initialization(self):
-        self.run.side_effect = subprocess.CalledProcessError(1, ['installer'])
-        with self.assertRaises(subprocess.CalledProcessError):
-            self.execute()
-        self.assertEqual(1, self.run.call_count)
+    def test_failed_install_does_not_initialize(self):
+        self.make_archive(install_failure=True)
+        code, output = self.execute()
+        self.assertEqual(17, code, output)
+        self.assertNotIn('INITIALIZE_INPUT', output)
 
-    def test_failed_init_reports_installed_state_and_resume_command(self):
-        self.run.side_effect = [subprocess.CompletedProcess([], 0), subprocess.CalledProcessError(2, ['init'])]
-        with self.assertRaises(SystemExit) as result:
-            self.execute()
-        self.assertEqual(2, result.exception.code)
-        self.assertIn('CLI 已安装，初始化尚未完成', self.output.getvalue())
-        self.assertIn('dotasks init', self.output.getvalue())
-        self.assertTrue(self.terminal.closed)
-
-    def test_no_terminal_stops_before_downloading_or_installing(self):
-        self.open_terminal.side_effect = OSError('no controlling terminal')
-        with self.assertRaisesRegex(SystemExit, '交互式终端'):
-            self.execute()
-        self.opener.open.assert_not_called()
-        self.run.assert_not_called()
-
-    def test_bad_checksum_prevents_install_and_initialization(self):
+    def test_checksum_and_path_rejection_do_not_install(self):
         self.manifest['sha256'] = '0' * 64
-        with self.assertRaisesRegex(SystemExit, 'checksum'):
-            self.execute()
-        self.run.assert_not_called()
+        self.save_manifest()
+        code, output = self.execute()
+        self.assertNotEqual(0, code)
+        self.assertIn('摘要不匹配', output)
+        self.make_archive(unsafe=True)
+        code, output = self.execute()
+        self.assertNotEqual(0, code)
+        self.assertIn('不安全的路径', output)
+        self.assertFalse((self.root / '.local/bin/dotasks').exists())
+
+    def test_cross_origin_manifest_does_not_download_package(self):
+        self.manifest['url'] = 'https://other.test/code.zip'
+        self.save_manifest()
+        code, output = self.execute()
+        self.assertNotEqual(0, code)
+        self.assertIn('下载地址无效', output)
+
+    def test_no_controlling_terminal_stops_before_download(self):
+        result = subprocess.run(['/bin/sh', str(ROOT / 'scripts/install-online.sh')], env=self.environment, start_new_session=True, capture_output=True, text=True)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn('交互式终端', result.stderr)
+        self.assertFalse((self.root / '.local').exists())
+
+
+def run_pty():
+    pid, descriptor = pty.fork()
+    if pid == 0:
+        # The bootstrap is actually supplied on stdin, as with curl | sh.
+        os.execl('/bin/sh', 'sh', '-c', 'cat "$1" | sh', 'fixture', str(ROOT / 'scripts/install-online.sh'))
+    output = b''
+    deadline = time.monotonic() + 15
+    sent = False
+    status = None
+    try:
+        while time.monotonic() < deadline:
+            if select.select([descriptor], [], [], 0.1)[0]:
+                try:
+                    chunk = os.read(descriptor, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                output += chunk
+                if b'INITIALIZE_INPUT' in output and not sent:
+                    os.write(descriptor, b'alice\n')
+                    sent = True
+            done, code = os.waitpid(pid, os.WNOHANG)
+            if done:
+                status = code
+                break
+        if status is None:
+            done, code = os.waitpid(pid, os.WNOHANG)
+            if done:
+                status = code
+            else:
+                os.kill(pid, 15)
+                _, status = os.waitpid(pid, 0)
+    finally:
+        os.close(descriptor)
+    return os.waitstatus_to_exitcode(status), output.decode()
+
+
+if __name__ == '__main__':
+    if '--pty-child' in sys.argv:
+        print(json.dumps(run_pty()))
+    else:
+        unittest.main()

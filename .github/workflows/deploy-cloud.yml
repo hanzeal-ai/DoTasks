@@ -19,7 +19,39 @@ permissions:
   contents: read
 
 jobs:
+  portable:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            platform: macos-arm64
+          - runner: macos-15-intel
+            platform: macos-x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+      - run: npm --prefix web ci
+      - run: ./scripts/build-portable-cli
+      - name: Verify relocated native CLI and MCP
+        run: uv run --no-project --python 3.14 python scripts/verify-portable-cli.py "dist/DoTasksCLI-${{ matrix.platform }}.zip"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: portable-${{ matrix.platform }}
+          path: dist/cli/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+
   build:
+    needs: portable
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -41,6 +73,19 @@ jobs:
 
       - name: Run tests
         run: ./scripts/test
+
+      - name: Build source CLI and verify pinned Brew formula
+        run: |
+          npm --prefix web ci
+          ./scripts/build-cli
+          python3 scripts/generate-brew-formula.py --check
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+        with:
+          pattern: portable-macos-*
+          path: portable-cli
+          merge-multiple: true
+      - name: Verify both native distributions
+        run: python3 scripts/verify-cli-assets.py portable-cli --portable-only
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3

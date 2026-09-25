@@ -65,7 +65,7 @@ scripts/    开发启动、测试和 CLI 打包入口
 
 ## macOS 安装与首次使用
 
-本地执行目前支持 macOS，需要 Python 3.14+、Git 和已安装的 Codex CLI。
+本地执行目前支持 macOS，需要 Git 和本机 Codex。独立下载包自带 Python；Homebrew 安装会自动提供 Python 依赖。
 云端管理任务状态，本机 Agent 执行 Codex 工作线程；Windows 浏览器可访问云端看板，
 但当前 CLI 安装与后台管理尚不支持 Windows。
 
@@ -101,7 +101,7 @@ npm --prefix web ci
 ./scripts/build-cli
 ```
 
-CLI 包输出为 `dist/DoTasksCLI.zip`；解压后使用包中的 `install-cli` 安装。
+`./scripts/build-cli` 生成源码包供 Brew 和已有源码安装升级；`./scripts/build-portable-cli` 生成当前 macOS 架构的自带 Python 包。交付流程见 [CLI 分发](docs/cli-distribution.md)。
 安装和启动会改变本机后台服务，应在准备好切换版本后单独执行。
 
 仓库的 `.codex-plugin/`、`skills/` 和 `.mcp.json` 提供显式 DoTasks Skill 与 MCP。

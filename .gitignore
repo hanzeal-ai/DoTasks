@@ -13,3 +13,5 @@ web/node_modules/
 services/laya-dotasks-decision/models/
 services/laya-dotasks-decision/secrets/
 services/laya-dotasks-decision/evidence/
+portable-cli/*
+!portable-cli/.gitkeep

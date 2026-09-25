@@ -83,6 +83,15 @@ def ensure_idle(config):
     }, config.agent_token)['result']
     if any(item.get('active_run_status') in ACTIVE_RUN_STATUSES for item in board['tasks']) or any(item.get('status') == 'decomposing' for item in board['requirements']):
         raise RuntimeError('存在活动任务，请等待任务空闲后再升级。')
+    if (default_data_home() / 'onboarding.json').is_file():
+        teams = read_json(config.cloud_url + '/_agent/v1/teams', token=config.agent_token)['teams']
+        for team in teams:
+            team_board = read_json(config.cloud_url + '/_agent/v1/teams/' + team['id'], token=config.agent_token)
+            actor = team_board['actor_id']
+            if any(job['actor_id'] == actor and job['status'] in {'running', 'uncertain'} for job in team_board['jobs']):
+                raise RuntimeError('团队分析仍在运行或会话状态未知，请先处理后再升级。')
+            if any(task['owner_account_id'] == actor and (task.get('active_run_id') or task.get('handling') == 'awaiting_stop') for task in team_board['tasks']):
+                raise RuntimeError('存在团队活动任务，请等待任务空闲后再升级。')
 
 
 def wait_ready(service, config):
