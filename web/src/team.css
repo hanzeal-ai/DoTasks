@@ -25,3 +25,5 @@
 .team-task h3 {font-size:15px;line-height:1.5}
 .team-shell summary {min-height:44px}
 @media(max-width:640px){.team-shell button,.team-shell input,.team-shell select{min-height:44px}.team-empty{padding:32px 16px}.team-header{flex-wrap:wrap}}
+.team-form .team-source-toggle { display: flex; align-items: center; gap: 8px; }
+.team-form .team-source-toggle input { width: auto; }

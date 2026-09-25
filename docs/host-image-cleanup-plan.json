@@ -1,0 +1,97 @@
+{
+  "protected_count": 35,
+  "candidate_count": 11,
+  "candidates": [
+    {
+      "id": "sha256:3c5bee2039677d948aac010e286218efc1cb569401b5e378dac58887b1e38af4",
+      "tags": [
+        "ghcr.io/hanzeal-ai/dotasks:61e9c6a54219e21f03abef687551788d5a8a9c37"
+      ],
+      "created": "2026-09-03T03:19:27.304147277Z",
+      "size": 129316356
+    },
+    {
+      "id": "sha256:487cafda518a5e9e8e7f37104f7cd104c84c9ca31483bec7d5e8129a9d8c23e2",
+      "tags": [
+        "ghcr.io/hanzeal-ai/dotasks:2d5f8fefb2c79b61f987c0b2fbfc16967f17dae7"
+      ],
+      "created": "2026-09-03T07:02:03.277916665Z",
+      "size": 129404913
+    },
+    {
+      "id": "sha256:70f60306972632d75d5da25bc725fbb872de4dfbda8c1d2099d5e244c695871b",
+      "tags": [
+        "ghcr.io/hanzeal-ai/dotasks:f2082fe7f2c1bf2897ce59ba3b2d90bcdff1a17e"
+      ],
+      "created": "2026-09-08T05:41:41.938752269Z",
+      "size": 129543071
+    },
+    {
+      "id": "sha256:854a7aca4023c178ae3cb9ef00c0aa43687d3f20cb9dcdae65cc3f233d13ce0a",
+      "tags": [
+        "ghcr.io/hanzeal-ai/dotasks:84850cf5a072cb3a71af0e15c5c75ea5d8d7dbc1"
+      ],
+      "created": "2026-09-03T06:51:23.879280213Z",
+      "size": 129404622
+    },
+    {
+      "id": "sha256:8c2bafe203f36d8709f42c136b41c8c33f21916ff9ad036727f318d69c4ea147",
+      "tags": [
+        "ghcr.io/hanzeal-ai/dotasks:2e4aaf79725904676c0ba3662f48f1797e5855f6"
+      ],
+      "created": "2026-09-04T02:59:18.509864123Z",
+      "size": 129519024
+    },
+    {
+      "id": "sha256:ad5987f801506ae2d1132d130f7821ded4f6121a3fcbf53666f79af22975b57d",
+      "tags": [
+        "ghcr.io/hanzeal-ai/dotasks:14705d550dce63e6618b5ac49d4f4047e0e0f8e6"
+      ],
+      "created": "2026-09-17T02:20:59.127464862Z",
+      "size": 129668295
+    },
+    {
+      "id": "sha256:c53dd59ac64f2f635281e7c6ca47c336a60b5ced330ddf6b8d57403d4ffef036",
+      "tags": [
+        "ghcr.io/hanzeal-ai/dotasks:a8ee6787bb8332b6e5213326b8dc0524446e41e6"
+      ],
+      "created": "2026-09-03T07:36:19.739857481Z",
+      "size": 129431071
+    },
+    {
+      "id": "sha256:cc04a72ff563e693394c97c2d8b78ccf5d19e05a031b7af1f8184c4529306bdb",
+      "tags": [
+        "ghcr.io/hanzeal-ai/dotasks:7db672e9c09ab7ccfeef06f20b103814050d979d"
+      ],
+      "created": "2026-09-04T03:14:17.609055965Z",
+      "size": 129533264
+    },
+    {
+      "id": "sha256:da70c3d41ea98d6d33e0046c7f745c08017dc0de0bdb38f15eb1cd9c6b6b9f98",
+      "tags": [
+        "ghcr.io/hanzeal-ai/dotasks:1faa1782cd7fd3ed4dd777d1320572aed4314e61"
+      ],
+      "created": "2026-09-03T13:03:19.238857099Z",
+      "size": 129515560
+    },
+    {
+      "id": "sha256:fc3d303c2336fe9a262abfde6f0e945ee9e59f4eb98cb85e85bc384b1632401a",
+      "tags": [
+        "ghcr.io/hanzeal-ai/dotasks:8c084ce95c5b0514d88e95e6cfd440f12d89974a"
+      ],
+      "created": "2026-09-03T05:54:46.945036563Z",
+      "size": 129361357
+    },
+    {
+      "id": "sha256:fdad1f01a710b344f397177049fb4fa0fdf781ffbf22e434cf8813ef4df9a61b",
+      "tags": [
+        "ghcr.io/hanzeal-ai/dotasks:d78f7cd76dbabf67ce449437e219c5bb861b202e"
+      ],
+      "created": "2026-09-03T08:53:03.054184098Z",
+      "size": 129462684
+    }
+  ],
+  "status": "deleted_after_explicit_user_authorization",
+  "execution_id": "t-hz06y3qsbkhmv40",
+  "deleted_count": 11
+}

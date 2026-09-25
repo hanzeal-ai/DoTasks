@@ -5,6 +5,14 @@ Installed only for a team runtime; personal databases are untouched.
 """
 
 SCHEMA = '''
+CREATE TABLE IF NOT EXISTS team_task_sources (
+    project_id TEXT PRIMARY KEY REFERENCES team_projects(id), url TEXT NOT NULL,
+    coordinator_id TEXT NOT NULL, token TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1,
+    version INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS team_source_imports (
+    project_id TEXT NOT NULL REFERENCES team_projects(id), source_url TEXT NOT NULL,
+    external_id TEXT NOT NULL, requirement_id TEXT NOT NULL REFERENCES requirements(id),
+    PRIMARY KEY(project_id,source_url,external_id));
 CREATE TABLE IF NOT EXISTS team_attachments (
     id TEXT PRIMARY KEY, requirement_id TEXT NOT NULL REFERENCES requirements(id),
     name TEXT NOT NULL, mime TEXT NOT NULL, sha256 TEXT NOT NULL, content BLOB NOT NULL);
