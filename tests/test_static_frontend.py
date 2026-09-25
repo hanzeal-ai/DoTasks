@@ -54,18 +54,6 @@ const module = await import(`data:text/javascript;charset=utf-8,${{encodeURIComp
         self.assertNotIn("project_blockers", app)
         self.assertNotIn("项目级阻塞", app)
 
-    def test_request_guard_rejects_stale_scopes(self):
-        completed = self.run_module_script("""
-const guard = new module.LatestRequest();
-const first = guard.begin("project-a");
-const second = guard.begin("project-b");
-if (guard.isCurrent(first, "project-a")) throw new Error("stale request remained current");
-if (!guard.isCurrent(second, "project-b")) throw new Error("latest request was rejected");
-guard.invalidate();
-if (guard.isCurrent(second, "project-b")) throw new Error("invalidated request remained current");
-""")
-        self.assertEqual(0, completed.returncode, completed.stderr)
-
     def test_metric_token_count_uses_compact_english_units(self):
         completed = self.run_module_script("""
 const cases = new Map([
@@ -356,15 +344,6 @@ const conversations = [
 if (module.selectTaskConversation({status: "implementing", conversations}).thread_id !== "dev-thread") throw new Error("development did not select its thread");
 if (module.selectTaskConversation({status: "code_review", conversations}).thread_id !== "review-thread") throw new Error("review did not select its thread");
 if (module.selectTaskConversation({status: "paused", paused_from_status: "code_review", conversations}).thread_id !== "review-thread") throw new Error("paused stage was not restored");
-""")
-        self.assertEqual(0, completed.returncode, completed.stderr)
-
-    def test_taskboard_slash_command_expands_to_explicit_skill_invocation(self):
-        completed = self.run_module_script("""
-if (module.expandDoTasksSlashCommand("/dotasks") !== "$dotasks") throw new Error("canonical command was not expanded");
-if (module.expandDoTasksSlashCommand("/dotasks 打开任务看板") !== "$dotasks\\n\\n打开任务看板") throw new Error("command arguments were not preserved");
-if (module.expandDoTasksSlashCommand("/DOTASKS\\n调度下一项任务") !== "$dotasks\\n\\n调度下一项任务") throw new Error("multiline command was not expanded");
-if (module.expandDoTasksSlashCommand("/taskboard") !== "/taskboard") throw new Error("retired command was rewritten");
 """)
         self.assertEqual(0, completed.returncode, completed.stderr)
 

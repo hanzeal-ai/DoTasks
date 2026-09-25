@@ -304,7 +304,15 @@ class CodexAppServerClient:
         timeout: float = 30.0,
         readonly: bool = False,
     ):
-        bundled = "/Applications/ChatGPT.app/Contents/Resources/codex"
+        candidates = [
+            Path.home() / '.local/bin/codex', Path('/opt/homebrew/bin/codex'),
+            Path('/usr/local/bin/codex'),
+            *[base / app / 'Contents/Resources/codex'
+              for base in (Path('/Applications'), Path.home() / 'Applications')
+              for app in ('Codex.app', 'ChatGPT.app')],
+        ]
+        bundled = next((str(path) for path in candidates if path.is_file() and os.access(path, os.X_OK)),
+                       '/Applications/ChatGPT.app/Contents/Resources/codex')
         self.executable = (
             executable
             or os.environ.get("DOTASKS_CODEX_BIN")

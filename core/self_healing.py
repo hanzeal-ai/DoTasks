@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import json
 import re
-import shlex
-from pathlib import Path
 from typing import Any
 
 
@@ -42,47 +39,6 @@ def classify_recoverable_failure(*values: Any) -> str:
     if any(re.search(pattern, text, re.IGNORECASE) for pattern in _ENVIRONMENT_PATTERNS):
         return "environment"
     return "implementation"
-
-
-def infer_environment_repair_command(project: str | Path, output: str) -> str:
-    """Return a deterministic dependency restore command, never a system installer."""
-    root = Path(project).expanduser().resolve()
-    normalized = str(output or "").lower()
-    if classify_recoverable_failure(normalized) != "environment":
-        return ""
-
-    if (root / "package.json").is_file() and any(
-        marker in normalized
-        for marker in (
-            "module not found",
-            "cannot find module",
-            "failed to resolve import",
-            "unable to resolve dependency",
-            "missing dependency",
-        )
-    ):
-        package_json: dict[str, Any] = {}
-        try:
-            package_json = json.loads((root / "package.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            pass
-        package_manager = str(package_json.get("packageManager") or "").split("@", 1)[0]
-        if (root / "pnpm-lock.yaml").is_file() or package_manager == "pnpm":
-            return "pnpm install --frozen-lockfile"
-        if (root / "yarn.lock").is_file() or package_manager == "yarn":
-            return "yarn install --frozen-lockfile"
-        if (root / "package-lock.json").is_file() or (root / "npm-shrinkwrap.json").is_file():
-            return "npm ci"
-
-    if any(
-        marker in normalized
-        for marker in ("modulenotfounderror", "no module named", "module not found")
-    ):
-        if (root / "pyproject.toml").is_file() and (root / "uv.lock").is_file():
-            return "uv sync --frozen"
-        if (root / "requirements.txt").is_file():
-            return f"python -m pip install -r {shlex.quote(str(root / 'requirements.txt'))}"
-    return ""
 
 
 def normalize_self_heal_locations(locations: Any) -> list[dict[str, Any]]:

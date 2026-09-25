@@ -8,7 +8,8 @@ import re
 import subprocess
 import sys
 
-from .agent import default_config_path, default_data_home, load_agent_config
+from .agent import load_agent_config
+from .runtime_paths import default_config_path, default_data_home
 
 LABELS = {'server': 'com.dotasks.cli.server', 'agent': 'com.dotasks.cli.agent'}
 LEGACY_LABEL = 'local.sanmws.dotasks-helper'

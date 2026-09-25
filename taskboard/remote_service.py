@@ -11,11 +11,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 
-def _default_data_home() -> Path:
-    configured = os.environ.get("DOTASKS_HOME")
-    if configured:
-        return Path(configured).expanduser().resolve()
-    return Path.home() / "Library" / "Application Support" / "DoTasks"
+from .http_client import NoRedirect
+from .runtime_paths import default_config_path
 
 
 class RemoteToolClient:
@@ -36,12 +33,7 @@ class RemoteToolClient:
 
     @classmethod
     def from_environment(cls) -> "RemoteToolClient | None":
-        configured = os.environ.get("DOTASKS_AGENT_CONFIG")
-        path = (
-            Path(configured).expanduser().resolve()
-            if configured
-            else _default_data_home() / "cloud-agent.json"
-        )
+        path = default_config_path()
         if not path.is_file():
             return None
         stored = json.loads(path.read_text(encoding="utf-8"))
@@ -73,10 +65,11 @@ class RemoteToolClient:
         )
         try:
             timeout = 600 if name in {"submit_task_delivery", "review_code"} else 70
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
                 body = response.read()
         except urllib.error.HTTPError as exc:
-            body = exc.read()
+            with exc:
+                body = exc.read()
             try:
                 detail = json.loads(body or b"{}").get("error")
             except (json.JSONDecodeError, AttributeError):

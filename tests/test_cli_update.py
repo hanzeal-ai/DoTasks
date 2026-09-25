@@ -44,14 +44,14 @@ class CLIUpdateTest(unittest.TestCase):
         manifest = {'version': 'v2', 'url': '/downloads/v2.zip', 'sha256': '0' * 64, 'size': 3}
         opener = Mock()
         opener.open.return_value = io.BytesIO(b'bad')
-        with patch('taskboard.cli.read_json', return_value=manifest), patch('urllib.request.build_opener', return_value=opener), patch.object(cli_update, 'extract_release') as extract:
+        with patch('taskboard.cli_update.read_json', return_value=manifest), patch('urllib.request.build_opener', return_value=opener), patch.object(cli_update, 'extract_release') as extract:
             with self.assertRaisesRegex(ValueError, '校验失败'):
                 cli_update.download_release('https://dotasks.test', self.home)
             extract.assert_not_called()
 
     def test_cross_origin_release_is_rejected_before_download(self):
         manifest = {'version': 'v2', 'url': 'https://other.test/code.zip', 'sha256': '0' * 64, 'size': 3}
-        with patch('taskboard.cli.read_json', return_value=manifest), patch('urllib.request.build_opener') as opener:
+        with patch('taskboard.cli_update.read_json', return_value=manifest), patch('urllib.request.build_opener') as opener:
             with self.assertRaises(ValueError):
                 cli_update.download_release('https://dotasks.test', self.home)
             opener.assert_not_called()
@@ -91,7 +91,7 @@ class CLIUpdateTest(unittest.TestCase):
         config = AgentConfig('https://dotasks.test', 'alice', 'x' * 32)
         for board in ({'tasks': [{'active_run_status': 'running'}], 'requirements': []},
                       {'tasks': [], 'requirements': [{'status': 'decomposing'}]}):
-            with patch('taskboard.cli.read_json', return_value={'result': board}):
+            with patch('taskboard.cli_update.read_json', return_value={'result': board}):
                 with self.assertRaisesRegex(RuntimeError, '活动任务'):
                     cli_update.ensure_idle(config)
 

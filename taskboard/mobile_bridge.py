@@ -7,7 +7,9 @@ import sys
 import urllib.request
 from urllib.parse import urlparse
 
-from .remote_service import RemoteToolClient, _default_data_home
+from .http_client import NoRedirect
+from .runtime_paths import default_data_home
+from .remote_service import RemoteToolClient
 
 
 METHODS = {
@@ -27,11 +29,6 @@ def mobile_handlers_for(service):
             for name in METHODS.values() if name != 'identity'}
 
 
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
 class MobileService:
     def __init__(self):
         self.remote = RemoteToolClient.from_environment()
@@ -42,7 +39,7 @@ class MobileService:
                 raise ValueError('Mobile access requires an HTTPS DoTasks origin; update cloud-agent configuration')
         else:
             from core.service import TaskboardService
-            self.local = TaskboardService(_default_data_home())
+            self.local = TaskboardService(default_data_home())
 
     def call(self, action: str, arguments: dict):
         if action == 'identity':

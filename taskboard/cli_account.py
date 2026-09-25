@@ -8,7 +8,8 @@ import subprocess
 import sys
 from urllib.parse import urlparse
 
-from .agent import default_data_home, load_agent_config
+from .agent import load_agent_config
+from .runtime_paths import default_data_home
 
 
 class PasswordStore:

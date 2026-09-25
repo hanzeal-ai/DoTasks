@@ -198,8 +198,14 @@ class CLITest(unittest.TestCase):
         self.assertNotIn('old', self.output.getvalue())
         self.assertEqual(1, cli.main(['logs', '-n', '0']))
 
+    def test_no_arguments_prepare_and_initialize_local_cli(self):
+        with patch('taskboard.cli_distribution.prepare_initialization') as prepare, patch('taskboard.cli_onboarding.initialize') as initialize:
+            self.assertEqual(0, cli.main([]))
+        prepare.assert_called_once()
+        self.assertEqual('init', initialize.call_args.args[0].command)
+
     def test_legacy_server_and_serve_arguments_are_preserved(self):
-        for args, expected in [([], []), (['--port', '9999'], ['--port', '9999']), (['serve', '--port', '9999'], ['--port', '9999'])]:
+        for args, expected in [(['--port', '9999'], ['--port', '9999']), (['serve', '--port', '9999'], ['--port', '9999'])]:
             with patch('taskboard.server.main', side_effect=lambda: self.assertEqual(expected, cli.sys.argv[1:])) as serve:
                 self.assertEqual(0, cli.main(args))
                 serve.assert_called_once()

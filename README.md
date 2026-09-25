@@ -26,7 +26,7 @@
 - CodeGraph、GitNexus 自动探测与受限源码匹配查询计划；
 - React + Vite 本地看板，生产资源构建到 `static/`；
 - DoTasks 页面只保留任务看板、需求看板、Token、设置和调度开关；需求看板集中展示已确认需求及其拆分任务，不再维护项目或聊天会话；
-- 隐藏的 hardened-runtime `DoTasks Helper.app` 提供打包运行时、登录自启和服务保活，不申请 Documents 或完全磁盘访问；
+- 独立 CLI 提供版本化运行时，通过 macOS launchd 管理本地服务与 Agent 的登录自启和保活；
 - 每个执行任务均是 Codex CLI/App Server 工作线程；真实 `threadId` 回写 DoTasks 后用于审计与失败重试，但不会显示为 Codex Desktop 原生侧栏任务；
 - Token预算、上下文数量限制和会话摘要字段；完整历史对话默认不加载；看板分别展示原始 Token 与有效预算 Token，并按阶段展示输入、缓存输入、输出和推理 Token。
 
@@ -58,144 +58,60 @@ taskboard/  HTTP、MCP 与本地集成适配层
 taskboard/cloud/  云端任务控制面、安全入口、WSS 通知与 Obsidian 图谱镜像
 web/        React + Vite 前端源码
 static/     Vite 生成的生产静态资源
-macos/      隐藏 Helper 的 Swift 源码与 Info.plist
+scripts/    开发启动、测试和 CLI 打包入口
 ```
 
 `core/` 不负责页面渲染，`web/` 只通过 `/api` 使用后端能力；任务创建与调度仍由 Python 核心层执行，不依赖 Vite 开发服务器。
 
-## 全新 Mac 安装与首次使用
+## macOS 安装与首次使用
 
-Codex 工作线程、Git/Worktree 和 Helper 运行在 Mac 上；启用云端后，任务数据库、状态机和
-调度器由云端持有，Mac 通过 Local Agent 领取任务并执行。云端不能替代本机 Codex，因此
-一台全新的执行电脑至少需要完成下面五步。
+本地执行目前支持 macOS，需要 Python 3.14+、Git 和已安装的 Codex CLI。
+云端管理任务状态，本机 Agent 执行 Codex 工作线程；Windows 浏览器可访问云端看板，
+但当前 CLI 安装与后台管理尚不支持 Windows。
 
-### 1. 准备运行环境
+在交互式终端运行：
 
-- 安装并登录 Codex 桌面应用，确认同一用户下可以执行 `codex` CLI；
-- 安装 Git、Python 3.14、Node.js 24（包含 npm）和 `uv`；
-- 执行 `xcode-select --install` 安装 Xcode Command Line Tools，Helper 构建需要其中的
-  `/usr/bin/swiftc` 和代码签名工具。
-
-安装后先确认命令实际可用：
-
-```bash
-codex --version
-git --version
-python3 --version
-node --version
-npm --version
-uv --version
-/usr/bin/swiftc --version
+```sh
+curl -fsS https://dotasks.hanzeal.com/install.sh | sh
 ```
 
-`python3` 必须解析到 Python 3.14 或更高版本。临时 shell alias 不会被登录自启的 Helper
-继承；如果机器上有多个 Python，应确保 PATH 中的 `python3` 本身满足版本要求。
+安装器校验版本化运行时、配置 PATH 和两个 launchd 服务，然后自动执行 `dotasks init`。
+按提示完成 Codex 登录并创建 DoTasks 账号；本地服务和云端 Agent 连接通过检查后，
+打开云端看板。安装、离线包、账号恢复及旧 Helper 迁移说明见
+[CLI 注册与共享云端](docs/cli-onboarding.md)。
 
-### 2. 获取源码并安装前端依赖
+已安装用户检查和升级版本：
 
-```bash
-git clone https://github.com/hanzeal-ai/DoTasks.git "$HOME/Documents/DoTasks"
-cd "$HOME/Documents/DoTasks"
+```sh
+dotasks update --check
+dotasks update
+dotasks doctor
+dotasks logs
+```
+
+升级前暂停云端调度并等待活动任务结束。升级保留账号、凭证和任务数据。
+
+## 源码开发与插件
+
+开发前安装 Python 3.14+、Node.js 24、Git、uv 和 Codex CLI，然后运行：
+
+```sh
 npm --prefix web ci
 ./scripts/test
+./scripts/build-cli
 ```
 
-仓库可以放在其他位置，但后续 personal marketplace 必须指向它的真实绝对路径。
+CLI 包输出为 `dist/DoTasksCLI.zip`；解压后使用包中的 `install-cli` 安装。
+安装和启动会改变本机后台服务，应在准备好切换版本后单独执行。
 
-### 3. 将 DoTasks 注册为本地 Codex 插件
-
-Codex 从 personal marketplace 安装本地插件。全新用户先创建目录，并让 marketplace 中的
-`./plugins/dotasks` 指向当前仓库：
-
-```bash
-mkdir -p "$HOME/plugins" "$HOME/.agents/plugins"
-ln -s "$PWD" "$HOME/plugins/dotasks"
-```
-
-然后创建 `~/.agents/plugins/marketplace.json`：
-
-```json
-{
-  "name": "personal",
-  "interface": {
-    "displayName": "Personal"
-  },
-  "plugins": [
-    {
-      "name": "dotasks",
-      "source": {
-        "source": "local",
-        "path": "./plugins/dotasks"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "category": "Productivity"
-    }
-  ]
-}
-```
-
-如果该文件已经存在，不要覆盖；只需把上面的 `dotasks` 对象合并进现有 `plugins` 数组。
-随后安装插件：
-
-```bash
-codex plugin marketplace list
-codex plugin add dotasks@personal
-```
-
-Codex 官方的本地插件和 marketplace 说明见
-[Package your plugin](https://developers.openai.com/plugins/build/plugins)。
-
-### 4. 安装并启动本地 Helper
-
-```bash
-./scripts/build-helper --install
-curl -fsS http://127.0.0.1:8765/api/health
-```
-
-安装命令会构建 Web 静态资源、打包 Helper，并注册当前 macOS 用户的 LaunchAgent。以后登录
-系统时，本地服务会自动恢复，不需要长期打开终端。Helper 和运行数据位于：
-
-```text
-~/Library/Application Support/DoTasks/
-```
-
-看板地址为 <http://127.0.0.1:8765>。健康接口应返回包含 `"ok": true` 的 JSON。
-
-### 5. 在 Codex 中首次使用
-
-1. 完全退出并重新打开 Codex，或至少新建一个 Codex 任务，使新安装的 Skill 和 MCP 生效；
-2. 打开一个本机存在、且当前用户和 Codex 都有权限访问的 Git 项目；
-3. 显式输入 `$dotasks` 或提及 DoTasks 创建需求，也可以输入“打开任务看板”；
-4. 首次数据库默认暂停调度，在看板右上角点击“恢复调度”后再执行队列。
-
-不使用云端时，到这里即可完整使用本地模式。若已有云端服务，再按下方“云端部署与本地
-Agent”配置连接；配置后以云端数据为准，网络中断期间已有云端任务会等待 Agent 重连。
-
-### 更新已有安装
-
-源码更新后执行：
-
-```bash
-git pull
-npm --prefix web ci
-./scripts/full-update
-```
-
-该命令会测试源码、重新安装 Helper 和插件，并检查源码、插件缓存与打包运行时是否一致。
-更新完成后新建一个 Codex 任务。服务异常时优先检查：
-
-```bash
-curl -fsS http://127.0.0.1:8765/api/health
-tail -n 100 "$HOME/Library/Application Support/DoTasks/logs/server.err.log"
-tail -n 100 "$HOME/Library/Application Support/DoTasks/logs/agent.err.log"
-```
+仓库的 `.codex-plugin/`、`skills/` 和 `.mcp.json` 提供显式 DoTasks Skill 与 MCP。
+将仓库按 Codex 本地插件约定注册到 personal marketplace 后，可运行
+`codex plugin add dotasks@personal` 安装；插件源码更新后需重新安装，并新建 Codex
+会话加载新版本。插件安装和 CLI 运行时升级是两个独立操作。
 
 ## 源码开发启动
 
-不安装 Helper 时，可以直接从仓库启动本地服务：
+可以直接从仓库启动本地服务：
 
 ```bash
 ./scripts/start
@@ -211,7 +127,7 @@ npm --prefix web run dev
 
 打开：<http://127.0.0.1:5173>
 
-生产静态资源由以下命令生成到 `static/`；`build-helper` 会自动执行同一构建：
+生产静态资源由以下命令生成到 `static/`；`build-cli` 会自动执行同一构建：
 
 ```bash
 npm --prefix web run build
@@ -408,37 +324,12 @@ skills/dotasks-lifecycle/SKILL.md
 
 Local Agent 生成的需求拆解、执行、返工和 Code Review 提示均为自包含阶段契约，不再附加或调用 lifecycle Skill；Prompt 直接给出实体 ID、运行 ID、允许的完成工具和回调要求。Agent 会等待已绑定的 CLI 工作线程结束并复核持久化 Dispatch；若线程已经结束却没有提交生命周期回调，会中断未提交的 Run 并按现有重试策略恢复，而不是让任务永久停留在执行或 Code Review 状态。
 
-插件只提供 Skill、MCP 与会话工具，不再向 Codex 左侧面板注入入口。生产方式使用隐藏的签名 Helper 启动 DoTasks 服务：
+插件提供 Skill、MCP 与会话工具。独立 CLI 通过 launchd 保活 HTTP 服务和 Local Agent；
+Agent 收到执行事件后为任务启动 Codex App Server 子进程。项目路径必须为存在的绝对目录，
+实际访问受当前用户文件权限、macOS TCC 和 Codex 工作区边界约束。
 
-```bash
-./scripts/build-helper --install
-```
-
-Helper 安装在：
-
-```text
-~/Library/Application Support/DoTasks/DoTasks Helper.app
-```
-
-它设置了 `LSUIElement`，不会出现在 Dock 或 Codex 左侧面板。Helper 负责提供打包运行时，并保活 DoTasks HTTP 服务和 Local Agent；启动时不会弹出项目文件夹选择窗口，也不维护逐项目 allowlist。
-
-安装脚本同时创建用户级 LaunchAgent；登录后会自动恢复 Helper、DoTasks HTTP 服务和 Local Agent。Local Agent 仅在收到执行事件时为相应任务启动 Codex App Server 子进程。项目路径仍必须是存在的合法绝对目录；实际访问能力由当前用户的文件系统权限、macOS TCC 与 Codex 工作区边界共同约束。服务仍只监听：
-
-```text
-http://127.0.0.1:8765
-```
-
-开发时仍可直接运行 `./scripts/start`。插件 MCP 与打包态 HTTP 服务使用同一个 `DOTASKS_HOME` 数据目录和项目路径基础校验，不依赖 Helper 应用环境或逐项目授权状态。
-
-源码修改完成后统一执行一次全量更新，避免源码、已安装插件缓存和 Helper 运行时版本不一致：
-
-```bash
-./scripts/full-update
-```
-
-该命令依次运行完整测试、构建并安装 Helper、重启 HTTP 服务、更新插件 cachebuster、重新安装 personal marketplace 插件，并校验源码、插件缓存与打包运行时一致。更新完成后使用新的 Codex 任务加载最新 Skill 和 MCP 工具。
-
-默认构建使用 ad-hoc 签名和 hardened runtime；如有长期稳定的 macOS 代码签名证书，可通过 `DOTASKS_CODESIGN_IDENTITY` 指定签名身份后重新安装。
+本地看板默认监听 `http://127.0.0.1:8765`。开发入口为 `./scripts/start`，
+插件 MCP 与 CLI 服务通过相同的 `DOTASKS_HOME` 使用运行数据和项目路径校验。
 
 ## Workflow
 
@@ -458,7 +349,7 @@ development -> code_review -> done
 
 ### Python runtime and dependency contract
 
-开发、Code Review、Helper 和云端镜像统一使用 `.python-version` 与
+开发、Code Review、CLI 和云端镜像统一使用 `.python-version` 与
 `pyproject.toml` 声明的 Python 3.14 运行时。项目目前没有第三方 Python 运行依赖，
 因此不携带旧版本标准库兼容层或独立 `vendor` 目录。
 
@@ -470,7 +361,7 @@ development -> code_review -> done
 
 升级 Python 时，必须同时更新 `.python-version`、`pyproject.toml`、Docker 基础镜像
 及 `tests/test_dependency_contract.py`，然后通过 `./scripts/test` 与
-`./scripts/build-helper` 验证。其他独立校验：
+`./scripts/build-cli` 验证。其他独立校验：
 
 ```bash
 CODEX_SYSTEM_SKILLS="${CODEX_HOME:-$HOME/.codex}/skills/.system"

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .app_server import CodexAppServerClient
 from .mobile_bridge import MobileService
-from .remote_service import _default_data_home
+from .runtime_paths import default_data_home
 
 
 def rollout_usage(path: str | None) -> dict[str, int]:
@@ -166,7 +166,7 @@ def run():
             # and executes each message synchronously. Recover lost claim replies.
             message = claim_message(service, worker_id, socket.gethostname())
             if message:
-                client = CodexAppServerClient(_default_data_home(), Path(__file__).resolve().parents[1])
+                client = CodexAppServerClient(default_data_home(), Path(__file__).resolve().parents[1])
                 execute_message(service, message, client, stop)
                 continue
         except Exception:
@@ -181,7 +181,7 @@ def run():
 
 
 def main():
-    directory = _default_data_home()
+    directory = default_data_home()
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / 'mobile-worker.lock').open('a+') as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

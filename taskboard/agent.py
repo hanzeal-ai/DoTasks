@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from .http_client import NoRedirect
+from .runtime_paths import default_data_home, default_config_path
 from .local_executor import LocalCodexExecutor
 from .codex_projects import discover_codex_projects
 from .remote_service import RemoteTaskboardService, RemoteToolClient
@@ -59,22 +61,6 @@ class AgentConfig:
             return Path(self.vault).expanduser().resolve()
         home = Path(self.data_home).expanduser().resolve()
         return home / "data" / "obsidian-vault"
-
-
-def default_data_home() -> Path:
-    configured = os.environ.get("DOTASKS_HOME")
-    if configured:
-        return Path(configured).expanduser().resolve()
-    return Path.home() / "Library" / "Application Support" / "DoTasks"
-
-
-def default_config_path() -> Path:
-    configured = os.environ.get("DOTASKS_AGENT_CONFIG")
-    return (
-        Path(configured).expanduser().resolve()
-        if configured
-        else default_data_home() / "cloud-agent.json"
-    )
 
 
 def load_agent_config(path: Path | None = None) -> AgentConfig:
@@ -187,7 +173,7 @@ class RelayAgent:
             },
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=35) as response:
+        with urllib.request.build_opener(NoRedirect()).open(request, timeout=35) as response:
             body = response.read()
         result = json.loads(body or b"{}")
         if not isinstance(result, dict):

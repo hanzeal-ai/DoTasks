@@ -43,7 +43,7 @@ class OnboardingTest(unittest.TestCase):
         return [self.response, {'ok': True}, {'agent_id': 'a' * 32, 'connected': True, 'dispatcher_enabled': True}]
 
     def test_init_registers_saves_only_device_credentials_and_starts_automatically(self):
-        with patch('taskboard.cli_onboarding.getpass.getpass', return_value=self.password), patch('taskboard.cli.read_json', side_effect=self.responses()) as http:
+        with patch('taskboard.cli_onboarding.getpass.getpass', return_value=self.password), patch('taskboard.cli_onboarding.read_json', side_effect=self.responses()) as http:
             self.assertEqual(0, cli.main(self.args))
         self.assertEqual(cli_onboarding.DEFAULT_CLOUD_URL + '/api/cli/init', http.call_args_list[0].args[0])
         self.start.assert_called_once()
@@ -59,18 +59,18 @@ class OnboardingTest(unittest.TestCase):
         self.assertNotIn(self.response['agent_token'], self.output.getvalue())
 
     def test_retry_after_lost_response_reuses_device_id(self):
-        with patch('taskboard.cli_onboarding.getpass.getpass', return_value=self.password), patch('taskboard.cli.read_json', side_effect=OSError('offline')) as http:
+        with patch('taskboard.cli_onboarding.getpass.getpass', return_value=self.password), patch('taskboard.cli_onboarding.read_json', side_effect=OSError('offline')) as http:
             self.assertEqual(1, cli.main(self.args))
         initial_id = http.call_args.args[1]['device_id']
         self.start.assert_not_called()
-        with patch('taskboard.cli_onboarding.getpass.getpass', return_value=self.password), patch('taskboard.cli.read_json', side_effect=self.responses()) as http:
+        with patch('taskboard.cli_onboarding.getpass.getpass', return_value=self.password), patch('taskboard.cli_onboarding.read_json', side_effect=self.responses()) as http:
             self.assertEqual(0, cli.main(self.args))
         self.assertEqual(initial_id, http.call_args_list[0].args[1]['device_id'])
 
     def test_completed_init_does_not_register_again_or_prompt_for_password(self):
-        with patch('taskboard.cli_onboarding.getpass.getpass', return_value=self.password), patch('taskboard.cli.read_json', side_effect=self.responses()):
+        with patch('taskboard.cli_onboarding.getpass.getpass', return_value=self.password), patch('taskboard.cli_onboarding.read_json', side_effect=self.responses()):
             self.assertEqual(0, cli.main(self.args))
-        with patch('taskboard.cli_onboarding.getpass.getpass') as prompt, patch('taskboard.cli.read_json', side_effect=self.responses()[1:]) as http:
+        with patch('taskboard.cli_onboarding.getpass.getpass') as prompt, patch('taskboard.cli_onboarding.read_json', side_effect=self.responses()[1:]) as http:
             self.assertEqual(0, cli.main(self.args))
         prompt.assert_not_called()
         self.assertFalse(any('/api/cli/init' in call.args[0] for call in http.call_args_list))
@@ -84,10 +84,10 @@ class OnboardingTest(unittest.TestCase):
         self.start.assert_not_called()
 
     def test_password_mismatch_and_unconnected_agent_do_not_claim_ready(self):
-        with patch('taskboard.cli_onboarding.getpass.getpass', side_effect=[self.password, 'different']), patch('taskboard.cli.read_json') as http:
+        with patch('taskboard.cli_onboarding.getpass.getpass', side_effect=[self.password, 'different']), patch('taskboard.cli_onboarding.read_json') as http:
             self.assertEqual(1, cli.main(self.args))
             http.assert_not_called()
-        with patch('taskboard.cli_onboarding.getpass.getpass', return_value=self.password), patch('taskboard.cli.read_json', return_value=self.response), patch('taskboard.cli_onboarding.time.monotonic', side_effect=[0, 31]):
+        with patch('taskboard.cli_onboarding.getpass.getpass', return_value=self.password), patch('taskboard.cli_onboarding.read_json', return_value=self.response), patch('taskboard.cli_onboarding.time.monotonic', side_effect=[0, 31]):
             self.assertEqual(1, cli.main(self.args))
         self.assertNotIn('初始化完成', self.output.getvalue())
         self.assertIn('凭证已保存', self.errors.getvalue())
@@ -96,7 +96,7 @@ class OnboardingTest(unittest.TestCase):
 
     def test_keychain_failure_keeps_registration_and_prints_password_on_success(self):
         self.store.save.side_effect = RuntimeError('locked')
-        with patch('taskboard.cli_onboarding.getpass.getpass', return_value=self.password), patch('taskboard.cli.read_json', side_effect=self.responses()):
+        with patch('taskboard.cli_onboarding.getpass.getpass', return_value=self.password), patch('taskboard.cli_onboarding.read_json', side_effect=self.responses()):
             self.assertEqual(0, cli.main(self.args))
         self.assertIn('密码未能保存到钥匙串', self.output.getvalue())
         self.assertIn('密码：' + self.password, self.output.getvalue())

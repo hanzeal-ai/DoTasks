@@ -9,7 +9,6 @@ data/*.db-wal
 .DS_Store
 dist/
 e2e-workspaces/
-Taskboard Helper.app/
 web/node_modules/
 services/laya-dotasks-decision/models/
 services/laya-dotasks-decision/secrets/

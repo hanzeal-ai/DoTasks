@@ -11,7 +11,7 @@ import urllib.request
 import urllib.error
 from urllib.parse import urlsplit
 
-from .decision_client import NoRedirect
+from .http_client import NoRedirect
 from .local_executor import LocalCodexExecutor
 from .remote_service import RemoteTaskboardService, RemoteToolClient
 from .team_local import ReadOnlyAnalysisClient, save_json, verify_mapping, task_workspace, attachment_inputs
@@ -44,6 +44,7 @@ class TeamClient(RemoteToolClient):
             with urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect()).open(request,timeout=600) as response:
                 body=response.read(8*1024*1024+1)
         except urllib.error.HTTPError as exc:
+            exc.close()
             raise TeamRequestError(exc.code) from exc
         if len(body)>8*1024*1024:
             raise ValueError('Team response too large')

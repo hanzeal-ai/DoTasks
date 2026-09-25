@@ -15,7 +15,7 @@ from core.workflow import workflow_metadata
 
 from .codex_projects import discover_codex_projects
 from .config import LOCAL_MODE, ServerConfig
-from .http_base import BaseDoTasksHandler, MAX_JSON_BODY_BYTES
+from .http_base import BaseDoTasksHandler
 from .version import VERSION
 from .web_auth import WebSessions
 

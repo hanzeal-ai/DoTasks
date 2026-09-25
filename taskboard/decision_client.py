@@ -14,13 +14,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .http_client import NoRedirect
+
+
 LOG = logging.getLogger(__name__)
 CATEGORIES = {"environment", "project", "implementation", "unknown"}
-
-
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise ValueError("Decision endpoint redirects are not allowed")
 
 
 def probability(value: Any) -> float:

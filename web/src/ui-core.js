@@ -28,24 +28,6 @@ export async function routeDelegatedEvent(event, handlers) {
   return false;
 }
 
-export class LatestRequest {
-  constructor() {
-    this.sequence = 0;
-  }
-
-  begin(scope) {
-    return {id: ++this.sequence, scope};
-  }
-
-  invalidate() {
-    this.sequence += 1;
-  }
-
-  isCurrent(ticket, scope) {
-    return ticket.id === this.sequence && ticket.scope === scope;
-  }
-}
-
 export function escapeHtml(value = "") {
   return String(value).replace(/[&<>'"]/g, character => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[character]));
 }
@@ -53,16 +35,6 @@ export function escapeHtml(value = "") {
 export function projectLabel(project) {
   const normalized = String(project || "").replace(/[\\/]+$/, "");
   return normalized.split(/[\\/]/).filter(Boolean).pop() || normalized;
-}
-
-export function relativeTime(timestamp) {
-  const value = Number(timestamp || 0) * 1000;
-  if (!value) return "";
-  const seconds = Math.max(0, Math.round((Date.now() - value) / 1000));
-  if (seconds < 60) return "刚刚";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
-  return `${Math.floor(seconds / 86400)} 天前`;
 }
 
 export function timestampValue(timestamp) {
@@ -178,13 +150,6 @@ export function formatMetricTokenCount(value) {
 
 export function formatCompactTokenCount(value) {
   return new Intl.NumberFormat("zh-CN", {notation:"compact", maximumFractionDigits:1}).format(Math.max(0, Number(value) || 0));
-}
-
-export function expandDoTasksSlashCommand(value) {
-  const message = String(value || "").trim();
-  const match = message.match(/^\/dotasks(?:\s+([\s\S]*))?$/i);
-  if (!match) return message;
-  return `$dotasks${match[1] ? `\n\n${match[1].trim()}` : ""}`;
 }
 
 export function taskNeedsAttention(task, attentionStatuses, autoDispatchStatuses) {

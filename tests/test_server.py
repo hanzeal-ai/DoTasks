@@ -9,7 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from taskboard.server import MAX_JSON_BODY_BYTES, build_server
+from taskboard.server import build_server
+from taskboard.http_base import MAX_JSON_BODY_BYTES
 
 
 class TaskboardHTTPServerTest(unittest.TestCase):

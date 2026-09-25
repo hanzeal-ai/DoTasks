@@ -5,24 +5,17 @@ import argparse
 from collections import deque
 import getpass
 import json
-import os
 from pathlib import Path
-import plistlib
-import re
 import subprocess
 import sys
-import urllib.request
 
-from .agent import AgentConfig, default_config_path, default_data_home, load_agent_config, save_agent_config
+from .agent import AgentConfig, load_agent_config, save_agent_config
+from .runtime_paths import default_config_path, default_data_home
 from .app_server import CodexAppServerClient
 from core.workflow import ACTIVE_RUN_STATUSES
 
 from .cli_service import BackgroundService
-
-
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+from .http_client import read_json
 
 
 def configure(args: argparse.Namespace) -> None:
@@ -45,18 +38,6 @@ def configure(args: argparse.Namespace) -> None:
     )
     print(f"配置已保存：{save_agent_config(config)}")
     print("已有配置项会保留。若后台正在运行，执行 dotasks stop 后再执行 dotasks start 使新配置生效。")
-
-
-def read_json(url: str, payload: dict | None = None, token: str = "") -> dict:
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(url, data=json.dumps(payload).encode() if payload is not None else None, headers=headers)
-    with urllib.request.build_opener(NoRedirect()).open(request, timeout=5) as response:
-        result = json.load(response)
-    if not isinstance(result, dict):
-        raise ValueError("服务返回了无效响应")
-    return result
 
 
 def status(*, doctor: bool = False) -> int:
@@ -133,8 +114,10 @@ def logs(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        argv = ['init']
     # Keep existing consumers of the original server entry point working.
-    if not argv or argv[0] == "serve" or (argv[0].startswith("-") and argv[0] not in {"-h", "--help"}):
+    if argv[0] == "serve" or (argv[0].startswith("-") and argv[0] not in {"-h", "--help"}):
         from .server import main as serve
         previous = sys.argv
         try:
@@ -172,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "init":
             from .cli_onboarding import initialize
+            from .cli_distribution import prepare_initialization
+            prepare_initialization()
             initialize(args)
         elif args.command == "account":
             from .cli_account import show_account

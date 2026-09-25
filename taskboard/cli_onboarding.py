@@ -13,9 +13,12 @@ import urllib.error
 from urllib.parse import urlparse
 import uuid
 
-from .agent import AgentConfig, default_config_path, default_data_home, load_agent_config
+from .agent import AgentConfig, load_agent_config
+from .runtime_paths import default_config_path, default_data_home
 from .app_server import CodexAppServerClient
 from .cli_account import PasswordStore, show_account, open_cloud
+from .http_client import read_json
+from .cli_service import BackgroundService
 
 DEFAULT_CLOUD_URL = 'https://dotasks.hanzeal.com'
 
@@ -50,8 +53,6 @@ def ensure_codex_login() -> None:
 
 
 def initialize(args) -> None:
-    from .cli import BackgroundService, read_json
-
     display_password = None
     service = BackgroundService()
     service.validate_installation()

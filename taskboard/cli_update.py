@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
-import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
@@ -13,20 +11,23 @@ import urllib.request
 from urllib.parse import urljoin, urlparse
 import zipfile
 
-from .agent import default_data_home, default_config_path, load_agent_config
+from .agent import load_agent_config
+from .runtime_paths import default_data_home, default_config_path
 from .cli_install import activate, install, validate_runtime
 from .cli_service import BackgroundService, LABELS
+from .http_client import NoRedirect, read_json
 from .cli_onboarding import DEFAULT_CLOUD_URL
 
-MAX_ARCHIVE = 50 * 1024 * 1024
-MAX_EXPANDED = 150 * 1024 * 1024
+MAX_ARCHIVE = 150 * 1024 * 1024
+MAX_EXPANDED = 600 * 1024 * 1024
 
 
 def download_release(cloud: str, directory: Path) -> tuple[dict, Path]:
-    from .cli import NoRedirect, read_json
     if urlparse(cloud).scheme != 'https':
         raise ValueError('升级地址必须使用 HTTPS。')
-    manifest = read_json(cloud + '/downloads/cli/latest.json')
+    from .cli_distribution import runtime_root, platform_key
+    endpoint = 'latest-' + platform_key() + '.json' if (runtime_root() / 'python/bin/python3').is_file() else 'latest.json'
+    manifest = read_json(cloud + '/downloads/cli/' + endpoint)
     if not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', str(manifest.get('version', ''))) or not re.fullmatch(r'[0-9a-f]{64}', str(manifest.get('sha256', ''))):
         raise ValueError('Invalid release manifest')
     size = manifest.get('size')
@@ -68,11 +69,14 @@ def extract_release(archive: Path, destination: Path) -> Path:
                 raise ValueError('Unsafe release archive member')
             seen.add(entry.filename)
         package.extractall(destination)
+        for entry in entries:
+            target = destination / entry.filename
+            if target.is_file():
+                target.chmod(0o755 if (entry.external_attr >> 16) & 0o111 else 0o644)
     return destination / 'DoTasksCLI/runtime'
 
 
 def ensure_idle(config):
-    from .cli import read_json
     from core.workflow import ACTIVE_RUN_STATUSES
     board = read_json(config.cloud_url + '/_agent/v1/tools/call', {
         'agent_id': config.agent_id, 'name': 'list_board', 'arguments': {},
@@ -82,7 +86,6 @@ def ensure_idle(config):
 
 
 def wait_ready(service, config):
-    from .cli import read_json
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         try:
@@ -131,6 +134,10 @@ def apply_update(runtime: Path, service: BackgroundService):
 
 
 def update(*, check_only=False):
+    from .cli_distribution import homebrew_runtime
+    if homebrew_runtime() is not None:
+        print('此版本由 Homebrew 管理。任务空闲时运行 dotasks stop，然后 brew upgrade dotasks，最后 dotasks init。')
+        return
     service = BackgroundService()
     service.validate_installation()
     root = default_data_home() / 'cli'

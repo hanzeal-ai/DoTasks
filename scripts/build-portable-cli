@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$SCRIPT_DIR/.."
+# Build-time tooling only; users receive the complete relocatable interpreter.
+uv python install 3.14.4 --no-bin
+PYTHON_BIN=$(uv python find --managed-python 3.14.4)
+PYTHON_ROOT=$("$PYTHON_BIN" -c 'import sys; print(sys.base_prefix)')
+npm --prefix web run build
+exec "$PYTHON_BIN" -B scripts/package-cli.py --python-runtime "$PYTHON_ROOT"
