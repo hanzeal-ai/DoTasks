@@ -28,7 +28,11 @@ def source_url(value):
         raise ValueError('来源地址须为不含账号、密码或片段的公网 HTTPS 地址（443 端口）')
     if any(key.lower() in {'token', 'access_token', 'authorization', 'api_key', 'cursor'} for key, _ in parse_qsl(parsed.query)):
         raise ValueError('请使用完整授权地址，查询参数中不应包含令牌或分页游标')
-    return urlunsplit(('https', parsed.hostname.encode('idna').decode().lower(), parsed.path or '/', parsed.query, ''))
+    try:
+        hostname = parsed.hostname.encode('idna').decode().lower()
+    except UnicodeError:
+        raise ValueError('来源地址无效') from None
+    return urlunsplit(('https', hostname, parsed.path or '/', parsed.query, ''))
 
 
 

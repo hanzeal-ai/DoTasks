@@ -8,6 +8,8 @@ from taskboard.cloud.task_source import authorization_address, source_url, fetch
 class FeedTransportTests(unittest.TestCase):
     def test_authorization_fragment_is_separated_and_urls_are_restricted(self):
         self.assertEqual(authorization_address('https://feed.example/items#token=secret'),('https://feed.example/items','secret'))
+        with self.assertRaisesRegex(ValueError,'来源地址无效'):
+            source_url('https://\ud800.example')
         for value in ['http://example.com','https://u:p@example.com','https://example.com:444','https://example.com/?token=secret','https://example.com/#bad=value']:
             with self.assertRaises(ValueError):authorization_address(value)
         for ip in ['127.0.0.1','10.0.0.1','169.254.169.254','::1','::ffff:127.0.0.1']:
@@ -128,6 +130,15 @@ class TaskSourceHTTPTests(unittest.TestCase):
         response=self.request('POST',base+'/save-task-source',{**payload,'url':'https://other.example/items','version':1,'request_id':'no-token'},**headers)
         self.assertEqual(response[0],400,response)
         with self.assertRaises(ValueError):fetch_source('https://feed.example/items')
+
+    def test_malformed_unicode_hostname_is_rejected_without_changing_source(self):
+        alice,bob,headers,cb,team,project,base,payload,pull=self.setup_source()
+        response=self.request('POST',base+'/save-task-source',
+            {**payload,'url':'https://'+'a'*64+'.example/items#token=secret','version':1,'request_id':'invalid-host'},**headers)
+        self.assertEqual(response[0],400,response)
+        self.assertIn('来源地址无效',json.dumps(response[2],ensure_ascii=False))
+        board=self.request('GET',base,Cookie=headers['Cookie'])[2]
+        self.assertEqual(board['task_sources'][0]['version'],1)
 
     def test_import_failure_rolls_back_whole_batch_and_source_ledger(self):
         alice,bob,headers,cb,team,project,base,payload,pull=self.setup_source()
