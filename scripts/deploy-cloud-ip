@@ -254,6 +254,15 @@ services:
   dotasks:
     image: ${DOTASKS_IMAGE:?set DOTASKS_IMAGE}
     restart: unless-stopped
+    mem_limit: 256m
+    mem_reservation: 64m
+    cpu_shares: 1024
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     environment:
       DOTASKS_MODE: cloud
       DOTASKS_HOST: 0.0.0.0

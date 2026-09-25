@@ -19,3 +19,6 @@
 .team-question {margin:12px 0;background:var(--muted,#f7f8fa)}.team-original {white-space:pre-wrap}.team-empty {padding:48px;text-align:center}
 .team-notice {padding:12px 0;border-bottom:1px solid var(--border,#dce1e7)}
 @media(max-width:640px){.team-shell main{padding:12px}.team-header{gap:12px;padding:12px}.team-header h1{font-size:18px}.team-panel{padding:14px}}
+
+.team-form .team-source-toggle { display: flex; align-items: center; gap: 8px; }
+.team-form .team-source-toggle input { width: auto; }

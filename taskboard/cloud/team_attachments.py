@@ -7,27 +7,43 @@ import uuid
 from .team_directory import denied, required_text
 
 
+ATTACHMENT_POLICY = {
+    'max_count': 4,
+    'max_file_bytes': 2 * 1024 * 1024,
+    'max_total_bytes': 4 * 1024 * 1024,
+    'max_text_bytes': 256 * 1024,
+    'mime_types': ['image/png', 'image/jpeg', 'text/plain', 'text/markdown'],
+}
+UPLOAD_BODY_LIMIT = 6 * 1024 * 1024
+
+
 def decode_attachments(items):
-    if not isinstance(items,list) or len(items)>4:
+    if not isinstance(items,list) or len(items)>ATTACHMENT_POLICY['max_count']:
         raise ValueError('每份需求最多上传 4 个附件')
     result=[]
+    total_bytes=0
     for item in items:
         if not isinstance(item,dict):
             raise ValueError('附件格式无效')
         name=required_text(item.get('name'),'附件名称',120)
-        encoded=required_text(item.get('content_base64'),'附件内容',180000)
+        encoded=required_text(item.get('content_base64'),'附件内容',4*((ATTACHMENT_POLICY['max_file_bytes']+2)//3))
         try:
             content=base64.b64decode(encoded,validate=True)
         except (ValueError,binascii.Error):
             raise ValueError('附件编码无效') from None
-        if not content or len(content)>128*1024:
-            raise ValueError('每个附件最大 128 KiB')
+        if not content or len(content)>ATTACHMENT_POLICY['max_file_bytes']:
+            raise ValueError('每个附件需为 1 字节至 2 MiB')
+        total_bytes += len(content)
+        if total_bytes > ATTACHMENT_POLICY['max_total_bytes']:
+            raise ValueError('附件合计最大 4 MiB')
         mime=item.get('mime')
         if mime=='image/png' and content.startswith(b'\x89PNG\r\n\x1a\n'):
             pass
         elif mime=='image/jpeg' and content.startswith(b'\xff\xd8\xff'):
             pass
         elif mime in {'text/plain','text/markdown'}:
+            if len(content) > ATTACHMENT_POLICY['max_text_bytes']:
+                raise ValueError('文本附件最大 256 KiB，请按需求拆分')
             try:
                 text=content.decode('utf-8')
             except UnicodeDecodeError:

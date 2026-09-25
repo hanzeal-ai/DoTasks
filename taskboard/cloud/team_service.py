@@ -20,7 +20,8 @@ from .team_directory import denied, required_text, dump, version
 from .team_execution import TeamExecutionMixin
 from .team_workspace import TeamWorkspaceMixin
 from .team_changes import TeamChangesMixin
-from .team_attachments import TeamAttachmentsMixin, decode_attachments
+from .task_source import TaskSourceMixin
+from .team_attachments import TeamAttachmentsMixin, decode_attachments, ATTACHMENT_POLICY
 
 
 def strings(value, name, *, nonempty=False):
@@ -64,7 +65,7 @@ def modules(value):
     return result
 
 
-class TeamService(TeamAttachmentsMixin, TeamChangesMixin, TeamExecutionMixin, TeamWorkspaceMixin, CloudTaskboardService):
+class TeamService(TaskSourceMixin, TeamAttachmentsMixin, TeamChangesMixin, TeamExecutionMixin, TeamWorkspaceMixin, CloudTaskboardService):
     def __init__(self, home, public_url, team_id, directory):
         super().__init__(home, public_url)
         self.team_id, self.directory, self.actor = team_id, directory, ''
@@ -133,6 +134,7 @@ class TeamService(TeamAttachmentsMixin, TeamChangesMixin, TeamExecutionMixin, Te
             projects = [dict(r) for r in db.execute('''SELECT p.*, g.modules, g.capacity, g.auto_analysis, g.token_budget
                 FROM team_projects p JOIN team_project_members g ON g.project_id=p.id WHERE g.account_id=?''', (self.actor,))]
             allowed = {p['id'] for p in projects}
+            sources = self.task_sources(db, allowed)
             reqs = [self.requirement(r['requirement_id'], db) for r in db.execute('SELECT * FROM team_requirements') if r['project_id'] in allowed]
             req_ids = {r['id'] for r in reqs}
             for req in reqs:
@@ -156,7 +158,7 @@ class TeamService(TeamAttachmentsMixin, TeamChangesMixin, TeamExecutionMixin, Te
             jobs = [{k: r[k] for k in ('id','requirement_id','task_id','actor_id','kind','version','status','thread_id','result','error')}
                     for r in db.execute('SELECT * FROM team_jobs ORDER BY created_at') if r['requirement_id'] in req_ids]
             notifications = [dict(r) for r in db.execute('SELECT * FROM team_notifications WHERE account_id=? ORDER BY created_at DESC', (self.actor,)) if r['requirement_id'] in req_ids]
-        return {'team_id': self.team_id, 'actor_id': self.actor, 'role': self.role(), 'projects': projects,
+        return {'task_sources': sources, 'attachment_policy': ATTACHMENT_POLICY, 'team_id': self.team_id, 'actor_id': self.actor, 'role': self.role(), 'projects': projects,
                 'members': self.directory.members(self.team_id, self.actor), 'requirements': reqs,
                 'tasks': tasks, 'questions': questions, 'jobs': jobs, 'notifications': notifications}
 
@@ -220,10 +222,10 @@ class TeamService(TeamAttachmentsMixin, TeamChangesMixin, TeamExecutionMixin, Te
         return {'ok': True}
 
     def upload_requirement(self, p):
-        attachments=decode_attachments(p.get('attachments',[]))
         if self.role() not in {'admin','product'}:
             denied()
         project = self.project(p.get('project_id'))
+        attachments=decode_attachments(p.get('attachments',[]))
         title, content = required_text(p.get('title'), '标题', 120), required_text(p.get('content'), '需求原文', 30000)
         coordinator = p.get('coordinator_id')
         if self.directory.role(self.team_id, coordinator) not in {'admin','developer','coordinator'}:
@@ -232,8 +234,8 @@ class TeamService(TeamAttachmentsMixin, TeamChangesMixin, TeamExecutionMixin, Te
             if not db.execute('SELECT 1 FROM team_project_members WHERE project_id=? AND account_id=?', (project['id'],coordinator)).fetchone():
                 denied()
             rid = self.db.next_id(db, 'REQ')
-            db.execute('''INSERT INTO requirements(id,title,original_content,goal,project,status,source_type,auto_dispatch)
-                VALUES(?,?,?,?,?,'draft','team',0)''', (rid,title,content,content,'/teams/'+self.team_id+'/'+project['id']))
+            db.execute('''INSERT INTO requirements(id,title,original_content,goal,project,status,source_type,source_reference,auto_dispatch)
+                VALUES(?,?,?,?,?,'draft','team',?,0)''', (rid,title,content,content,'/teams/'+self.team_id+'/'+project['id'],None))
             db.execute('INSERT INTO team_requirements(requirement_id,project_id,product_id,coordinator_id) VALUES(?,?,?,?)', (rid,project['id'],self.actor,coordinator))
             for attachment in attachments:
                 db.execute('INSERT INTO team_attachments VALUES(?,?,?,?,?,?)',(attachment['id'],rid,attachment['name'],attachment['mime'],attachment['sha256'],attachment['content']))

@@ -1,3 +1,4 @@
+import { TaskSources } from './TaskSources';
 import { useEffect, useState, useRef } from 'react';
 import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';
@@ -6,6 +7,7 @@ import { NativeSelect } from './components/ui/native-select';
 import { AccountMenu } from './components/account-menu';
 import { requestJson } from './ui-core';
 import './team.css';
+import { subscribeTeamBoard } from './team-board-sync';
 
 const parse = (value, fallback = []) => { try { return typeof value === 'string' ? JSON.parse(value) : value ?? fallback; } catch { return fallback; } };
 const lines = value => value.split('\n').map(x => x.trim()).filter(Boolean);
@@ -34,16 +36,29 @@ function Recovery({job,mutate,busy}) {
   </Form></details>;
 }
 function RequirementUpload({board,mutate,busy}) {
-  const [attachments,setAttachments]=useState([]),[error,setError]=useState('');
+  const [attachments,setAttachments]=useState([]),[error,setError]=useState(''),[reading,setReading]=useState(false);
+  const selection = useRef(0);
+  const policy = board.attachment_policy;
   async function select(event){
+    const current = ++selection.current;
+    setReading(true); setError(''); setAttachments([]);
     try {
-      const files=Array.from(event.target.files);if(files.length>4 || files.some(f=>f.size>128*1024))throw new Error('最多 4 个附件，每个不超过 128 KiB');
-      const results=await Promise.all(files.map(file=>new Promise((resolve,reject)=>{const reader=new FileReader();reader.onerror=reject;reader.onload=()=>resolve({name:file.name,mime:file.name.endsWith('.md')?'text/markdown':file.type || 'text/plain',content_base64:String(reader.result).split(',')[1]});reader.readAsDataURL(file);})));setAttachments(results);setError('');
-    }catch(e){setAttachments([]);setError(e.message || '附件读取失败');}
+      if (!policy) throw new Error('服务暂未提供附件限制，请刷新后重试');
+      const files=Array.from(event.target.files);
+      if (files.length>policy.max_count || files.some(f=>!f.size || f.size>policy.max_file_bytes) || files.reduce((n,f)=>n+f.size,0)>policy.max_total_bytes)
+        throw new Error('最多 4 个附件，每个 2 MiB，合计 4 MiB');
+      const results=await Promise.all(files.map(file=>new Promise((resolve,reject)=>{
+        const mime=file.name.toLowerCase().endsWith('.md')?'text/markdown':file.type || 'text/plain';
+        if (!policy.mime_types.includes(mime) || (mime.startsWith('text/') && file.size>policy.max_text_bytes)) { reject(new Error('支持 PNG、JPEG、TXT、Markdown；文本最大 256 KiB')); return; }
+        const reader=new FileReader();reader.onerror=()=>reject(new Error('附件读取失败'));reader.onload=()=>resolve({name:file.name,mime,content_base64:String(reader.result).split(',')[1]});reader.readAsDataURL(file);
+      })));
+      if(current===selection.current) setAttachments(results);
+    }catch(e){if(current===selection.current)setError(e.message || '附件读取失败');}
+    finally {if(current===selection.current)setReading(false);}
   }
-  return <details className="team-panel"><summary>上传需求</summary><Form label="保存需求并通知本地" busy={busy || Boolean(error)} onSubmit={p=>mutate('upload-requirement',{...p,attachments})}>
+  return <details className="team-panel"><summary>上传需求</summary><Form label="保存需求并通知本地" busy={busy || reading || Boolean(error)} onSubmit={p=>mutate('upload-requirement',{...p,attachments})}>
     <Select label="项目" name="project_id" items={board.projects}/><Select label="开发协调人" name="coordinator_id" items={board.members.filter(m=>['admin','developer','coordinator'].includes(m.role))}/><Field label="需求标题" name="title" required maxLength={120}/><Field label="需求原文" name="content" multiline required maxLength={30000}/>
-    <label className="team-field">附件（PNG、JPEG、TXT、Markdown；最多 4 个，各 128 KiB）<input type="file" multiple accept=".png,.jpg,.jpeg,.txt,.md" onChange={select}/></label>{error && <p role="alert">{error}</p>}
+    <label className="team-field">附件（PNG、JPEG、TXT、Markdown；最多 4 个，各 2 MiB，合计 4 MiB；文本各 256 KiB）<input type="file" multiple accept=".png,.jpg,.jpeg,.txt,.md" onChange={select}/></label>{error && <p role="alert">{error}</p>}
   </Form></details>;
 }
 async function downloadAttachment(mutate,id){
@@ -119,6 +134,7 @@ export default function TeamApp({username}) {
   const [error,setError]=useState(''),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true);
   const requests=useRef(new Map());
   const settings=useRef(null);
+  const boardSync=useRef(null);
   useEffect(()=>{
     const handle=async event=>{
       if(event.detail==='settings' && settings.current){settings.current.open=true;settings.current.scrollIntoView({block:'start'});}
@@ -130,9 +146,15 @@ export default function TeamApp({username}) {
     document.addEventListener('account-action',handle);
     return ()=>document.removeEventListener('account-action',handle);
   },[]);
-  const refresh=async(id=team)=>{if(id)setBoard(await api('/api/teams/'+id));};
+  const refresh=async()=>boardSync.current?.refresh();
   useEffect(()=>{let live=true;api('/api/teams').then(r=>{if(live){setTeams(r.teams);setTeam(r.teams[0]?.id || '');}}).catch(e=>setError(e.message)).finally(()=>setLoading(false));return()=>{live=false;};},[]);
-  useEffect(()=>{if(!team)return;let live=true;const update=()=>api('/api/teams/'+team).then(r=>{if(live)setBoard(r);}).catch(e=>{if(live)setError(e.message);});setBoard(null);update();const timer=setInterval(update,15000);return()=>{live=false;clearInterval(timer);};},[team]);
+  useEffect(()=>{
+    setBoard(null); setError('');
+    if(!team)return;
+    const subscription=subscribeTeamBoard({url:'/api/teams/'+team+'/events',load:()=>api('/api/teams/'+team),onData:data=>{setBoard(data);setError('');},onError:e=>setError(e.message)});
+    boardSync.current=subscription;
+    return()=>{subscription.close();if(boardSync.current===subscription)boardSync.current=null;};
+  },[team]);
   async function mutate(action,payload) {
     if(busy)return;
     setBusy(true);setError('');
@@ -152,6 +174,7 @@ export default function TeamApp({username}) {
       {loading && <p role="status">正在加载团队…</p>}
       {!loading && !teams.length && <p>尚未加入团队。可创建团队，或请管理员添加你的账号。</p>}
       {board && <>
+        <TaskSources key={team} board={board} mutate={mutate} busy={busy}/>
         <details ref={settings} className="team-panel"><summary>成员与项目设置</summary>
           {board.role==='admin' && <div className="team-grid">
             <Form label="添加成员" busy={busy} onSubmit={p=>mutate('members',p)}><Field label="已注册账号" name="username" required/><Select label="角色" name="role" items={[{id:'product',name:'产品'},{id:'developer',name:'开发'},{id:'coordinator',name:'开发协调人'}]}/></Form>
@@ -171,7 +194,7 @@ export default function TeamApp({username}) {
         {board.requirements.map(req=>{
           const job=board.jobs.findLast(j=>j.requirement_id===req.id && !j.task_id && j.version===req.version);
           const result=parse(job?.result,{});const product=req.product_id===board.actor_id;
-          return <article className="team-panel" key={req.id}><div className="team-heading"><h2>{req.title}</h2><span>{labels[req.status] || req.status} · v{req.version}</span></div><p className="team-original">{req.original_content}</p>
+          return <article className="team-panel" key={req.id}><div className="team-heading"><h2>{req.title}</h2><span>{labels[req.status] || req.status} · v{req.version}</span></div><p className="team-original">{req.original_content}</p>{req.source_reference && <p><a href={req.source_reference} target="_blank" rel="noopener noreferrer">查看来源记录 ↗</a></p>}
             {job && <p>产品分析：{labels[job.status] || job.status}{job.error && ` · ${job.error}`}</p>}
             {req.attachments?.map(a=><Button key={a.id} variant="outline" disabled={busy} onClick={()=>downloadAttachment(mutate,a.id)}>{a.name}</Button>)}
             {product && <Recovery job={job} mutate={mutate} busy={busy}/>}

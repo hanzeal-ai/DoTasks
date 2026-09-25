@@ -1,0 +1,16 @@
+[Unit]
+Description=Hanzeal resource and health snapshot
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3.11 /usr/local/libexec/hanzeal-ops/ops.py metrics
+User=root
+UMask=0077
+TimeoutStartSec=60
+Nice=10
+MemoryMax=96M
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hanzeal-ops
+ProtectHome=true

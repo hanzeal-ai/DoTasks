@@ -7,9 +7,13 @@ import json
 from taskboard.http_security import HTTPRequestError
 from .team_directory import TeamDirectory, denied, required_text, dump
 from .team_service import TeamService
+from .team_attachments import UPLOAD_BODY_LIMIT
+from .team_events import TeamEvents, serve_team_events
+from .task_source import fetch_source
 
 
 BROWSER_ACTIONS = {
+    'save-task-source':'save_task_source',
     'create-project':'create_project', 'grant-project':'grant_project', 'preferences':'preferences',
     'revoke-project':'revoke_project',
     'upload-requirement':'upload_requirement', 'submit-requirement':'submit_requirement',
@@ -31,6 +35,7 @@ class TeamRegistry:
         self.directory = TeamDirectory(server.accounts)
         self.lock = threading.Lock()
         self.runtimes = {}
+        self.events = TeamEvents()
 
     def runtime(self, team, actor):
         self.directory.role(team,actor)
@@ -68,11 +73,23 @@ def handle_team_request(handler, method, path):
             raise HTTPRequestError(404,'Route not found')
         team, action = match.groups()
         lock, service = registry.runtime(team,actor)
+        if browser and method == 'GET' and action == 'events':
+            serve_team_events(handler, registry, team, actor)
+            return True
+        if browser and method == 'POST' and action == 'pull-task-source':
+            result, replayed = pull_task_source(handler, lock, service)
+            if not replayed:
+                registry.events.changed(team)
+                for member in registry.directory.members(team,actor):
+                    handler.server.notify_agent(member['id'],'state_changed')
+            handler._json(200,result)
+            return True
+        replayed = False
         with lock:
             if method == 'GET' and action is None:
                 result = service.snapshot()
             elif method == 'POST':
-                payload = handler._read_json()
+                payload = handler._read_json(UPLOAD_BODY_LIMIT) if action == 'upload-requirement' else handler._read_json()
                 if action == 'members' and browser:
                     result = registry.directory.add(team,actor,payload.get('username'),payload.get('role'))
                 elif action=='remove-member' and browser:
@@ -91,6 +108,7 @@ def handle_team_request(handler, method, path):
                         digest = hashlib.sha256(dump({'action':action,'payload':payload}).encode()).hexdigest()
                         cached = db.execute('SELECT * FROM team_requests WHERE actor_id=? AND request_id=?',(actor,request_id)).fetchone() if request_id else None
                         if cached:
+                            replayed = True
                             if cached['digest']!=digest:
                                 raise HTTPRequestError(409,'同一请求标识不能用于不同操作')
                             result = json.loads(cached['result'])
@@ -100,9 +118,44 @@ def handle_team_request(handler, method, path):
                                 db.execute('INSERT INTO team_requests VALUES(?,?,?,?)',(actor,request_id,digest,dump(result)))
             else:
                 raise HTTPRequestError(405,'Method not allowed')
+        if method == 'POST' and not replayed and action not in {'read-attachment', 'analysis-claim', 'execution-claim'} and not (
+                action == 'execution-tool' and payload.get('name') in {'get_dispatch_status', 'get_native_dispatch', 'get_task', 'get_run_context', 'get_run', 'renew_dispatch_lease'}):
+            registry.events.changed(team)
         if method == 'POST' and action not in {'analysis-claim','execution-claim'} and not (
                 action=='execution-tool' and payload.get('name') in {'get_dispatch_status','get_native_dispatch','get_task','get_run_context','get_run','renew_dispatch_lease'}):
             for member in registry.directory.members(team,actor):
                 handler.server.notify_agent(member['id'],'state_changed')
     handler._json(200,result)
     return True
+
+
+def pull_task_source(handler, lock, service):
+    payload = handler._read_json()
+    request_id = required_text(payload.pop('request_id', None), 'request_id', 128)
+    digest = hashlib.sha256(dump({'action':'pull-task-source','payload':payload}).encode()).hexdigest()
+    def cached_result(db):
+        cached = db.execute('SELECT * FROM team_requests WHERE actor_id=? AND request_id=?', (service.actor,request_id)).fetchone()
+        if cached:
+            if cached['digest'] != digest:
+                raise HTTPRequestError(409, '同一请求标识不能用于不同操作')
+            return json.loads(cached['result'])
+        return None
+    with lock:
+        source = service.source_for_pull(payload)
+        with service.db.connection() as db:
+            cached = cached_result(db)
+            if cached is not None:
+                return cached, True
+    # Do not hold the team's lock or a database transaction during remote I/O.
+    items = fetch_source(source['url'], source['token'])
+    handler._require_authentication()
+    if handler.identity_kind != 'browser' or handler.account['id'] != service.actor:
+        denied()
+    with lock, service.db.atomic() as db:
+        service.source_for_pull(payload)  # Recheck role, project grant and configuration version.
+        cached = cached_result(db)
+        if cached is not None:
+            return cached, True
+        result = service.import_source_items(source, items)
+        db.execute('INSERT INTO team_requests VALUES(?,?,?,?)', (service.actor,request_id,digest,dump(result)))
+        return result, False

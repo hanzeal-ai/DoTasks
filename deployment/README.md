@@ -33,3 +33,7 @@ To pause deployment, set `DEPLOY_ENABLED=false`. Runner recovery is `systemctl e
 ## Local checks
 
 Run `./scripts/test tests.test_ssh_deployment tests.test_ssh_activation tests.test_github_deploy_workflow`, then the project suite. The receiver tests cover malformed input, checksum and image identity mismatches, pinned SSH host verification, preserved configuration and failure recovery. Real Docker transport and image-ID Compose checks supplement these tests. Local checks do not establish target-host installation or production deployment.
+
+## Current host operations
+
+The 2026-09-25 resource/log/loopback rollout is documented in [host operations](host/README.md) and [delivery evidence](../docs/host-optimization-2026-09-25.md). The old `scripts/deploy-aliyun-cli.py` entry point is retired; daily application releases use the restricted SSH workflow. Host configuration changes do not bypass the operator-owned configuration boundary. Business backup scheduling was explicitly declined for this noncritical host; existing deployment recovery behavior is unchanged.
