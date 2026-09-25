@@ -226,42 +226,6 @@ class TaskRunMixin:
         self.flush_integration_outbox()
         return {"run": self.get_run(run_id), "task": self.get_task(task["id"]), "changed": True}
 
-    def pause_run_for_budget(self, run_id: str, reason: str) -> dict[str, Any]:
-        """Stop an active stage at its hard task budget without scheduling a retry loop."""
-        run = self.get_run(run_id)
-        if run["status"] not in ACTIVE_RUN_STATUSES:
-            return {"run": run, "task": self.get_task(run["task_id"]), "changed": False}
-        task = self.get_task(run["task_id"])
-        with self.db.transaction() as connection:
-            connection.execute(
-                """UPDATE task_runs SET status='interrupted', completed_at=CURRENT_TIMESTAMP,
-                   updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('awaiting_thread','running')""",
-                (run_id,),
-            )
-            connection.execute(
-                "UPDATE task_conversations SET status='interrupted', updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
-                (run_id,),
-            )
-            connection.execute(
-                "UPDATE task_run_conversations SET status='interrupted', updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
-                (run_id,),
-            )
-            connection.execute(
-                """UPDATE tasks SET status='waiting_confirmation', active_run_id=NULL, assigned_to=NULL,
-                   auto_dispatch=0, retry_required=1, retry_run_type=?, last_failure_reason=?,
-                   last_failure_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
-                   WHERE id=? AND active_run_id=?""",
-                (run["run_type"], reason, task["id"], run_id),
-            )
-            self._event(connection, "run", run_id, "token_budget_exceeded", {
-                "task_id": task["id"], "token_used": task.get("token_used", 0),
-                "effective_token_used": task.get("effective_token_used", 0),
-                "token_budget": task.get("token_budget", 0), "reason": reason,
-            })
-            self._queue_obsidian_sync(connection, "task", task["id"])
-        self.flush_integration_outbox()
-        return {"run": self.get_run(run_id), "task": self.get_task(task["id"]), "changed": True}
-
     def renew_run_lease(self, run_id: str, lease_token: str, lease_seconds: int = 1800) -> dict[str, Any]:
         lease_seconds = max(300, min(int(lease_seconds), 7200))
         with self.db.transaction() as connection:

@@ -167,3 +167,40 @@ def decode_row(
             if field in item:
                 item[field] = json.loads(item[field] or "{}")
     return item
+
+
+def quality_gate_required(task: dict[str, Any], gate: str) -> bool:
+    gates = (task.get("review_contract") or {}).get("quality_gates")
+    if not isinstance(gates, dict) or not isinstance(gates.get(gate), dict):
+        raise ValueError(f"Task review contract is missing quality_gates.{gate}")
+    return bool(gates[gate]["required"])
+
+
+def target_conflicts(connection: Any, task_id: str, locking_only: bool = False) -> list[dict[str, Any]]:
+    status_filter = (
+        "AND other.status IN ('claimed','investigating','implementing','waiting_confirmation','code_review','failed','blocked')"
+        if locking_only else "AND other.status NOT IN ('done','cancelled')"
+    )
+    rows = connection.execute(
+        f"""SELECT DISTINCT other.id AS task_id, other.title, other.status,
+                           mine.file, mine.symbol
+            FROM task_targets mine
+            JOIN tasks current ON current.id=mine.task_id
+            JOIN task_targets theirs
+              ON theirs.task_id != mine.task_id
+             AND theirs.file=mine.file
+             AND (mine.symbol='' OR theirs.symbol='' OR theirs.symbol=mine.symbol)
+            JOIN tasks other ON other.id=theirs.task_id AND other.project=current.project
+            WHERE mine.task_id=? {status_filter}
+            ORDER BY other.id, mine.file, mine.symbol""",
+        (task_id,),
+    ).fetchall()
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        conflict = grouped.setdefault(row["task_id"], {
+            "task_id": row["task_id"], "title": row["title"], "status": row["status"], "targets": [],
+        })
+        target = {"file": row["file"], "symbol": row["symbol"]}
+        if target not in conflict["targets"]:
+            conflict["targets"].append(target)
+    return list(grouped.values())

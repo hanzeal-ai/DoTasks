@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from taskboard import cli_distribution as distribution, cli_install, cli_update
+from taskboard import cli_distribution as distribution, cli_install, cli_update, cli_onboarding
 from taskboard.cli_service import BackgroundService, LABELS
 
 
@@ -25,7 +25,6 @@ class DistributionTest(unittest.TestCase):
         self.enterContext(patch.dict(os.environ, {'SHELL': '/bin/zsh'}, clear=True))
         self.enterContext(patch('sys.platform', 'darwin'))
         self.enterContext(patch.object(BackgroundService, 'state', return_value='stopped'))
-        self.enterContext(patch.object(BackgroundService, 'legacy_running', return_value=False))
         self.launch = self.enterContext(patch.object(BackgroundService, 'run'))
         self.run = self.enterContext(patch('taskboard.cli_install.subprocess.run', return_value=subprocess.CompletedProcess([], 0)))
         self.enterContext(redirect_stdout(io.StringIO()))
@@ -88,9 +87,9 @@ class DistributionTest(unittest.TestCase):
         source = self.runtime()
         cli_install.install(source)
         brew = self.runtime('brew/runtime')
-        with patch.object(distribution, 'runtime_root', return_value=brew), patch.object(distribution, 'homebrew_runtime', return_value=brew):
+        with patch.object(cli_onboarding, 'runtime_root', return_value=brew), patch.object(cli_onboarding, 'homebrew_runtime', return_value=brew):
             with self.assertRaisesRegex(RuntimeError, '另一种安装'):
-                distribution.prepare_initialization()
+                cli_onboarding.prepare_initialization()
 
     def test_homebrew_update_does_not_download_or_mutate_installation(self):
         with patch.object(distribution, 'homebrew_runtime', return_value=self.home), patch.object(cli_update, 'download_release') as download:

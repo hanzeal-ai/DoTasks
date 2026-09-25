@@ -276,7 +276,7 @@ dotasks stop                 # 停止服务，并关闭登录自启
 CLI 返回 0 表示检查成功，1 表示异常；云端暂停调度会显示状态，但不是连接错误。
 
 源码调试仍可使用 `./scripts/start-agent` 前台运行 Agent（请勿与后台 Agent 同时启动），
-`dotasks serve` 前台运行本地 HTTP 服务；原有无参数 `dotasks` 和服务端参数入口保留。
+本地 HTTP 服务由后台服务入口管理；无参数 `dotasks` 进入初始化流程。
 源代码变更不会自动更新已安装 CLI；正式版本使用 `dotasks update` 升级。
 Agent 配置保存在 `~/Library/Application Support/DoTasks/cloud-agent.json`，文件权限为
 `0600`。云端持久数据位于 Compose 的 `dotasks-data` 卷，图谱镜像位于卷内

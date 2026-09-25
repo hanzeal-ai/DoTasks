@@ -954,7 +954,7 @@ class WorkflowTest(unittest.TestCase):
     def test_pause_resume_preserves_code_review_stage(self):
         task = self.task("pause-code-review")
         self.deliver(task, "dev-thread")
-        self.service.pause_all_tasks("pause review")
+        self.service.transition_task(task["id"], "paused", "pause review")
         paused = self.service.get_task(task["id"])
         self.assertEqual("paused", paused["status"])
         self.assertEqual("code_review", paused["paused_from_status"])

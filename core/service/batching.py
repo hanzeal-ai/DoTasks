@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .domain import quality_gate_required
+
 import json
 import uuid
 from typing import Any
@@ -30,7 +32,7 @@ class TaskBatchMixin:
         run_id: str,
         run_type: str,
     ) -> str:
-        if not self._quality_gate_required(task, "code_review"):
+        if not quality_gate_required(task, "code_review"):
             # Tasks that skip the only independent review gate complete in development.
             return ""
         existing = connection.execute(
@@ -100,7 +102,7 @@ class TaskBatchMixin:
         if (
             str(dependency.get("decision") or "") != "independent"
             or bool(dependency.get("conflicts_tasks"))
-            or not self._quality_gate_required({"review_contract": review}, "code_review")
+            or not quality_gate_required({"review_contract": review}, "code_review")
         ):
             return ""
         batch = connection.execute(
@@ -279,7 +281,7 @@ class TaskBatchMixin:
                 if task.get(key) not in (None, "", [], {})
             })
             targets.extend((task.get("location_context") or {}).get("targets") or [])
-            requires_changes = requires_changes or self._quality_gate_required(
+            requires_changes = requires_changes or quality_gate_required(
                 task, "code_review"
             )
             for item in task.get("acceptance_plan") or []:

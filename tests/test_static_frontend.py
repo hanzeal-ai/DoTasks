@@ -94,7 +94,7 @@ if (!/^2026-09-04 \\d{2}:44:39$/.test(formatted)) throw new Error(`unexpected lo
         self.assertIn('item.event_type !== "token_usage_updated"', script)
 
     def test_only_period_token_cards_use_metric_formatting(self):
-        app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")
+        app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8") + (WEB_SOURCE / "token-panel.js").read_text(encoding="utf-8")
         period_summary = app.split(
             'return `<div class="token-summary token-period-summary">', 1
         )[1].split('</div><div class="token-chart-grid">', 1)[0]
@@ -307,7 +307,7 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
 
     def test_settings_button_opens_task_token_budget_configuration(self):
         html = (WEB_SOURCE / "App.jsx").read_text(encoding="utf-8")
-        app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8")
+        app = (WEB_SOURCE / "taskboard-app.js").read_text(encoding="utf-8") + (WEB_SOURCE / "token-panel.js").read_text(encoding="utf-8")
         self.assertNotIn('id="settings-button"', html)
         self.assertIn('id="task-settings-form"', app)
         self.assertIn('name="task_token_budget"', app)

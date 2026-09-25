@@ -126,42 +126,6 @@ class TaskboardService(
         self.set_dispatcher_enabled(False)
         return {"dispatcher_enabled": False}
 
-    def pause_all_tasks(self, reason: str = "用户暂停") -> dict[str, Any]:
-        self.set_dispatcher_enabled(False)
-        with self.db.transaction() as connection:
-            active_runs = connection.execute(
-                "SELECT id, task_id FROM task_runs WHERE status IN ('awaiting_thread','running')"
-            ).fetchall()
-            connection.execute(
-                """UPDATE task_runs SET status='interrupted', updated_at=CURRENT_TIMESTAMP,
-                   completed_at=CURRENT_TIMESTAMP WHERE status IN ('awaiting_thread','running')"""
-            )
-            connection.execute(
-                """UPDATE task_conversations SET status='interrupted', updated_at=CURRENT_TIMESTAMP
-                   WHERE run_id IN (SELECT id FROM task_runs WHERE status='interrupted') AND status='active'"""
-            )
-            connection.execute(
-                """UPDATE task_run_conversations SET status='interrupted', updated_at=CURRENT_TIMESTAMP
-                   WHERE run_id IN (SELECT id FROM task_runs WHERE status='interrupted') AND status='active'"""
-            )
-            tasks = connection.execute(
-                """SELECT t.id, t.status, r.run_type
-                   FROM tasks t LEFT JOIN task_runs r ON r.id=t.active_run_id
-                   WHERE t.status NOT IN ('done','cancelled','paused')"""
-            ).fetchall()
-            for task in tasks:
-                retry_type = task["run_type"] if task["run_type"] in {"execution", "rework"} else None
-                connection.execute(
-                    """UPDATE tasks SET paused_from_status=status, status='paused', active_run_id=NULL,
-                       assigned_to=NULL, retry_required=?, retry_run_type=COALESCE(?, retry_run_type),
-                       updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                    (int(bool(retry_type)), retry_type, task["id"]),
-                )
-                self._event(connection, "task", task["id"], "paused", {"from": task["status"], "reason": reason})
-                self._queue_obsidian_sync(connection, "task", task["id"])
-        self.flush_integration_outbox()
-        return {"dispatcher_enabled": False, "paused_tasks": len(tasks), "interrupted_runs": len(active_runs)}
-
     def resume_all_tasks(self) -> dict[str, Any]:
         with self.db.transaction() as connection:
             tasks = connection.execute("SELECT id, paused_from_status, retry_run_type FROM tasks WHERE status='paused'").fetchall()

@@ -28,7 +28,6 @@ class CLITest(unittest.TestCase):
         self.enterContext(patch.dict(os.environ, {}, clear=True))
         self.enterContext(patch('pathlib.Path.home', return_value=self.home))
         self.enterContext(patch('taskboard.cli.sys.platform', 'darwin'))
-        self.enterContext(patch.object(cli.BackgroundService, 'legacy_running', return_value=False))
         self.output = self.enterContext(contextlib.redirect_stdout(io.StringIO()))
         self.errors = self.enterContext(contextlib.redirect_stderr(io.StringIO()))
 
@@ -199,16 +198,16 @@ class CLITest(unittest.TestCase):
         self.assertEqual(1, cli.main(['logs', '-n', '0']))
 
     def test_no_arguments_prepare_and_initialize_local_cli(self):
-        with patch('taskboard.cli_distribution.prepare_initialization') as prepare, patch('taskboard.cli_onboarding.initialize') as initialize:
+        with patch('taskboard.cli_onboarding.prepare_initialization') as prepare, patch('taskboard.cli_onboarding.initialize') as initialize:
             self.assertEqual(0, cli.main([]))
         prepare.assert_called_once()
         self.assertEqual('init', initialize.call_args.args[0].command)
 
-    def test_legacy_server_and_serve_arguments_are_preserved(self):
-        for args, expected in [(['--port', '9999'], ['--port', '9999']), (['serve', '--port', '9999'], ['--port', '9999'])]:
-            with patch('taskboard.server.main', side_effect=lambda: self.assertEqual(expected, cli.sys.argv[1:])) as serve:
-                self.assertEqual(0, cli.main(args))
-                serve.assert_called_once()
+    def test_cli_rejects_removed_server_arguments(self):
+        for args in [['--port', '9999'], ['serve', '--port', '9999']]:
+            with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                cli.main(args)
+            self.assertEqual(error.exception.code, 2)
 
 
 if __name__ == '__main__':

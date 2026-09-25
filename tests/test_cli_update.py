@@ -119,7 +119,7 @@ class CLIUpdateTest(unittest.TestCase):
             if args[0] == 'bootstrap' and args[-1].endswith('cli.agent.plist'):
                 raise RuntimeError('agent bootstrap failed')
 
-        with patch.object(service, 'validate_installation'), patch('taskboard.cli_service.load_agent_config'), patch.object(service, 'legacy_running', return_value=False), patch.object(service, 'states', return_value={'server': 'stopped', 'agent': 'stopped'}), patch.object(service, 'run', side_effect=run):
+        with patch.object(service, 'validate_installation'), patch('taskboard.cli_service.load_agent_config'), patch.object(service, 'states', return_value={'server': 'stopped', 'agent': 'stopped'}), patch.object(service, 'run', side_effect=run):
             with self.assertRaises(RuntimeError):
                 service.start()
         self.assertIn(('bootout', service.target('server')), calls)

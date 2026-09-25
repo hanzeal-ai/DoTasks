@@ -43,7 +43,7 @@ dotasks init
 
 独立更新会检查个人及团队活动任务，失败恢复旧程序与启动配置；保留账号和任务数据。Brew 升级前必须停服，不能在任务执行期间让 Brew 清理旧版本；它不提供本项目的自动版本回退。卸载 Brew 程序前也先执行 `dotasks stop`，卸载不会清空账号数据。
 
-两种安装不能静默接管对方。迁移时先用旧 CLI 执行 `stop`，然后用新包 `./dotasks install` 或 `$(brew --prefix dotasks)/bin/dotasks install` 注册当前版本，最后运行新 CLI 的 `init`。迁移至 Brew 时仅移除本安装器创建的旧 `~/.local/bin/dotasks` 入口；保留旧运行时与业务数据。旧 Helper 迁移使用包内 `install-cli --replace-helper`。
+两种安装不能静默接管对方。迁移时先用旧 CLI 执行 `stop`，然后用新包 `./dotasks install` 或 `$(brew --prefix dotasks)/bin/dotasks install` 注册当前版本，最后运行新 CLI 的 `init`。迁移至 Brew 时仅移除本安装器创建的旧 `~/.local/bin/dotasks` 入口；保留旧运行时与业务数据。
 
 用户名为 3–64 位 ASCII 字母、数字、点、下划线或短横线，密码为 12–128 个字符。系统权限和 Codex 登录必须由本人确认；已有旧 Token 绑定不能自动转换成新账号，初始化会拒绝覆盖它。重复运行已完成的初始化不会重复注册。
 

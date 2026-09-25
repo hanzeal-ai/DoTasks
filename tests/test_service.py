@@ -1279,31 +1279,15 @@ class TaskboardServiceTest(unittest.TestCase):
         )
         self.assertTrue(self.service.scheduler_snapshot()["pending"])
 
-    def test_schema_upgrade_preserves_tasks_and_adds_requirement_tracking(self):
+    def test_old_schema_is_rejected_without_modifying_data(self):
         task = self.create_ready_task()
-        db_path = self.service.db.path
-        with sqlite3.connect(db_path) as connection:
-            connection.execute("CREATE TABLE acceptance_check_runs(id INTEGER)")
-            connection.execute("CREATE TABLE acceptance_results(id INTEGER)")
-            connection.execute("CREATE TABLE batch_steer_events(id INTEGER)")
-            connection.execute(
-                "INSERT OR REPLACE INTO system_settings(key, value) VALUES('workspace_projects', '[]')"
-            )
+        with self.service.db.transaction() as connection:
             connection.execute("PRAGMA user_version=12")
-        upgraded = Database(db_path)
-        with upgraded.connection() as connection:
-            self.assertIsNotNone(connection.execute("SELECT 1 FROM tasks WHERE id=?", (task["id"],)).fetchone())
-            tables = {row["name"] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            task_columns = {row["name"] for row in connection.execute("PRAGMA table_info(tasks)")}
-            retired_setting = connection.execute(
-                "SELECT 1 FROM system_settings WHERE key='workspace_projects'"
-            ).fetchone()
-        self.assertIn("requirement_decomposition_runs", tables)
-        self.assertIn("requirement_task_key", task_columns)
-        self.assertTrue({
-            "acceptance_check_runs", "acceptance_results", "batch_steer_events",
-        }.isdisjoint(tables))
-        self.assertIsNone(retired_setting)
+        with self.assertRaisesRegex(ValueError, '数据库不是当前结构'):
+            Database(self.service.db.path)
+        with self.service.db.connection() as connection:
+            self.assertEqual(12, connection.execute('PRAGMA user_version').fetchone()[0])
+            self.assertIsNotNone(connection.execute('SELECT 1 FROM tasks WHERE id=?', (task['id'],)).fetchone())
 
     def test_task_ids_use_type_specific_prefixes_and_board_preserves_ids(self):
         task = self.create_ready_task()
@@ -2462,57 +2446,11 @@ class TaskboardServiceTest(unittest.TestCase):
         )
         self.assertEqual(0, checked.returncode, checked.stderr)
 
-    def test_existing_task_targets_are_backfilled_by_migration(self):
+    def test_current_task_targets_survive_database_reopen(self):
         first = self.create_ready_task()
         second = self.create_ready_task()
-        with self.service.db.transaction() as connection:
-            connection.execute("DELETE FROM task_targets")
         Database(self.service.db.path)
         self.assertEqual(second["id"], self.service.get_task(first["id"])["target_conflicts"][0]["task_id"])
-
-    def test_current_database_repairs_stale_run_validation_trigger(self):
-        with self.service.db.transaction() as connection:
-            connection.executescript(
-                """
-                DROP TRIGGER validate_run_update;
-                CREATE TRIGGER validate_run_update BEFORE UPDATE ON task_runs
-                WHEN NEW.run_type NOT IN ('execution','rework','review')
-                BEGIN SELECT RAISE(ABORT, 'invalid task run values'); END;
-                """
-            )
-
-        Database(self.service.db.path)
-
-        with self.service.db.connection() as connection:
-            trigger = connection.execute(
-                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='validate_run_update'"
-            ).fetchone()["sql"]
-        self.assertIn("'bugfix'", trigger)
-        self.assertIn("'code_review'", trigger)
-        self.assertNotIn("'acceptance'", trigger)
-
-    def test_notification_schema_is_removed_from_existing_databases(self):
-        with self.service.db.transaction() as connection:
-            connection.execute("CREATE TABLE notification_channels(project TEXT PRIMARY KEY, thread_id TEXT)")
-            connection.execute("CREATE TABLE notifications(id TEXT PRIMARY KEY, task_id TEXT)")
-            connection.execute("INSERT INTO id_counters(prefix, value) VALUES('NOTICE', 3)")
-
-        Database(self.service.db.path)
-
-        with self.service.db.connection() as connection:
-            tables = {
-                row["name"] for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
-            notice_counter = connection.execute(
-                "SELECT 1 FROM id_counters WHERE prefix='NOTICE'"
-            ).fetchone()
-        self.assertNotIn("notifications", tables)
-        self.assertNotIn("notification_channels", tables)
-        self.assertIsNone(notice_counter)
-        self.assertNotIn("notifications", self.service.board())
-        self.assertNotIn("undelivered_notifications", self.service.board()["counts"])
 
     def test_equivalent_target_paths_conflict(self):
         base = {
@@ -2553,7 +2491,8 @@ class TaskboardServiceTest(unittest.TestCase):
 
     def test_pause_is_persistent_and_resume_requeues(self):
         task = self.create_ready_task()
-        paused = self.service.pause_all_tasks("test pause")
+        self.service.transition_task(task["id"], "paused", "test pause")
+        paused = self.service.pause_dispatcher()
         self.assertFalse(paused["dispatcher_enabled"])
         self.assertEqual("paused", self.service.get_task(task["id"])["status"])
         self.assertIsNone(self.service.claim_next_task("worker", task["project"]))
@@ -3097,7 +3036,7 @@ class TaskboardServiceTest(unittest.TestCase):
         task = self.create_ready_task()
         claim = self.service.claim_next_task("worker", task["project"])
         self.service.bind_conversation(task["id"], "execution", "paused-thread", claim["run"]["id"])
-        self.service.pause_all_tasks("operator pause")
+        self.service.transition_task(task["id"], "paused", "operator pause")
         resumed = self.service.resume_task(task["id"])
         self.assertEqual("ready", resumed["status"])
         self.assertTrue(resumed["retry_required"])

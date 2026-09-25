@@ -12,7 +12,6 @@ from .agent import load_agent_config
 from .runtime_paths import default_config_path, default_data_home
 
 LABELS = {'server': 'com.dotasks.cli.server', 'agent': 'com.dotasks.cli.agent'}
-LEGACY_LABEL = 'local.sanmws.dotasks-helper'
 
 
 class BackgroundService:
@@ -49,8 +48,6 @@ class BackgroundService:
         states = set(self.states().values())
         return next(iter(states)) if len(states) == 1 else 'degraded'
 
-    def legacy_running(self):
-        return self.job_state(f'{self.domain}/{LEGACY_LABEL}') != 'stopped'
 
     def validate_installation(self):
         installed = None
@@ -93,8 +90,6 @@ class BackgroundService:
     def start(self):
         self.validate_installation()
         load_agent_config()
-        if self.legacy_running():
-            raise RuntimeError('旧 Helper 正在运行；请用安装器 --replace-helper 迁移，避免重复执行任务。')
         before = self.states()
         created = []
         try:

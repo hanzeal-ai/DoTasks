@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .domain import quality_gate_required
+
 import json
 import posixpath
 import subprocess
@@ -190,7 +192,7 @@ class TaskReviewMixin:
             not str(task.get("project") or "").strip()
             and str(run.get("execution_environment") or "") == "projectless"
         )
-        requires_code_review = self._quality_gate_required(task, "code_review")
+        requires_code_review = quality_gate_required(task, "code_review")
         requires_changes = requires_code_review
         if not isinstance(changed_locations, list):
             raise ValueError("changed_locations is required")

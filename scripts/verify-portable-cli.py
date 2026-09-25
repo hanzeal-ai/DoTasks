@@ -62,7 +62,7 @@ finally:
 from unittest.mock import patch
 from taskboard.cli_install import install
 from taskboard.cli_service import BackgroundService
-with patch.object(BackgroundService,'state',return_value='stopped'), patch.object(BackgroundService,'legacy_running',return_value=False), patch.object(BackgroundService,'run'):
+with patch.object(BackgroundService,'state',return_value='stopped'), patch.object(BackgroundService,'run'):
  install(Path.cwd(), configure_path=False)
 """], env=install_environment, cwd=runtime, check=True, capture_output=True, text=True, timeout=60)
         import shutil

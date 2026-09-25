@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .domain import target_conflicts
+
 import json
 from typing import Any
 
@@ -156,7 +158,7 @@ class TaskQueryMixin:
             policy_cache: dict[str, dict[str, Any]] = {}
             for task in tasks:
                 task["token_by_stage"] = metrics.get(task["id"], {})
-                task["target_conflicts"] = self._target_conflicts(connection, task["id"])
+                task["target_conflicts"] = target_conflicts(connection, task["id"])
                 task["dispatch_blockers"] = self._development_dispatch_blockers(
                     connection,
                     task,
@@ -184,7 +186,7 @@ class TaskQueryMixin:
             raise KeyError(f"Task not found: {task_id}")
         task = decode_row(row)
         with self.db.connection() as connection:
-            task["target_conflicts"] = self._target_conflicts(connection, task_id)
+            task["target_conflicts"] = target_conflicts(connection, task_id)
             scheduler_row = connection.execute(
                 "SELECT * FROM scheduler_state WHERE id=1"
             ).fetchone()

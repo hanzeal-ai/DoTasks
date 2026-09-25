@@ -217,17 +217,10 @@ class TaskboardHTTPServerTest(unittest.TestCase):
     def test_trusted_json_request_can_mutate_dispatcher(self) -> None:
         service = self.server.RequestHandlerClass.service
         service.set_dispatcher_enabled(True)
-        original_pause_all = service.pause_all_tasks
-        service.pause_all_tasks = lambda *_args, **_kwargs: self.fail(
-            "dispatcher pause must not pause all tasks"
+        status, headers, payload = self.request(
+            "POST", "/api/dispatcher/pause", b"{}",
+            Origin=self.origin, **{"Content-Type": "application/json"},
         )
-        try:
-            status, headers, payload = self.request(
-                "POST", "/api/dispatcher/pause", b"{}",
-                Origin=self.origin, **{"Content-Type": "application/json"},
-            )
-        finally:
-            service.pause_all_tasks = original_pause_all
         self.assertEqual(200, status)
         self.assertEqual(self.origin, headers.get("Access-Control-Allow-Origin"))
         self.assertFalse(payload["dispatcher_enabled"])

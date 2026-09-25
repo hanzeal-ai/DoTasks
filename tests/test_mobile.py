@@ -174,16 +174,14 @@ class MobileTest(unittest.TestCase):
         self.assertEqual(events[-1]['thread_id'], 'thread-a')
         self.assertIn('done', events[-1]['summary'])
 
-    def test_additive_v22_migration_preserves_business_rows(self):
-        with self.service.db.transaction() as db:
+    def test_reopen_preserves_business_rows_and_mobile_queue(self):
+        with self.service.db.connection() as db:
             before = [tuple(row) for row in db.execute('SELECT * FROM tasks ORDER BY id')]
-            db.execute('DROP TABLE mobile_messages')
-            db.execute('PRAGMA user_version=22')
-        upgraded = TaskboardService(self.temp.name)
-        with upgraded.db.connection() as db:
+        reopened = TaskboardService(self.temp.name)
+        with reopened.db.connection() as db:
             self.assertEqual(before, [tuple(row) for row in db.execute('SELECT * FROM tasks ORDER BY id')])
             self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 23)
-        self.assertEqual(upgraded.enqueue_mobile_message('migration_test_001', 'task-a', 'thread-a', 'hi')['status'], 'queued')
+        self.assertEqual(reopened.enqueue_mobile_message('reopen_message_001', 'task-a', 'thread-a', 'hi')['status'], 'queued')
 
 
 class FakeService:

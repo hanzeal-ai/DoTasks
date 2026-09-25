@@ -128,7 +128,7 @@ class InstallerTest(unittest.TestCase):
                     shutil.copytree(argv[1], argv[2])
                 return subprocess.CompletedProcess(argv, 0, '', '')
 
-            with patch.dict(os.environ, {'SHELL': '/bin/zsh'}, clear=True), patch('pathlib.Path.home', return_value=home), patch('sys.platform', 'darwin'), patch.object(cli.BackgroundService, 'state', return_value='stopped'), patch.object(cli.BackgroundService, 'legacy_running', return_value=False), patch.object(cli.BackgroundService, 'run') as launch, patch('taskboard.cli_install.subprocess.run', side_effect=run), contextlib.redirect_stdout(io.StringIO()):
+            with patch.dict(os.environ, {'SHELL': '/bin/zsh'}, clear=True), patch('pathlib.Path.home', return_value=home), patch('sys.platform', 'darwin'), patch.object(cli.BackgroundService, 'state', return_value='stopped'), patch.object(cli.BackgroundService, 'run') as launch, patch('taskboard.cli_install.subprocess.run', side_effect=run), contextlib.redirect_stdout(io.StringIO()):
                 for _ in range(2):
                     launcher = cli_install.install(runtime)
                 self.assertEqual(1, (home / '.zshrc').read_text().count(cli_install.PATH_LINE))

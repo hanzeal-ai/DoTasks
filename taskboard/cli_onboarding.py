@@ -18,7 +18,9 @@ from .runtime_paths import default_config_path, default_data_home
 from .app_server import CodexAppServerClient
 from .cli_account import PasswordStore, show_account, open_cloud
 from .http_client import read_json
-from .cli_service import BackgroundService
+from .cli_service import BackgroundService, LABELS
+from .cli_distribution import runtime_root, homebrew_runtime
+from .cli_install import install, validate_runtime
 
 DEFAULT_CLOUD_URL = 'https://dotasks.hanzeal.com'
 
@@ -138,3 +140,26 @@ def initialize(args) -> None:
             pass
         time.sleep(1)
     raise RuntimeError('账号和本机凭证已保存，但连接检查未通过；运行 dotasks doctor / dotasks logs 排查后重试 dotasks init，无需重新注册。')
+
+
+def prepare_initialization() -> None:
+    """Register services on first run; never replace a running installation."""
+    root = runtime_root()
+    if not (root / 'release.json').is_file():
+        return  # Source/developer entry points require the explicit installer.
+    service = BackgroundService()
+    if all(service.plist(name).is_file() for name in LABELS):
+        installed = service.validate_installation()
+        brew = homebrew_runtime()
+        managed = default_data_home() / 'cli/current'
+        expected = brew or managed
+        if installed != expected:
+            raise RuntimeError('后台服务属于另一种安装。先用原 CLI 执行 stop，再用新 CLI 的 install 命令迁移；账号与任务保留。')
+        if brew is None and installed.resolve() != root:
+            if validate_runtime(installed)['version'] != validate_runtime(root)['version']:
+                raise RuntimeError('已有其他版本。请用已安装的 dotasks update 升级，或停止服务后运行本包的 install。')
+        return
+    if any(service.plist(name).exists() for name in LABELS):
+        raise RuntimeError('后台配置不完整，请停止服务后运行 dotasks install 修复。')
+    print('安装本机后台服务……', flush=True)
+    install(homebrew_runtime() or root, homebrew=homebrew_runtime() is not None)

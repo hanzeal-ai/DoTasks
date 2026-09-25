@@ -15,7 +15,7 @@ import sys
 import tempfile
 import uuid
 
-from .cli_service import BackgroundService, LABELS, LEGACY_LABEL
+from .cli_service import BackgroundService, LABELS
 from .runtime_paths import default_data_home
 from .cli_distribution import runtime_python
 
@@ -54,7 +54,7 @@ def activate(current: Path, release: Path):
         temporary.unlink(missing_ok=True)
 
 
-def install(runtime: Path, *, replace_helper=False, configure_path=True, homebrew=False) -> Path:
+def install(runtime: Path, *, configure_path=True, homebrew=False) -> Path:
     if sys.platform != 'darwin' or sys.version_info < (3, 14):
         raise RuntimeError('安装需要 macOS 和 Python 3.14+。')
     if os.environ.get('DOTASKS_HOME') or os.environ.get('DOTASKS_AGENT_CONFIG'):
@@ -67,9 +67,6 @@ def install(runtime: Path, *, replace_helper=False, configure_path=True, homebre
     service = BackgroundService()
     if service.state() != 'stopped':
         raise RuntimeError('已有 CLI 服务运行，请使用 dotasks update 升级或先执行 dotasks stop。')
-    legacy = service.legacy_running()
-    if legacy and not replace_helper:
-        raise RuntimeError('旧 Helper 正在运行；任务空闲时使用安装器 --replace-helper 迁移。')
     shell = Path(os.environ.get('SHELL', '/bin/zsh')).name
     if configure_path and shell not in {'zsh', 'bash'}:
         raise RuntimeError('自动 PATH 配置支持 zsh 和 bash。')
@@ -106,11 +103,7 @@ def install(runtime: Path, *, replace_helper=False, configure_path=True, homebre
             validate_runtime(staged)
             subprocess.run([runtime_python(staged), '-B', '-m', 'taskboard.cli', '--help'], cwd=staged, capture_output=True, check=True, timeout=20)
             staged.rename(target)
-    legacy_target = f'{service.domain}/{LEGACY_LABEL}'
     try:
-        if legacy:
-            service.run('disable', legacy_target)
-            service.run('bootout', legacy_target)
         # ZIP extraction does not preserve executable bits; this is the worker callback entrypoint.
         if not homebrew:
             (target / 'scripts/mcp-server').chmod(0o755)
@@ -158,9 +151,6 @@ def install(runtime: Path, *, replace_helper=False, configure_path=True, homebre
             else:
                 path.write_bytes(snapshot[0])
                 path.chmod(snapshot[1])
-        if legacy:
-            service.run('enable', legacy_target, check=False)
-            service.run('bootstrap', service.domain, str(home / 'Library/LaunchAgents' / (LEGACY_LABEL + '.plist')), check=False)
         raise
     print(f'CLI {release["version"]} 安装完成，无需 Helper App。')
     if configure_path:
@@ -171,10 +161,9 @@ def install(runtime: Path, *, replace_helper=False, configure_path=True, homebre
 def main():
     parser = argparse.ArgumentParser(description='安装独立 DoTasks CLI')
     parser.add_argument('--runtime', type=Path, required=True)
-    parser.add_argument('--replace-helper', action='store_true', help='停止旧 Helper，保留其文件和数据，迁移至直接后台服务')
     args = parser.parse_args()
     try:
-        install(args.runtime, replace_helper=args.replace_helper)
+        install(args.runtime)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f'安装失败：{exc}', file=sys.stderr)
         return 1

@@ -3,7 +3,6 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 from core.db import Database
 from core.service.domain import JSON_FIELDS, decode_row
@@ -44,13 +43,15 @@ class WorkflowMetadataTest(unittest.TestCase):
         self.assertFalse(task_requires_attention({"status": "done", "auto_dispatch": 0}))
         self.assertFalse(task_requires_attention({"status": "cancelled", "auto_dispatch": 0}))
 
-    def test_current_healthy_database_skips_full_migration(self) -> None:
+    def test_current_database_reopens_without_schema_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "taskboard.db"
             Database(path)
-            with mock.patch.object(Database, "_migrate") as migrate:
-                Database(path)
-            migrate.assert_not_called()
+            with Database(path).connection() as connection:
+                before = connection.execute('PRAGMA schema_version').fetchone()[0]
+            with Database(path).connection() as connection:
+                self.assertEqual(before, connection.execute('PRAGMA schema_version').fetchone()[0])
+                self.assertEqual([], connection.execute('PRAGMA foreign_key_check').fetchall())
 
     def test_database_triggers_use_canonical_workflow_values(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

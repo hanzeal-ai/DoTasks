@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .domain import quality_gate_required
+
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -175,7 +177,7 @@ class TaskReportingMixin:
             if task.get(key) not in (None, "", [], {})
         }
         verify = group_verification_checks(task.get("acceptance_plan") or [])
-        requires_changes = self._quality_gate_required(task, "code_review")
+        requires_changes = quality_gate_required(task, "code_review")
         return {
             "task": task_context,
             "targets": (

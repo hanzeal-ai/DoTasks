@@ -79,14 +79,6 @@ class BaseDoTasksHandler(BaseHTTPRequestHandler):
             )
         return length
 
-    def _read_body(self, max_bytes: int = MAX_JSON_BODY_BYTES) -> bytes:
-        length = self._content_length(max_bytes)
-        if length == 0:
-            return b""
-        body = self.rfile.read(length)
-        if len(body) != length:
-            raise HTTPRequestError(HTTPStatus.BAD_REQUEST, "Incomplete request body")
-        return body
 
     def _read_json(self, max_bytes: int = MAX_JSON_BODY_BYTES) -> dict[str, Any]:
         length = self._content_length(max_bytes)

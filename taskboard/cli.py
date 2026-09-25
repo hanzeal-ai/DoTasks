@@ -116,16 +116,6 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
         argv = ['init']
-    # Keep existing consumers of the original server entry point working.
-    if argv[0] == "serve" or (argv[0].startswith("-") and argv[0] not in {"-h", "--help"}):
-        from .server import main as serve
-        previous = sys.argv
-        try:
-            sys.argv = [previous[0], *(argv[1:] if argv and argv[0] == "serve" else argv)]
-            serve()
-            return 0
-        finally:
-            sys.argv = previous
     parser = argparse.ArgumentParser(prog="dotasks", description="管理本地 DoTasks 后台服务和云端 Agent")
     commands = parser.add_subparsers(dest="command", required=True)
     from .cli_onboarding import DEFAULT_CLOUD_URL
@@ -133,7 +123,6 @@ def main(argv: list[str] | None = None) -> int:
     onboarding.add_argument("--cloud-url", default=DEFAULT_CLOUD_URL)
     onboarding.add_argument("--username")
     installer = commands.add_parser("install", help="安装或迁移当前 CLI 的后台服务，保留账号数据")
-    installer.add_argument("--replace-helper", action="store_true")
     commands.add_parser("account", help="显示本机绑定账号和钥匙串中保存的密码")
     upgrade = commands.add_parser("update", help="校验并安装新版 CLI；失败时恢复旧版")
     upgrade.add_argument("--check", action="store_true", help="只检查新版本")
@@ -148,7 +137,6 @@ def main(argv: list[str] | None = None) -> int:
     bind.add_argument("--team", required=True)
     bind.add_argument("--project", required=True)
     bind.add_argument("--path", required=True)
-    commands.add_parser("serve", help="前台运行本地 HTTP 服务；参数见 dotasks serve --help")
     log_parser = commands.add_parser("logs", help="查看后台日志")
     log_parser.add_argument("--service", choices=("agent", "server"), default="agent")
     log_parser.add_argument("-f", "--follow", action="store_true")
@@ -159,10 +147,10 @@ def main(argv: list[str] | None = None) -> int:
             from .cli_distribution import homebrew_runtime, runtime_root
             from .cli_install import install
             brew = homebrew_runtime()
-            install(brew or runtime_root(), homebrew=brew is not None, replace_helper=args.replace_helper)
+            install(brew or runtime_root(), homebrew=brew is not None)
         elif args.command == "init":
             from .cli_onboarding import initialize
-            from .cli_distribution import prepare_initialization
+            from .cli_onboarding import prepare_initialization
             prepare_initialization()
             initialize(args)
         elif args.command == "account":

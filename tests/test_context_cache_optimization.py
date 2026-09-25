@@ -263,20 +263,6 @@ class ContextCacheOptimizationTest(unittest.TestCase):
             )
         self.assertEqual(1, workspace_state.call_count)
 
-    def test_task_budget_can_pause_an_active_run_for_confirmation(self) -> None:
-        task = self.create_task()
-        claim = self.service.claim_next_task("worker")
-        self.service.bind_conversation(
-            task["id"], "execution", "development-thread", claim["run"]["id"],
-        )
-        self.service.record_run_token_usage(claim["run"]["id"], task["token_budget"])
-
-        result = self.service.pause_run_for_budget(claim["run"]["id"], "预算已用尽")
-
-        self.assertTrue(result["changed"])
-        self.assertEqual("waiting_confirmation", result["task"]["status"])
-        self.assertEqual(0, result["task"]["auto_dispatch"])
-        self.assertEqual("execution", result["task"]["retry_run_type"])
 
 
 if __name__ == "__main__":
