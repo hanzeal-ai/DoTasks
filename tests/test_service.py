@@ -620,8 +620,17 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertFalse(result["controller_kickoff_required"])
         self.assertEqual([], self.service.board()["projects"])
 
+    def test_file_task_enters_queue_and_inherits_attachment_after_location(self):
+        self._assert_page_task_attachment({
+            "filename": "scope.md", "kind": "attachment",
+            "content_base64": base64.b64encode(b"# Scope\n**Acceptance**").decode(),
+        })
+
     def test_page_task_enters_queue_and_reuses_its_id_after_location(self):
-        visual = self.service.upload_visual_artifact({
+        self._assert_page_task_attachment()
+
+    def _assert_page_task_attachment(self, upload=None):
+        visual = self.service.upload_visual_artifact(upload or {
             "filename": "page-task.png",
             "content_base64": base64.b64encode(
                 b"\x89PNG\r\n\x1a\npage-task"
@@ -2820,6 +2829,40 @@ class TaskboardServiceTest(unittest.TestCase):
                 "SELECT COUNT(*) count FROM task_runs WHERE task_id=?", (task["id"],)
             ).fetchone()["count"]
         self.assertEqual(before, after)
+
+    def test_mixed_intake_attachments_persist_across_service_restart(self):
+        inputs = [("spec.md", b"# Specification"), ("voice.webm", b"\x1aE\xdf\xa3audio"),
+                  ("design.png", b"\x89PNG\r\n\x1a\nimage"), ("data.bin", bytes(range(256)))]
+        references = [self.service.upload_visual_artifact({
+            "filename": name, "kind": "attachment", "content_base64": base64.b64encode(content).decode(),
+        }) for name, content in inputs]
+        requirement = self.service.finalize_task_intake({
+            "intake_kind": "requirement", "title": "Mixed content", "goal": "**Rich** content",
+            "project": str(self.example_project), "visual_references": references, "auto_dispatch": True,
+        })
+        service = TaskboardService(self.temp.name)
+        stored = service.get_requirement(requirement["requirement_id"])["requirement"]
+        self.assertEqual("**Rich** content", stored["goal"])
+        self.assertEqual([name for name, _ in inputs], [item["filename"] for item in stored["visual_references"]])
+        for reference, (_, content) in zip(stored["visual_references"], inputs):
+            self.assertEqual(content, base64.b64decode(service.read_visual_artifact(reference["artifact_id"])["content_base64"]))
+        dispatch = service._claim_next_native_dispatch("attachment-planner", stage="development")
+        for reference in references:
+            self.assertIn(reference["artifact_id"], dispatch["dispatch_prompt"])
+
+    def test_attachment_upload_limits_and_paths(self):
+        for content in (b"", b"x" * (10 * 1024 * 1024 + 1)):
+            with self.assertRaises(ValueError):
+                self.service.upload_visual_artifact({"kind": "attachment", "filename": "a.txt", "content_base64": base64.b64encode(content).decode()})
+        with self.assertRaises(ValueError):
+            self.service.upload_visual_artifact({"kind": "attachment", "content_base64": "!invalid!"})
+        with self.assertRaises(ValueError):
+            self.service.read_visual_artifact("artifact://attachments/../../../secret")
+        with self.assertRaises(ValueError):
+            self.service._manage_visual_references("test", [{"artifact_id": "artifact://attachments/missing.txt"}] * 9)
+        uploaded = self.service.upload_visual_artifact({"kind": "attachment", "filename": "../../scope.txt", "content_base64": "c2NvcGU="})
+        self.assertEqual("scope.txt", uploaded["filename"])
+        self.assertTrue(Path(uploaded["path"]).is_relative_to(self.service.data_home / "artifacts"))
 
     def test_visual_reference_is_copied_into_managed_artifacts(self):
         source = Path(self.temp.name) / "temporary-reference.png"

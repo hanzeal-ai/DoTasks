@@ -8,7 +8,7 @@ import { Checkbox } from "./components/ui/checkbox";
 import { AccountMenu } from "./components/account-menu";
 import { SidebarMenu, SidebarMenuItem, SidebarMenuButton } from "./components/ui/sidebar";
 import { NativeSelect } from "./components/ui/native-select";
-import { Textarea } from "@/components/ui/textarea";
+import { IntakeEditor } from "./components/intake-editor";
 
 export default function App({ authenticationEnabled = false, username = "本地用户", teamsEnabled = false }) {
   useEffect(() => {
@@ -24,8 +24,19 @@ export default function App({ authenticationEnabled = false, username = "本地�
             <span>DoTasks</span>
           </div>
           <nav className="sidebar-nav" aria-label="工作区导航">
-            {teamsEnabled && <a className="sidebar-item" href="/team">团队协作</a>}
             <SidebarMenu className="sidebar-primary-actions">
+              <SidebarMenuItem><SidebarMenuButton
+                variant="ghost"
+                id="requirements-nav"
+                className="sidebar-item"
+                type="button"
+              >
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <path d="M5 3.5h10a1.5 1.5 0 0 1 1.5 1.5v10a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 15V5A1.5 1.5 0 0 1 5 3.5Z" />
+                  <path d="M6.5 7h7M6.5 10h7M6.5 13h4" />
+                </svg>
+                <span>需求看板</span>
+              </SidebarMenuButton></SidebarMenuItem>
               <SidebarMenuItem><SidebarMenuButton
                 variant="ghost"
                 id="board-nav"
@@ -40,18 +51,10 @@ export default function App({ authenticationEnabled = false, username = "本地�
                 </svg>
                 <span>任务看板</span>
               </SidebarMenuButton></SidebarMenuItem>
-              <SidebarMenuItem><SidebarMenuButton
-                variant="ghost"
-                id="requirements-nav"
-                className="sidebar-item"
-                type="button"
-              >
-                <svg viewBox="0 0 20 20" aria-hidden="true">
-                  <path d="M5 3.5h10a1.5 1.5 0 0 1 1.5 1.5v10a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 15V5A1.5 1.5 0 0 1 5 3.5Z" />
-                  <path d="M6.5 7h7M6.5 10h7M6.5 13h4" />
-                </svg>
-                <span>需求看板</span>
-              </SidebarMenuButton></SidebarMenuItem>
+              {teamsEnabled && <SidebarMenuItem><a className="sidebar-item" href="/team">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="7" cy="6" r="2.5" /><path d="M2.5 16v-2a4.5 4.5 0 0 1 9 0v2M13 3.5a2.5 2.5 0 0 1 0 5M14 11a4 4 0 0 1 3.5 4v1" /></svg>
+                <span>团队协作</span>
+              </a></SidebarMenuItem>}
               <SidebarMenuItem><SidebarMenuButton
                 variant="ghost"
                 id="token-panel"
@@ -225,14 +228,6 @@ export default function App({ authenticationEnabled = false, username = "本地�
           </div>
           <div className="intake-fields">
           <label>
-            标题
-            <Input name="title" maxLength="120" required autoFocus />
-          </label>
-          <label>
-            需求目标
-            <Textarea name="goal" rows="5" required />
-          </label>
-          <label>
             Mac Codex 项目（可选）
             <NativeSelect name="project" data-project-select defaultValue="">
               <option value="">无项目（仅保存需求）</option>
@@ -245,15 +240,7 @@ export default function App({ authenticationEnabled = false, username = "本地�
               hidden
             />
           </label>
-          <label>
-            需求截图（最多 8 张，每张不超过 10 MiB）
-            <Input
-              name="visual_references"
-              type="file"
-              accept="image/png,image/jpeg,image/gif,image/webp"
-              multiple
-            />
-          </label>
+          <IntakeEditor label="需求内容" />
           <details className="intake-options"><summary>其他设置</summary>          <label>
             优先级
             <NativeSelect name="priority" defaultValue="P2">
@@ -304,14 +291,6 @@ export default function App({ authenticationEnabled = false, username = "本地�
           </div>
           <div className="intake-fields">
           <label>
-            标题
-            <Input name="title" maxLength="120" required autoFocus />
-          </label>
-          <label>
-            任务目标
-            <Textarea name="goal" rows="5" required />
-          </label>
-          <label>
             Mac Codex 项目（可选）
             <NativeSelect name="project" data-project-select defaultValue="">
               <option value="">无项目（创建到 Codex 最近）</option>
@@ -324,15 +303,7 @@ export default function App({ authenticationEnabled = false, username = "本地�
               hidden
             />
           </label>
-          <label>
-            任务截图（最多 8 张，每张不超过 10 MiB）
-            <Input
-              name="visual_references"
-              type="file"
-              accept="image/png,image/jpeg,image/gif,image/webp"
-              multiple
-            />
-          </label>
+          <IntakeEditor label="任务内容" />
           <details className="intake-options"><summary>其他设置</summary>          <label>
             类型
             <NativeSelect name="type" defaultValue="feature">

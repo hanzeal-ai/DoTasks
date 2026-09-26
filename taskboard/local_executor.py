@@ -194,7 +194,8 @@ class LocalCodexExecutor:
                     )
                 reference["path"] = str(existing)
                 localized_references.append(reference)
-                input_image_paths.append(str(existing))
+                if not str(reference.get("artifact_id") or "").startswith("artifact://attachments/"):
+                    input_image_paths.append(str(existing))
                 continue
             artifact_id = str(reference.get("artifact_id") or "").strip()
             if not artifact_id or not hasattr(self.service, "read_visual_artifact"):
@@ -217,6 +218,10 @@ class LocalCodexExecutor:
                 "image/gif": ".gif",
                 "image/webp": ".webp",
             }.get(str(artifact.get("content_type") or reference.get("content_type") or ""))
+            if artifact_id.startswith("artifact://attachments/"):
+                suffix = Path(artifact_id).suffix
+                if not suffix or len(suffix) > 11 or not suffix[1:].isalnum():
+                    suffix = ".bin"
             if not suffix:
                 raise ValueError(f"Dispatch visual artifact type is unsupported: {artifact_id}")
             if not run_id or any(part in run_id for part in ("/", "\\", "..")):
@@ -236,7 +241,8 @@ class LocalCodexExecutor:
             })
             localized_references.append(reference)
             local_paths.append(str(target))
-            input_image_paths.append(str(target))
+            if not artifact_id.startswith("artifact://attachments/"):
+                input_image_paths.append(str(target))
         if isinstance(payload, dict):
             payload = dict(payload)
             payload["visual_references"] = localized_references

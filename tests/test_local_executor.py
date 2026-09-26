@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import tempfile
 import subprocess
 import unittest
@@ -209,6 +210,35 @@ class LocalCodexExecutorTest(unittest.TestCase):
         self.assertEqual(content, local_path.read_bytes())
         executor._cleanup_dispatch_visuals(localized)
         self.assertFalse(local_path.exists())
+
+    def test_files_and_audio_are_materialized_without_image_inputs(self):
+        for marker, filename, content_type, content in [
+            ("RUN_CONTEXT_JSON=", "scope.md", "text/markdown", b"# Scope"),
+            ("REQUIREMENT_VISUAL_REFERENCES_JSON=", "voice.webm", "audio/webm", b"audio bytes"),
+        ]:
+            with self.subTest(filename=filename):
+                service = FakeService(None)
+                digest = hashlib.sha256(content).hexdigest()
+                artifact_id = f"artifact://attachments/{digest}{Path(filename).suffix}"
+                service.visual_artifacts[artifact_id] = {"artifact_id": artifact_id, "content_type": content_type,
+                    "sha256": digest, "content_base64": base64.b64encode(content).decode()}
+                references = [{"artifact_id": artifact_id, "path": "/missing/" + filename, "sha256": digest}]
+                payload = {"visual_references": references} if marker == "RUN_CONTEXT_JSON=" else references
+                executor = self.build_executor(service, close_lifecycle=True)
+                dispatch = make_dispatch(dispatch_prompt=marker + json.dumps(payload))
+                localized = executor._localize_dispatch_prompt(dispatch)
+                self.assertEqual([], localized["input_image_paths"])
+                path = Path(localized["local_visual_paths"][0])
+                self.assertEqual(content, path.read_bytes())
+                self.assertIn(str(path), localized["dispatch_prompt"])
+                # The same bytes must remain a file input when already local.
+                again = executor._localize_dispatch_prompt(localized)
+                self.assertEqual([], again["input_image_paths"])
+                executor._cleanup_dispatch_visuals(localized)
+                self.assertFalse(path.exists())
+                service.visual_artifacts[artifact_id]["sha256"] = "bad-checksum"
+                with self.assertRaises(ValueError):
+                    executor._localize_dispatch_prompt(dispatch)
 
     def test_duplicate_active_dispatch_preserves_worker_visual(self):
         content = b"\x89PNG\r\n\x1a\nactive-worker-visual"

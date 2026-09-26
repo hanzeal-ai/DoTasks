@@ -4,6 +4,8 @@ import base64
 import binascii
 import hashlib
 import json
+import mimetypes
+import re
 import os
 import tempfile
 from pathlib import Path
@@ -16,7 +18,10 @@ VISUAL_UPLOAD_BODY_LIMIT = 15 * 1024 * 1024
 
 
 class TaskVisualMixin:
-    """Store visual intake artifacts and release them after their last task finishes."""
+    """Store intake attachments and release them after their last task finishes.
+
+    The existing visual_references contract carries both images and opaque files.
+    """
 
     @staticmethod
     def _detect_image(content: bytes) -> tuple[str, str]:
@@ -51,7 +56,10 @@ class TaskVisualMixin:
         if not target.is_file():
             raise ValueError(f"Managed visual artifact does not exist: {artifact_id}")
         content = target.read_bytes()
-        content_type, _suffix = self._detect_image(content)
+        if artifact_id.startswith("artifact://attachments/"):
+            content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        else:
+            content_type, _suffix = self._detect_image(content)
         return {
             "artifact_id": artifact_id,
             "path": str(target),
@@ -63,7 +71,7 @@ class TaskVisualMixin:
         }
 
     def upload_visual_artifact(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist one validated image and return its stable managed reference."""
+        """Persist an image or explicit opaque attachment as a managed reference."""
         if not isinstance(payload, dict):
             raise ValueError("visual artifact payload must be an object")
         encoded = str(payload.get("content_base64") or "").strip()
@@ -88,12 +96,24 @@ class TaskVisualMixin:
             raise ValueError("Visual artifact must not be empty")
         if len(content) > MAX_VISUAL_ARTIFACT_BYTES:
             raise ValueError("Visual artifact exceeds 10 MiB")
-        content_type, suffix = self._detect_image(content)
+        attachment = payload.get("kind") == "attachment"
+        try:
+            content_type, suffix = self._detect_image(content)
+            attachment = False
+        except ValueError:
+            if not attachment:
+                raise
+            suffix = Path(filename).suffix.lower()
+            if not re.fullmatch(r"\.[a-z0-9]{1,10}", suffix):
+                suffix = ".bin"
+            # Files are opaque input, never served inline or executed by the server.
+            content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
         digest = hashlib.sha256(content).hexdigest()
         supplied_digest = str(payload.get("sha256") or "").strip().lower()
         if supplied_digest and supplied_digest != digest:
             raise ValueError("Visual artifact SHA-256 does not match")
-        destination = self.data_home / "artifacts" / "visuals"
+        bucket = "attachments" if attachment else "visuals"
+        destination = self.data_home / "artifacts" / bucket
         destination.mkdir(parents=True, exist_ok=True)
         target = destination / f"{digest}{suffix}"
         if not target.exists():
@@ -105,7 +125,7 @@ class TaskVisualMixin:
             finally:
                 temporary_path.unlink(missing_ok=True)
         target.chmod(0o600)
-        artifact_id = f"artifact://visuals/{target.name}"
+        artifact_id = f"artifact://{bucket}/{target.name}"
         return self._visual_reference_record(
             artifact_id,
             str(payload.get("purpose") or ""),

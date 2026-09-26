@@ -780,16 +780,16 @@ function fileAsBase64(file) {
     const reader = new FileReader();
     reader.addEventListener("load", () => {
       const encoded = String(reader.result || "").split(",", 2)[1] || "";
-      encoded ? resolve(encoded) : reject(new Error(`无法读取图片：${file.name}`));
+      encoded ? resolve(encoded) : reject(new Error(`无法读取附件：${file.name}`));
     });
-    reader.addEventListener("error", () => reject(new Error(`无法读取图片：${file.name}`)));
+    reader.addEventListener("error", () => reject(new Error(`无法读取附件：${file.name}`)));
     reader.readAsDataURL(file);
   });
 }
 
 async function uploadVisualReferences(values) {
   const files = values.getAll("visual_references").filter(file => file instanceof File && file.size);
-  if (files.length > 8) throw new Error("一次最多上传 8 张图片");
+  if (files.length > 8) throw new Error("一次最多上传 8 个附件");
   for (const file of files) {
     if (file.size > 10 * 1024 * 1024) throw new Error(`${file.name} 超过 10 MiB`);
   }
@@ -798,7 +798,8 @@ async function uploadVisualReferences(values) {
     body: JSON.stringify({
       filename: file.name,
       content_base64: await fileAsBase64(file),
-      purpose: "任务视觉参考",
+      purpose: "需求与任务附件",
+      kind: "attachment",
     }),
   })));
 }
@@ -812,6 +813,7 @@ document.addEventListener("submit", async event => {
     const project = selectedProjectPath(values);
     button.disabled = true;
     try {
+      if (!String(values.get("goal") || "").trim()) throw new Error("请填写内容或添加附件");
       const visualReferences = await uploadVisualReferences(values);
       const result = await api("/api/task-intakes/enqueue", {
         method: "POST",
@@ -849,6 +851,7 @@ document.addEventListener("submit", async event => {
     const project = selectedProjectPath(values);
     button.disabled = true;
     try {
+      if (!String(values.get("goal") || "").trim()) throw new Error("请填写内容或添加附件");
       const visualReferences = await uploadVisualReferences(values);
       const result = await api("/api/task-intakes/finalize", {
         method: "POST",
