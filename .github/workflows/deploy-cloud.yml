@@ -48,10 +48,12 @@ jobs:
           path: dist/cli/
           compression-level: 0
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 2
 
   build:
     needs: portable
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -131,3 +133,24 @@ jobs:
           DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: bash deployment/send.sh site "$GITHUB_SHA" "$RUNNER_TEMP/dotasks-release/dotasks-release.zip"
+
+  cleanup-artifacts:
+    needs: deploy
+    if: needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      actions: write
+    steps:
+      - name: Delete consumed transfer artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          artifact_ids=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name == ("dotasks-release-" + env.GITHUB_SHA) or .name == "portable-macos-arm64" or .name == "portable-macos-x86_64") | .id')
+          while IFS= read -r artifact_id; do
+            [[ -n "$artifact_id" ]] || continue
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"
+          done <<< "$artifact_ids"

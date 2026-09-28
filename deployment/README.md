@@ -37,3 +37,9 @@ Run `./scripts/test tests.test_ssh_deployment tests.test_ssh_activation tests.te
 ## Current host operations
 
 The 2026-09-25 resource/log/loopback rollout is documented in [host operations](host/README.md) and [delivery evidence](../docs/host-optimization-2026-09-25.md). The old `scripts/deploy-aliyun-cli.py` entry point is retired; daily application releases use the restricted SSH workflow. Host configuration changes do not bypass the operator-owned configuration boundary. Business backup scheduling was explicitly declined for this noncritical host; existing deployment recovery behavior is unchanged.
+
+## Actions 临时产物清理
+
+部署成功后，独立 cleanup-artifacts 任务仅删除本次运行中已消费的传递产物；不会扫描其他运行、服务器文件、数据库、缓存或备份。只有清理任务授予 actions: write，清理异常不会把已完成的发布判为失败，可从该任务日志检查并重跑清理任务。
+
+失败、取消或未启用部署时保留传递产物，上传时设置 2 天自动过期；Docker 构建记录不再上传。此策略仅作用于采用新配置的运行，已有产物沿用原过期时间。产物清理后若要重新部署同一版本，需重跑完整工作流以重建产物，不能只重跑下载/部署任务。线上恢复继续采用现有服务器版本、备份及恢复流程；撤销本策略可移除清理任务并恢复保留期，已经删除的 Actions 产物无法恢复。
