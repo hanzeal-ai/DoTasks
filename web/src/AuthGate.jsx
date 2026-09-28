@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import App from "./App.jsx";
-import TeamApp from "./TeamApp.jsx";
 import { requestJson } from "./ui-core.js";
 
 export default function AuthGate() {
@@ -45,7 +44,6 @@ export default function AuthGate() {
     }
   }
 
-  if (auth?.authenticated && auth.teams_enabled && window.location.pathname === '/team') return <TeamApp username={auth.username} />;
   if (auth?.authenticated) return <App teamsEnabled={auth.teams_enabled} authenticationEnabled={auth.enabled} username={auth.username || (auth.enabled ? "当前用户" : "本地用户")} />;
 
   return (

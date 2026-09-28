@@ -36,6 +36,47 @@ class TaskboardHTTPServerTest(unittest.TestCase):
         connection.close()
         return response.status, response.headers, json.loads(content or b"{}")
 
+    def test_managed_image_preview_is_binary_and_rejects_opaque_paths(self):
+        service = self.server.RequestHandlerClass.service
+        content = b"\x89PNG\r\n\x1a\nimage-fixture"
+        artifact = service.upload_visual_artifact({
+            "filename": "image.png", "content_base64": base64.b64encode(content).decode(),
+        })
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2)
+        from urllib.parse import quote
+        connection.request("GET", "/api/visual-artifacts/content?artifact_id=" + quote(artifact["artifact_id"], safe=""))
+        response = connection.getresponse()
+        self.assertEqual(200, response.status)
+        self.assertEqual(content, response.read())
+        self.assertEqual("image/png", response.getheader("Content-Type"))
+        self.assertEqual("nosniff", response.getheader("X-Content-Type-Options"))
+        self.assertEqual("private, no-store", response.getheader("Cache-Control"))
+        connection.close()
+        for value in ["artifact://../../secret.png", "artifact://attachments/file.html", "https://example.org/image.png", ""]:
+            status, _, _ = self.request("GET", "/api/visual-artifacts/content?artifact_id=" + quote(value, safe=""))
+            self.assertEqual(400, status)
+        self.assertEqual(403, self.request("GET", "/api/visual-artifacts/content", Host="evil.test")[0])
+
+    def test_uploaded_image_reference_survives_requirement_submission(self):
+        content = b"\x89PNG\r\n\x1a\nintake-fixture"
+        headers = {"Origin": self.origin, "Content-Type": "application/json"}
+        status, _, image = self.request("POST", "/api/visual-artifacts", json.dumps({
+            "filename": "design.png", "content_base64": base64.b64encode(content).decode(),
+        }).encode(), **headers)
+        self.assertEqual(201, status)
+        from urllib.parse import quote
+        url = "/api/visual-artifacts/content?artifact_id=" + quote(image["artifact_id"], safe="")
+        goal = "图片需求\n\n![design](" + url + ")"
+        status, _, result = self.request("POST", "/api/task-intakes/finalize", json.dumps({
+            "intake_kind": "requirement", "title": "图片需求", "goal": goal,
+            "description": goal, "project": "", "priority": "P2", "auto_dispatch": False,
+            "visual_references": [{"artifact_id": image["artifact_id"], "filename": "design.png"}],
+        }).encode(), **headers)
+        self.assertEqual(200, status, result)
+        requirement = self.server.RequestHandlerClass.service.get_requirement(result["requirement_id"])["requirement"]
+        self.assertEqual(goal, requirement["goal"])
+        self.assertEqual(image["artifact_id"], requirement["visual_references"][0]["artifact_id"])
+
     def test_workflow_metadata_comes_from_server(self) -> None:
         status, _, payload = self.request("GET", "/api/workflow")
         self.assertEqual(200, status)

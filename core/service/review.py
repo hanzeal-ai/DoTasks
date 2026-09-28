@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .domain import quality_gate_required
+from .domain import quality_gate_required, has_project_target_scope
 
 import json
 import posixpath
@@ -76,10 +76,13 @@ class TaskReviewMixin:
         locked: dict[str, set[str]] = {}
         for row in rows:
             locked.setdefault(posixpath.normpath(row["file"]), set()).add(row["symbol"])
+        project_scope = len(task_ids) == 1 and has_project_target_scope(self.get_task(task_id))
         for location in changed_locations:
             if not isinstance(location, dict):
                 raise ValueError("Every changed location must be an object")
             file = self._normalize_target_file(location.get("file"))
+            if project_scope:
+                continue  # normalize_target_file still rejects paths outside the project.
             if not file or file not in locked:
                 raise ValueError(f"Changed location is outside the task target lock: {file or '<missing>'}")
             allowed_symbols = locked[file]
@@ -138,7 +141,7 @@ class TaskReviewMixin:
                     task_ids,
                 ).fetchall()
             }
-        outside = actual - locked
+        outside = set() if has_project_target_scope(task) else actual - locked
         if outside:
             raise ValueError(f"Actual Git changes are outside the task target lock: {', '.join(sorted(outside))}")
         unreported = actual - submitted

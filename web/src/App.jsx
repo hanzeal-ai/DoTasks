@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,7 +8,21 @@ import { Checkbox } from "./components/ui/checkbox";
 import { AccountMenu } from "./components/account-menu";
 import { SidebarMenu, SidebarMenuItem, SidebarMenuButton } from "./components/ui/sidebar";
 import { NativeSelect } from "./components/ui/native-select";
-import { IntakeEditor } from "./components/intake-editor";
+import TeamApp from "./TeamApp.jsx";
+const LazyIntakeEditor = lazy(() => import("./components/intake-editor").then(module => ({ default: module.IntakeEditor })));
+function IntakeEditor(props) {
+  return <Suspense fallback={<p role="status">正在加载编辑器…</p>}><LazyIntakeEditor {...props} /></Suspense>;
+}
+
+function TeamWorkspace() {
+  const [active, setActive] = useState(false);
+  useEffect(() => {
+    const onViewChange = event => setActive(event.detail === "team");
+    document.addEventListener("workspace-view-change", onViewChange);
+    return () => document.removeEventListener("workspace-view-change", onViewChange);
+  }, []);
+  return active ? <TeamApp /> : null;
+}
 
 export default function App({ authenticationEnabled = false, username = "本地用户", teamsEnabled = false }) {
   useEffect(() => {
@@ -51,10 +65,10 @@ export default function App({ authenticationEnabled = false, username = "本地�
                 </svg>
                 <span>任务看板</span>
               </SidebarMenuButton></SidebarMenuItem>
-              {teamsEnabled && <SidebarMenuItem><a className="sidebar-item" href="/team">
+              {teamsEnabled && <SidebarMenuItem><SidebarMenuButton variant="ghost" id="team-nav" className="sidebar-item" type="button">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="7" cy="6" r="2.5" /><path d="M2.5 16v-2a4.5 4.5 0 0 1 9 0v2M13 3.5a2.5 2.5 0 0 1 0 5M14 11a4 4 0 0 1 3.5 4v1" /></svg>
                 <span>团队协作</span>
-              </a></SidebarMenuItem>}
+              </SidebarMenuButton></SidebarMenuItem>}
               <SidebarMenuItem><SidebarMenuButton
                 variant="ghost"
                 id="token-panel"
@@ -130,6 +144,7 @@ export default function App({ authenticationEnabled = false, username = "本地�
           </header>
           <p id="dispatcher-status" className="dispatcher-status" role="status" hidden></p>
           <section id="content" className="board-columns"></section>
+          {teamsEnabled && <TeamWorkspace />}
         </main>
       </div>
 

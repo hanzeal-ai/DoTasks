@@ -1,0 +1,556 @@
+{
+  "retrieved": "2026-09-28",
+  "source": "https://template.tiptap.dev/api/registry/components/",
+  "files": [
+    {
+      "component": "badge",
+      "path": "tiptap-ui-primitive/badge/badge-colors.scss",
+      "upstream_sha256": "a4c6362cba90df44c04168e257cd80853367b9e68549279caf4d98123dc59a58"
+    },
+    {
+      "component": "badge",
+      "path": "tiptap-ui-primitive/badge/badge-group.scss",
+      "upstream_sha256": "fd893cd89cd23a8ed2457b79e22ddf2ceb3c69bc77e9b36748087dc0a9bc681c"
+    },
+    {
+      "component": "badge",
+      "path": "tiptap-ui-primitive/badge/badge.scss",
+      "upstream_sha256": "78bcaf8c24508e19639dd86438154ee52c7d4f75c97e56df984c9117bc87fdf5"
+    },
+    {
+      "component": "badge",
+      "path": "tiptap-ui-primitive/badge/badge.tsx",
+      "upstream_sha256": "67284496bad6fe5262145037dc2c703f45bd0b90687b4eab504a44c88da309ce"
+    },
+    {
+      "component": "badge",
+      "path": "tiptap-ui-primitive/badge/index.tsx",
+      "upstream_sha256": "58caaaf0c3a0750b39d00dcb5486093aebbd154606a4c49af8cf87edfd7607e0"
+    },
+    {
+      "component": "blockquote-button",
+      "path": "tiptap-ui/blockquote-button/blockquote-button.tsx",
+      "upstream_sha256": "f0ed129ffd3773910d53c089b279ee86cba0b5fac8bf59eb9c8ab51dd1328d0e"
+    },
+    {
+      "component": "blockquote-button",
+      "path": "tiptap-ui/blockquote-button/index.tsx",
+      "upstream_sha256": "f12e0b7f7dc629ecf4247a4df0eb94a2ea683f95efeaf84d30322e569fb6c28a"
+    },
+    {
+      "component": "blockquote-button",
+      "path": "tiptap-ui/blockquote-button/use-blockquote.ts",
+      "upstream_sha256": "1f90e8f89c08f4af9bf0c4354bd09f1a2194ff3ed8fa258821edace28221de41"
+    },
+    {
+      "component": "blockquote-icon",
+      "path": "tiptap-icons/blockquote-icon.tsx",
+      "upstream_sha256": "2bb93731549059a01f40f3c8748447c9fea0410b0e42648750ccd2eeaa2ad2b7"
+    },
+    {
+      "component": "blockquote-node",
+      "path": "tiptap-node/blockquote-node/blockquote-node.scss",
+      "upstream_sha256": "b945a853c52cb20e18493694b73397150ab59f3722ce916d057acc8221f1285b"
+    },
+    {
+      "component": "bold-icon",
+      "path": "tiptap-icons/bold-icon.tsx",
+      "upstream_sha256": "33b5e15738eb8910c7cf9ce78ace4a6befdfd194ed1871c1500c9e0865ecf141"
+    },
+    {
+      "component": "button",
+      "path": "tiptap-ui-primitive/button/button-colors.scss",
+      "upstream_sha256": "8b11af156e1a84f938b06e0588e349bd28dc9510861f38dfdcf671b46da38a1f"
+    },
+    {
+      "component": "button",
+      "path": "tiptap-ui-primitive/button/button.scss",
+      "upstream_sha256": "2ca9add18a479964b08fb62e7919a18734807b469cc423645190e7e02af1e12a"
+    },
+    {
+      "component": "button",
+      "path": "tiptap-ui-primitive/button/button.tsx",
+      "upstream_sha256": "b3760137bf473f093523ed0ad83673499e3f68eb2b8c2d54a4ff9db2dcb59cd5"
+    },
+    {
+      "component": "button",
+      "path": "tiptap-ui-primitive/button/index.tsx",
+      "upstream_sha256": "af34b9af96acc5b433c667d1faf5c5f79cd169ef33a47d3e27b6d6f94ced22c3"
+    },
+    {
+      "component": "button-group",
+      "path": "tiptap-ui-primitive/button-group/button-group.scss",
+      "upstream_sha256": "02c2f2d85398e0ed737f98e56d8999b2203b6dc1ac02df721c0f75568dc2f762"
+    },
+    {
+      "component": "button-group",
+      "path": "tiptap-ui-primitive/button-group/button-group.tsx",
+      "upstream_sha256": "928834a590cd5c3a1acdf73ca34752a37b7c8b90cbc63b337683152795297844"
+    },
+    {
+      "component": "button-group",
+      "path": "tiptap-ui-primitive/button-group/index.tsx",
+      "upstream_sha256": "ae7a82b7958a8ef77b2d3af8c545ea79c48965a0baa3aaff7b7a0623c4ffdbaa"
+    },
+    {
+      "component": "card",
+      "path": "tiptap-ui-primitive/card/card.scss",
+      "upstream_sha256": "42950a12b605b88a92c1cf14695ecd210d43a701c0e04256bdb0d344c0418a02"
+    },
+    {
+      "component": "card",
+      "path": "tiptap-ui-primitive/card/card.tsx",
+      "upstream_sha256": "32f629fe5f4873591c39fee3dbd2e03d758ba970c5188bd503c94777ff1ace22"
+    },
+    {
+      "component": "card",
+      "path": "tiptap-ui-primitive/card/index.tsx",
+      "upstream_sha256": "20a86e9872f005ab5bcb37572776cc4fb6b1edc36ef9c60e7192b8d9608c176c"
+    },
+    {
+      "component": "check-icon",
+      "path": "tiptap-icons/check-icon.tsx",
+      "upstream_sha256": "85a66dd06e42bcc366e30e139c4c73b5ce3a4948e6d9f8e7ee62a80896a8453e"
+    },
+    {
+      "component": "chevron-down-icon",
+      "path": "tiptap-icons/chevron-down-icon.tsx",
+      "upstream_sha256": "37bd304a310f22da6098a80216473630dff9a5842b29767a2696758b5c1021a5"
+    },
+    {
+      "component": "close-icon",
+      "path": "tiptap-icons/close-icon.tsx",
+      "upstream_sha256": "504c78d61a19252064b5ab836b81404a663d9409ec1c572fb18838241ec651cf"
+    },
+    {
+      "component": "code-block-button",
+      "path": "tiptap-ui/code-block-button/code-block-button.tsx",
+      "upstream_sha256": "13d0f91a0f4c5256920c08b139ccdb172ffcdeb7d51c305f1c321c6e28c8337b"
+    },
+    {
+      "component": "code-block-button",
+      "path": "tiptap-ui/code-block-button/index.tsx",
+      "upstream_sha256": "b2448bf4af6dd5b913c75e004fb91bc8a1986557b3a1d63f29d2250d719910da"
+    },
+    {
+      "component": "code-block-button",
+      "path": "tiptap-ui/code-block-button/use-code-block.ts",
+      "upstream_sha256": "66e18f023913b76c1991ee4ce3b5d99c6ef5ff0746ffa0aca33dc7382e985a0e"
+    },
+    {
+      "component": "code-block-icon",
+      "path": "tiptap-icons/code-block-icon.tsx",
+      "upstream_sha256": "8c85eb9beec76955f56bfeafd3aa2d2b5b318f65181255627afa2b23a02726ef"
+    },
+    {
+      "component": "code-block-node",
+      "path": "tiptap-node/code-block-node/code-block-node.scss",
+      "upstream_sha256": "e0cd584b72de8b344a049e0c84afecf683923cec9348d6e6aa003a34a61cf657"
+    },
+    {
+      "component": "code2-icon",
+      "path": "tiptap-icons/code2-icon.tsx",
+      "upstream_sha256": "c0ed8661ec52f392ab390eaa4fa9fdde80b2862e42b2ade2e55485d337918a68"
+    },
+    {
+      "component": "corner-down-left-icon",
+      "path": "tiptap-icons/corner-down-left-icon.tsx",
+      "upstream_sha256": "9686ee892fb0d57ccca050d572fddf6585a433a43ab5d85ca0100c7ff63e00c1"
+    },
+    {
+      "component": "dropdown-menu",
+      "path": "tiptap-ui-primitive/dropdown-menu/dropdown-menu.tsx",
+      "upstream_sha256": "68f1be3ded1c58737fcba67e63ed4c62e71dfa9d45bdc6b33f9923106b57794e"
+    },
+    {
+      "component": "dropdown-menu",
+      "path": "tiptap-ui-primitive/dropdown-menu/dropdown-menu.scss",
+      "upstream_sha256": "fee65105e2003323856d9cde87661f1b93e94957eb281a451389e785c15b1c2a"
+    },
+    {
+      "component": "dropdown-menu",
+      "path": "tiptap-ui-primitive/dropdown-menu/index.tsx",
+      "upstream_sha256": "61a49d77af85069d456d10aa7a254f736cd82c5c8da788841c2488307f9dd8b8"
+    },
+    {
+      "component": "external-link-icon",
+      "path": "tiptap-icons/external-link-icon.tsx",
+      "upstream_sha256": "6dc615de344513e56fb4e1b5a52b48f3bd3aa2064c5c41aedb06403c0ad415fb"
+    },
+    {
+      "component": "heading-button",
+      "path": "tiptap-ui/heading-button/heading-button.tsx",
+      "upstream_sha256": "c686c78be954fb60063e891571560d234a2a247c8b1d9f2f253203b8bf6f8578"
+    },
+    {
+      "component": "heading-button",
+      "path": "tiptap-ui/heading-button/index.tsx",
+      "upstream_sha256": "70362da64f74b9ef0ae7d9f6cdeb6b0107f6d3082c5cfa7c4a06a3c9df8b5967"
+    },
+    {
+      "component": "heading-button",
+      "path": "tiptap-ui/heading-button/use-heading.ts",
+      "upstream_sha256": "192ac443d655720b4e123fcbd6352afcc1b44c33b9f2a115e7784e64f43f433e"
+    },
+    {
+      "component": "heading-dropdown-menu",
+      "path": "tiptap-ui/heading-dropdown-menu/heading-dropdown-menu.tsx",
+      "upstream_sha256": "4a2739f37e1ff58e6a3a0e05461f25ebb965b9d2ab6b892e4717daadb34df7ff"
+    },
+    {
+      "component": "heading-dropdown-menu",
+      "path": "tiptap-ui/heading-dropdown-menu/index.tsx",
+      "upstream_sha256": "cd169901c1b460667f6d27fac95f64482c40e55fde30b8d37963f36aba2f3045"
+    },
+    {
+      "component": "heading-dropdown-menu",
+      "path": "tiptap-ui/heading-dropdown-menu/use-heading-dropdown-menu.ts",
+      "upstream_sha256": "e56f42d8a507c842b6a48eef82db7a37f1ff46f00c556c59e6fb2b3720a53600"
+    },
+    {
+      "component": "heading-five-icon",
+      "path": "tiptap-icons/heading-five-icon.tsx",
+      "upstream_sha256": "d87bac5c13849faba4fa3f1608017378e6254cd7e4df587555ddf04fbaed1b4e"
+    },
+    {
+      "component": "heading-four-icon",
+      "path": "tiptap-icons/heading-four-icon.tsx",
+      "upstream_sha256": "c91daef2d57c6c86c3250ec11c745eddd1a7778a273d07baf4716dc811916075"
+    },
+    {
+      "component": "heading-icon",
+      "path": "tiptap-icons/heading-icon.tsx",
+      "upstream_sha256": "5cc7f58c9effd4e76be32fc129388e0a74dfba36114898fe9efe688e69cbb58e"
+    },
+    {
+      "component": "heading-node",
+      "path": "tiptap-node/heading-node/heading-node.scss",
+      "upstream_sha256": "c7e30543adf9ef309c416a4e57fb5748333d2e7fa22910188e823e9b2433e040"
+    },
+    {
+      "component": "heading-one-icon",
+      "path": "tiptap-icons/heading-one-icon.tsx",
+      "upstream_sha256": "7db2cf3f85c403a814a1883a50fae1477b883028eb531aa85d960b3b6708db8e"
+    },
+    {
+      "component": "heading-six-icon",
+      "path": "tiptap-icons/heading-six-icon.tsx",
+      "upstream_sha256": "c8aa590435e7153c4059eb2d03b09b7bc203ec110d8ce4a6de0d33edffddf54b"
+    },
+    {
+      "component": "heading-three-icon",
+      "path": "tiptap-icons/heading-three-icon.tsx",
+      "upstream_sha256": "65913a915b5cf5caa9ed135ad6cbd71fcd9e208eb846576b872738c6518d4118"
+    },
+    {
+      "component": "heading-two-icon",
+      "path": "tiptap-icons/heading-two-icon.tsx",
+      "upstream_sha256": "e202edba448ed735a2ff94cafea95d2d84d22420af94d8adc547d420919cc8da"
+    },
+    {
+      "component": "image-node",
+      "path": "tiptap-node/image-node/image-node.scss",
+      "upstream_sha256": "18754edfce07730e90276ff4c19c5cdb1c38cd21ef05a48c535b230f8f5588aa"
+    },
+    {
+      "component": "image-plus-icon",
+      "path": "tiptap-icons/image-plus-icon.tsx",
+      "upstream_sha256": "9094e621e6140f54fd2a68dadf26812e2c3dae0af19a2f7f0dcacd2c05f55e84"
+    },
+    {
+      "component": "image-upload-button",
+      "path": "tiptap-ui/image-upload-button/image-upload-button.tsx",
+      "upstream_sha256": "cadfe5e90f8822ae696ec432b0871e37129eff2ca369a0806bbf59b76bd6f91b"
+    },
+    {
+      "component": "image-upload-button",
+      "path": "tiptap-ui/image-upload-button/index.tsx",
+      "upstream_sha256": "fa02073abfd60460b713f9fe577ff9b51c7a116179db2b7ddede4b47697bb05f"
+    },
+    {
+      "component": "image-upload-button",
+      "path": "tiptap-ui/image-upload-button/use-image-upload.ts",
+      "upstream_sha256": "6291c2fd569c9ed9128b0d2a7c3d518e560cea29f2279d9b3dccc1de56786830"
+    },
+    {
+      "component": "image-upload-node",
+      "path": "tiptap-node/image-upload-node/image-upload-node-extension.ts",
+      "upstream_sha256": "3d55fdf98f3cb68b6a193546c0421f0955e74077d2fa7df95d2aee18d0e695f7"
+    },
+    {
+      "component": "image-upload-node",
+      "path": "tiptap-node/image-upload-node/image-upload-node.scss",
+      "upstream_sha256": "9fce3a746eadd5be3a6ea910852a94c5b456e38ac764b5eb8644cbe7e4d9e83e"
+    },
+    {
+      "component": "image-upload-node",
+      "path": "tiptap-node/image-upload-node/image-upload-node.tsx",
+      "upstream_sha256": "23b878fec8a4083967cd6ada4b4b2930792d8a3985692aa27cfc4a8e178c8423"
+    },
+    {
+      "component": "image-upload-node",
+      "path": "tiptap-node/image-upload-node/index.tsx",
+      "upstream_sha256": "aad44e945d839210830410335b5bc7f3dc21ae90c4b65c794193e6aa508d42dc"
+    },
+    {
+      "component": "input",
+      "path": "tiptap-ui-primitive/input/input.tsx",
+      "upstream_sha256": "68490cc30b6c8d3c32c2923a723ffd712f6806d7c563c2826478b2d4e49d58ae"
+    },
+    {
+      "component": "input",
+      "path": "tiptap-ui-primitive/input/input.scss",
+      "upstream_sha256": "fe415daeecb5f6961f415d425be03de2d286f8dd6105036d3cea943c1a43d9c9"
+    },
+    {
+      "component": "input",
+      "path": "tiptap-ui-primitive/input/index.tsx",
+      "upstream_sha256": "3116182228536c5b9f9a84ad00741dbbf40ba9fc3c037d1742ba387b0c34e539"
+    },
+    {
+      "component": "italic-icon",
+      "path": "tiptap-icons/italic-icon.tsx",
+      "upstream_sha256": "59cce87f6098ca53cb301eb756df8d0509e35b89259b98375eea4cc32a4970d4"
+    },
+    {
+      "component": "link-icon",
+      "path": "tiptap-icons/link-icon.tsx",
+      "upstream_sha256": "473e0eda806864486a58a9d65adb04882f6c508bec02d39833c860e21896bfd3"
+    },
+    {
+      "component": "link-popover",
+      "path": "tiptap-ui/link-popover/link-popover.tsx",
+      "upstream_sha256": "045cdface6a2b608c503d940516f3734c04751477a6e6b85eeb115cc4a70a1ff"
+    },
+    {
+      "component": "link-popover",
+      "path": "tiptap-ui/link-popover/link-popover.scss",
+      "upstream_sha256": "291064a0a9bda50597bd07e0f8acc59ca1eeb3af282a42bcf190f2544fc64e76"
+    },
+    {
+      "component": "link-popover",
+      "path": "tiptap-ui/link-popover/index.tsx",
+      "upstream_sha256": "af91196a1eea0d2fc1dba43e6c94dad88d97ca13723fd6b03ebe18af83808f85"
+    },
+    {
+      "component": "link-popover",
+      "path": "tiptap-ui/link-popover/use-link-popover.ts",
+      "upstream_sha256": "62ca23e95f38247f820ab37d9035e8bcc51e359bc092ac23824c8a58b5233f84"
+    },
+    {
+      "component": "list-button",
+      "path": "tiptap-ui/list-button/list-button.tsx",
+      "upstream_sha256": "a1db5556aa6a49b7fe70c74fde8441c966ee0808d4f3c4a0037e6a314e2ea52a"
+    },
+    {
+      "component": "list-button",
+      "path": "tiptap-ui/list-button/index.tsx",
+      "upstream_sha256": "1dcaef38339a6cc5fca287411b18a3e0ce221ddc21cf1e489e57cdc35ea03d14"
+    },
+    {
+      "component": "list-button",
+      "path": "tiptap-ui/list-button/use-list.ts",
+      "upstream_sha256": "f0280cef6b1679383cbcdebea7c1401c56c6dc12b4bc1a29758af5dbdb8c42ae"
+    },
+    {
+      "component": "list-dropdown-menu",
+      "path": "tiptap-ui/list-dropdown-menu/list-dropdown-menu.tsx",
+      "upstream_sha256": "ccc19099837f541be221fc7c18ce62260a42b5c24a788867ad6ab394424a227a"
+    },
+    {
+      "component": "list-dropdown-menu",
+      "path": "tiptap-ui/list-dropdown-menu/index.tsx",
+      "upstream_sha256": "512164ed0601571a810693fbddc3af3b9bfcf3339387924bdf84de2f8b59f539"
+    },
+    {
+      "component": "list-dropdown-menu",
+      "path": "tiptap-ui/list-dropdown-menu/use-list-dropdown-menu.ts",
+      "upstream_sha256": "c0cd3da996f02fa98c97e0c4728c8d6c1ba4748e965c427172b03452494c4db6"
+    },
+    {
+      "component": "list-icon",
+      "path": "tiptap-icons/list-icon.tsx",
+      "upstream_sha256": "093724779c2b85ea4fbd3e60ce3e19d0ba5b6e9cdc1c803a077ea3f019bc1af8"
+    },
+    {
+      "component": "list-node",
+      "path": "tiptap-node/list-node/list-node.scss",
+      "upstream_sha256": "6d2bfc5afcde2470b641732d3a4996b3d98222a635303c89790da11f476b928b"
+    },
+    {
+      "component": "list-ordered-icon",
+      "path": "tiptap-icons/list-ordered-icon.tsx",
+      "upstream_sha256": "93759d8f12aa9e1ee70259907b89792b7ff2d0ed4931bdfdcd8b62eed1e8b3b6"
+    },
+    {
+      "component": "list-todo-icon",
+      "path": "tiptap-icons/list-todo-icon.tsx",
+      "upstream_sha256": "37afe638842e280e54cf1ad9fb353777ae844f40a1880b76306878402fba3827"
+    },
+    {
+      "component": "mark-button",
+      "path": "tiptap-ui/mark-button/mark-button.tsx",
+      "upstream_sha256": "7c6d86631464c683368a194ad5c6ef7a97ce4d2304010f4a64b562885ccbdf76"
+    },
+    {
+      "component": "mark-button",
+      "path": "tiptap-ui/mark-button/index.tsx",
+      "upstream_sha256": "56eaf59da2c4f1d5ed1ce8c261e0dbac098d2cd9fdad07215cfe907e1db6bfa8"
+    },
+    {
+      "component": "mark-button",
+      "path": "tiptap-ui/mark-button/use-mark.ts",
+      "upstream_sha256": "fc05aaf0a5c329333ac355b991297d111dad17b4ef065f6e656d6bffc386f325"
+    },
+    {
+      "component": "paragraph-node",
+      "path": "tiptap-node/paragraph-node/paragraph-node.scss",
+      "upstream_sha256": "632e8eeb9e9e92111fecce35f923b7992132cd1f6a6edd53a83752d8d574f546"
+    },
+    {
+      "component": "popover",
+      "path": "tiptap-ui-primitive/popover/popover.tsx",
+      "upstream_sha256": "df0fb9255d94942e4b550bcbccce363851a505690b867e9eb60fc2a0b12ef67d"
+    },
+    {
+      "component": "popover",
+      "path": "tiptap-ui-primitive/popover/popover.scss",
+      "upstream_sha256": "abfc9b1271c0f872c472f8416c290c8c4fb859656db5e168b5914d75c8a66e17"
+    },
+    {
+      "component": "popover",
+      "path": "tiptap-ui-primitive/popover/index.tsx",
+      "upstream_sha256": "f804efd927af02ab26a38a3ac62b1051c8e96a6b3e943215dfabcbd7793ded61"
+    },
+    {
+      "component": "redo2-icon",
+      "path": "tiptap-icons/redo2-icon.tsx",
+      "upstream_sha256": "68a6e427fe8d4eaa75d52544c72aebc02b0243af0b2141e2e9fe31a0a2023703"
+    },
+    {
+      "component": "separator",
+      "path": "tiptap-ui-primitive/separator/separator.scss",
+      "upstream_sha256": "eba4a1cf65cf60bd17a7063cfcf1fbd636df7988ef3f0487982c5ed3a5db2c6f"
+    },
+    {
+      "component": "separator",
+      "path": "tiptap-ui-primitive/separator/separator.tsx",
+      "upstream_sha256": "64cb405e79275eaf68f74d5e7174f369d3ce0068bf3510aa0283582216c4f92b"
+    },
+    {
+      "component": "separator",
+      "path": "tiptap-ui-primitive/separator/index.tsx",
+      "upstream_sha256": "c756fb0059b0d231c8a45691be566a43de183cc4a415f5d5182c71d453804336"
+    },
+    {
+      "component": "strike-icon",
+      "path": "tiptap-icons/strike-icon.tsx",
+      "upstream_sha256": "8b1fbcc9d3c227540fc7937c3f7a7aeeefc0cec79ba1e8dcabd0a74c4dbe252b"
+    },
+    {
+      "component": "styles",
+      "path": "styles/_variables.scss",
+      "upstream_sha256": "371ba0ae2f9c29af9319a37b31820eef0221d7156b9636e8d8bba2835c93d0f6"
+    },
+    {
+      "component": "styles",
+      "path": "styles/_keyframe-animations.scss",
+      "upstream_sha256": "1803b74fff82ae664de5f31998f58adbd6e2195146869b9567477e7075768bec"
+    },
+    {
+      "component": "subscript-icon",
+      "path": "tiptap-icons/subscript-icon.tsx",
+      "upstream_sha256": "0044398703180367971e76aeb5e8482d1e5393c2dbb1c9fc6cdf0db5cdfa3f7d"
+    },
+    {
+      "component": "superscript-icon",
+      "path": "tiptap-icons/superscript-icon.tsx",
+      "upstream_sha256": "77a5861aa0c0ea574dfe7925fdfc78176aa018889d0f24e6a0515ff669037cc6"
+    },
+    {
+      "component": "tiptap-utils",
+      "path": "lib/tiptap-utils.ts",
+      "upstream_sha256": "fd6ffd09248e2f1f16a3713c091c8c1970ec808397d1ce17125f18ad8e9c1cd4"
+    },
+    {
+      "component": "toolbar",
+      "path": "tiptap-ui-primitive/toolbar/toolbar.scss",
+      "upstream_sha256": "c962575cc3b233977aef912758005bd88cdec3f9a829bf7fd0fc90491a4e2648"
+    },
+    {
+      "component": "toolbar",
+      "path": "tiptap-ui-primitive/toolbar/toolbar.tsx",
+      "upstream_sha256": "d1aedcb816859d48bfb20ee43031a03315e214dfab9aea2964cff53efcc4eaee"
+    },
+    {
+      "component": "toolbar",
+      "path": "tiptap-ui-primitive/toolbar/index.tsx",
+      "upstream_sha256": "8d30c7b35aa0363236117b2141f433abbe9f341ca5c72c69865b41ee256f95ee"
+    },
+    {
+      "component": "tooltip",
+      "path": "tiptap-ui-primitive/tooltip/tooltip.scss",
+      "upstream_sha256": "4162c56e06b0cfb0800db676f7b71511efffed2b10807954608f73cba877c48c"
+    },
+    {
+      "component": "tooltip",
+      "path": "tiptap-ui-primitive/tooltip/tooltip.tsx",
+      "upstream_sha256": "06558964579290feebcf27e1634b4f5ec48a8feb806d78d380fc77bb0a60e775"
+    },
+    {
+      "component": "tooltip",
+      "path": "tiptap-ui-primitive/tooltip/index.tsx",
+      "upstream_sha256": "72adb579c7efd98b33712c48a5ccbb804780983fdf674ba48ef87a168bb64f76"
+    },
+    {
+      "component": "trash-icon",
+      "path": "tiptap-icons/trash-icon.tsx",
+      "upstream_sha256": "c94e87fb3400a421b715acbc3106b0ba9bfaa4d9e698e55a44f34f8600ba0e5b"
+    },
+    {
+      "component": "underline-icon",
+      "path": "tiptap-icons/underline-icon.tsx",
+      "upstream_sha256": "ee36f2e81b04364c02c87c3524d2479baf0896d40a32af57159d79c4e0ecae0d"
+    },
+    {
+      "component": "undo-redo-button",
+      "path": "tiptap-ui/undo-redo-button/undo-redo-button.tsx",
+      "upstream_sha256": "ce116cf7c8a74b25a100da3b3d304aa1d204e09597f64f89b01b5443402a7a37"
+    },
+    {
+      "component": "undo-redo-button",
+      "path": "tiptap-ui/undo-redo-button/index.tsx",
+      "upstream_sha256": "21584e590022dd13e939571b798b2f90bb3ce6009d328e9fc79df7e658050ec0"
+    },
+    {
+      "component": "undo-redo-button",
+      "path": "tiptap-ui/undo-redo-button/use-undo-redo.ts",
+      "upstream_sha256": "162765efe9ad29636f54308151375fbd5259ba31991e260f20532b3a84c2ed2a"
+    },
+    {
+      "component": "undo2-icon",
+      "path": "tiptap-icons/undo2-icon.tsx",
+      "upstream_sha256": "4f1119b557296f9eb0481814230ffe596e07f914a891581acd75a8283524374f"
+    },
+    {
+      "component": "use-composed-ref",
+      "path": "hooks/use-composed-ref.ts",
+      "upstream_sha256": "d0eb90b856ced8deda4d503f74fae5acb9984c63ba5690c3b72147d771ad46ba"
+    },
+    {
+      "component": "use-is-breakpoint",
+      "path": "hooks/use-is-breakpoint.ts",
+      "upstream_sha256": "6eecfed6a85cc628de1896c8426ed8b1ded38b0b15979f08658a1205259b9b2e"
+    },
+    {
+      "component": "use-menu-navigation",
+      "path": "hooks/use-menu-navigation.ts",
+      "upstream_sha256": "7e65cbea3f2261d163c624d10e09f1a1cb042e6b1e0d5bc54dc95831a9cce481"
+    },
+    {
+      "component": "use-tiptap-editor",
+      "path": "hooks/use-tiptap-editor.ts",
+      "upstream_sha256": "4c81c214a47a7b27e3420eb1521a0098cdcf024e37e49cc30fdc0642055dd816"
+    }
+  ]
+}

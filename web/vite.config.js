@@ -1,11 +1,14 @@
 import {defineConfig} from "vite";
+import {devApiProxy} from "./dev-api-proxy.js";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import {fileURLToPath, URL} from "node:url";
 
 const backendOrigin = process.env.DOTASKS_BACKEND_ORIGIN || "http://127.0.0.1:8765";
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
+  // Concurrent dev and browser-test servers must not rewrite each other's optimizer cache.
+  cacheDir: fileURLToPath(new URL(`./node_modules/.vite/${mode}`, import.meta.url)),
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
@@ -21,7 +24,7 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      "/api": {target: backendOrigin, changeOrigin: true},
+      "/api": devApiProxy(backendOrigin),
     },
   },
   preview: {
@@ -29,4 +32,4 @@ export default defineConfig({
     port: 4173,
     strictPort: true,
   },
-});
+}));

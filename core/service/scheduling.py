@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
-from .domain import decode_row
+from .domain import decode_row, has_project_target_scope
 
 
 class TaskSchedulingMixin:
@@ -156,6 +156,8 @@ class TaskSchedulingMixin:
 
     @staticmethod
     def _task_requires_project_exclusive_lock(task: dict[str, Any]) -> bool:
+        if has_project_target_scope(task):
+            return True
         contract = task.get("implementation_contract") or {}
         exclusive_names = {
             "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",

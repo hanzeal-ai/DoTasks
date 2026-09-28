@@ -269,6 +269,20 @@ class RelayHTTPServerTest(unittest.TestCase):
         self.assertEqual([requirement_id], [item["id"] for item in board["requirements"]])
         self.assertFalse(board["dispatcher"]["running"])
 
+    def test_image_preview_requires_browser_authentication(self):
+        content = b"\x89PNG\r\n\x1a\ncloud-image"
+        status, _, body = self.request("POST", "/api/visual-artifacts", json.dumps({
+            "filename": "image.png", "content_base64": base64.b64encode(content).decode(),
+        }).encode(), {**self.browser_headers, "Content-Type": "application/json"})
+        self.assertEqual(201, status)
+        from urllib.parse import quote
+        path = "/api/visual-artifacts/content?artifact_id=" + quote(json.loads(body)["artifact_id"], safe="")
+        self.assertEqual(401, self.request("GET", path, headers={"Host": "dotasks.test"})[0])
+        status, headers, body = self.request("GET", path, headers=self.browser_headers)
+        self.assertEqual(200, status)
+        self.assertEqual("image/png", headers["Content-Type"])
+        self.assertEqual(content, body)
+
     def test_browser_uploads_visual_to_cloud_owned_storage(self) -> None:
         content = b"\x89PNG\r\n\x1a\ncloud-visual"
         status, _, body = self.request(

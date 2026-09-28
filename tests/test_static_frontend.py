@@ -153,7 +153,9 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
         self.assertIn('"vite"', package)
         self.assertIn('"react"', package)
         self.assertIn('createRoot(', entry)
-        self.assertIn('changeOrigin: true', vite_config)
+        self.assertIn('devApiProxy(backendOrigin)', vite_config)
+        proxy_config = (WEB_ROOT / 'dev-api-proxy.js').read_text()
+        self.assertIn('changeOrigin: true', proxy_config)
 
     def test_taskboard_layout_fills_the_viewport_and_remaining_height(self):
         html = (WEB_SOURCE / "App.jsx").read_text(encoding="utf-8")
@@ -261,7 +263,7 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
         self.assertIn('api("/api/task-intakes/finalize"', app)
         self.assertEqual(2, html.count('<IntakeEditor label='))
         self.assertLess(html.index('id="requirements-nav"'), html.index('id="board-nav"'))
-        self.assertLess(html.index('id="board-nav"'), html.index('href="/team"'))
+        self.assertLess(html.index('id="board-nav"'), html.index('id="team-nav"'))
         self.assertIn('api("/api/visual-artifacts"', app)
         self.assertEqual(2, app.count("visual_references: visualReferences"))
         responsive = css.split("@media (max-width: 760px)", 1)[1].split(

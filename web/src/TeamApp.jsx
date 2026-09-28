@@ -4,7 +4,6 @@ import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';
 import { Textarea } from './components/ui/textarea';
 import { NativeSelect } from './components/ui/native-select';
-import { AccountMenu } from './components/account-menu';
 import { requestJson } from './ui-core';
 import './team.css';
 import { subscribeTeamBoard } from './team-board-sync';
@@ -129,23 +128,11 @@ function TaskCard({task,req,board,mutate,busy}) {
   </section>;
 }
 
-export default function TeamApp({username}) {
+export default function TeamApp() {
   const [teams,setTeams]=useState([]),[team,setTeam]=useState(''),[board,setBoard]=useState(null);
   const [error,setError]=useState(''),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true);
   const requests=useRef(new Map());
-  const settings=useRef(null);
   const boardSync=useRef(null);
-  useEffect(()=>{
-    const handle=async event=>{
-      if(event.detail==='settings' && settings.current){settings.current.open=true;settings.current.scrollIntoView({block:'start'});}
-      if(event.detail==='logout'){
-        try {await api('/api/auth/logout',{});window.location.replace('/team');}
-        catch(error){setError(error.message);}
-      }
-    };
-    document.addEventListener('account-action',handle);
-    return ()=>document.removeEventListener('account-action',handle);
-  },[]);
   const refresh=async()=>boardSync.current?.refresh();
   useEffect(()=>{let live=true;api('/api/teams').then(r=>{if(live){setTeams(r.teams);setTeam(r.teams[0]?.id || '');}}).catch(e=>setError(e.message)).finally(()=>setLoading(false));return()=>{live=false;};},[]);
   useEffect(()=>{
@@ -166,8 +153,7 @@ export default function TeamApp({username}) {
   async function createTeam(p) {
     setBusy(true);setError('');const key=JSON.stringify(['create-team',p]);if(!requests.current.has(key))requests.current.set(key,crypto.randomUUID());try {const created=await api('/api/teams',{...p,request_id:requests.current.get(key)});setTeams((await api('/api/teams')).teams);setTeam(created.id);}catch(e){setError(e.message);}finally{setBusy(false);}
   }
-  return <div className="team-shell"><header className="team-header"><a href="/">← 个人工作区</a><h1>团队协作</h1><AccountMenu username={username} authenticationEnabled/></header>
-    <main><div className="team-toolbar"><Select label="团队" items={[{id:'',name:'选择团队'},...teams]} value={team} onChange={e=>setTeam(e.target.value)}/>
+  return <section className="team-shell" aria-label="团队协作"><div className="team-content"><div className="team-toolbar"><Select label="团队" items={[{id:'',name:'选择团队'},...teams]} value={team} onChange={e=>setTeam(e.target.value)}/>
       <details><summary>创建团队</summary><Form label="创建" busy={busy} onSubmit={createTeam}><Field label="团队名称" name="name" required maxLength={120}/></Form></details>
       {team && <Button variant="outline" disabled={busy} onClick={()=>refresh().catch(e=>setError(e.message))}>刷新</Button>}</div>
       {error && <p role="alert" className="team-error">{error}</p>}
@@ -175,7 +161,7 @@ export default function TeamApp({username}) {
       {!loading && !teams.length && <p>尚未加入团队。可创建团队，或请管理员添加你的账号。</p>}
       {board && <>
         <TaskSources key={team} board={board} mutate={mutate} busy={busy}/>
-        <details ref={settings} className="team-panel"><summary>成员与项目设置</summary>
+        <details className="team-panel"><summary>成员与项目设置</summary>
           {board.role==='admin' && <div className="team-grid">
             <Form label="添加成员" busy={busy} onSubmit={p=>mutate('members',p)}><Field label="已注册账号" name="username" required/><Select label="角色" name="role" items={[{id:'product',name:'产品'},{id:'developer',name:'开发'},{id:'coordinator',name:'开发协调人'}]}/></Form>
             <Form label="创建项目" busy={busy} onSubmit={p=>mutate('create-project',p)}><Field label="项目名称" name="name" required/><Field label="仓库 origin 地址" name="repository" required/><Field label="允许基线（完整 Git revision）" name="baseline" required pattern="[0-9a-f]{40,64}"/></Form>
@@ -208,5 +194,5 @@ export default function TeamApp({username}) {
           </article>;
         })}
       </>}
-    </main></div>;
+    </div></section>;
 }

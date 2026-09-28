@@ -1,8 +1,5 @@
-.team-shell {height:100dvh;overflow:auto;background:var(--background,#f8fafc);color:var(--text-primary,#17212b)}
-.team-shell main {max-width:1200px;margin:auto;padding:24px}
-.team-header {display:flex;align-items:center;gap:24px;padding:16px 24px;border-bottom:1px solid var(--border,#dce1e7);position:sticky;top:0;background:var(--background,#fff);z-index:5}
-.team-header h1 {flex:1;font-size:22px}.team-header a {color:inherit}
-.team-header .account-trigger {width:auto;max-width:160px}.team-header>a {flex-shrink:0;white-space:nowrap}
+.team-shell {flex:1;min-height:0;overflow:auto;color:var(--text);font-size:14px}
+.team-content {max-width:1200px;margin:auto;padding:24px}
 .team-shell button[data-variant="default"] {color:var(--primary-foreground,#fff)}
 .team-toolbar,.team-heading,.team-notice {display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap}
 .team-toolbar {margin-bottom:20px}.team-heading h2 {font-size:19px}.team-heading h3 {font-size:16px}
@@ -18,12 +15,10 @@
 .team-modules legend {padding:0 6px}.team-error {color:#a31c1c;background:#fff0f0;padding:12px;border-radius:12px}
 .team-question {margin:12px 0;background:var(--muted,#f7f8fa)}.team-original {white-space:pre-wrap}.team-empty {padding:48px;text-align:center}
 .team-notice {padding:12px 0;border-bottom:1px solid var(--border,#dce1e7)}
-@media(max-width:640px){.team-shell main{padding:12px}.team-header{gap:12px;padding:12px}.team-header h1{font-size:18px}.team-panel{padding:14px}}
+@media(max-width:640px){.team-content{padding:12px}.team-panel{padding:14px}}
 
-.team-shell {font-size:14px}
-.team-header h1 {font-size:20px}
 .team-task h3 {font-size:15px;line-height:1.5}
 .team-shell summary {min-height:44px}
-@media(max-width:640px){.team-shell button,.team-shell input,.team-shell select{min-height:44px}.team-empty{padding:32px 16px}.team-header{flex-wrap:wrap}}
+@media(max-width:640px){.team-shell button,.team-shell input,.team-shell select{min-height:44px}.team-empty{padding:32px 16px}}
 .team-form .team-source-toggle { display: flex; align-items: center; gap: 8px; }
 .team-form .team-source-toggle input { width: auto; }

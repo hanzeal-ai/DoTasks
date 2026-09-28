@@ -1,3 +1,4 @@
+import { imageArtifactId, managedImageUrl } from "./intake-content.js";
 import { renderTokenPanel } from "./token-panel.js";
 import { openDialog, closeDialog, isDialogOpen } from "./components/taskboard-dialog";
 import { setContent } from "./ui-markup.js";
@@ -67,6 +68,10 @@ function restoreNavigationState() {
     const saved = JSON.parse(sessionStorage.getItem(NAVIGATION_STORAGE_KEY) || "null");
     if (!saved) return;
     state.tokenView = saved.tokenView === "details" ? "details" : "charts";
+    if (saved.view === "team" && document.querySelector("#team-nav")) {
+      state.view = "team";
+      return;
+    }
     if (saved.view === "logs") {
       state.view = "logs";
       return;
@@ -121,6 +126,7 @@ function toast(message) {
 }
 
 function syncSidebar() {
+  document.querySelector("#team-nav")?.classList.toggle("selected", state.view === "team");
   document.querySelector("#execution-log-nav").classList.toggle("selected", state.view === "logs");
   document.querySelector("#board-nav").classList.toggle("selected", state.view === "board");
   document.querySelector("#requirements-nav").classList.toggle("selected", state.view === "requirements");
@@ -156,18 +162,20 @@ function renderExecutionLog() {
 }
 
 function syncHeader() {
+  const teamView = state.view === "team";
   const tokenView = state.view === "tokens";
   const requirementsView = state.view === "requirements";
   const settingsView = state.view === "settings";
   const completedCount = (state.board?.tasks || []).filter(task => task.status === "done").length;
   const taskChangeCount = (state.board?.pending_task_changes || []).length;
-  document.querySelector("#view-title").textContent = state.view === "logs" ? "执行日志" : tokenView ? "Token 使用看板" : requirementsView ? "需求看板" : settingsView ? "设置" : "任务看板";
+  document.querySelector("#view-title").textContent = teamView ? "团队协作" : state.view === "logs" ? "执行日志" : tokenView ? "Token 使用看板" : requirementsView ? "需求看板" : settingsView ? "设置" : "任务看板";
   document.querySelector("#view-title").title = "";
   document.querySelector("#completed-tasks").hidden = !["board", "requirements"].includes(state.view);
   document.querySelector("#completed-count").textContent = String(completedCount);
   document.querySelector("#task-change-count").textContent = String(taskChangeCount);
-  document.querySelector("#task-change-confirmations").hidden = taskChangeCount === 0;
-  document.querySelector("#dispatcher-toggle").hidden = false;
+  document.querySelector("#task-change-confirmations").hidden = teamView || taskChangeCount === 0;
+  document.querySelector("#dispatcher-toggle").hidden = teamView;
+  document.querySelector("#dispatcher-status").hidden = teamView || (state.board?.dispatcher?.enabled !== false && state.board?.dispatcher?.agent_configured !== false);
   document.querySelector("#new-task-button").hidden = state.view !== "board";
   document.querySelector("#new-requirement-button").hidden = !requirementsView;
 }
@@ -193,7 +201,7 @@ async function load() {
     syncSidebar();
     render();
     const pendingChange = state.board?.pending_task_changes?.[0];
-    if (pendingChange && !isDialogOpen("task-change-dialog") && !autoOpenedTaskChanges.has(pendingChange.id)) {
+    if (state.view !== "team" && pendingChange && !isDialogOpen("task-change-dialog") && !autoOpenedTaskChanges.has(pendingChange.id)) {
       autoOpenedTaskChanges.add(pendingChange.id);
       openDialog("task-change-dialog");
       renderTaskChangeConfirmations();
@@ -311,6 +319,16 @@ function requirementConversationControl(requirement) {
   return `<button class="small conversation-button" type="button" data-open-thread="${escapeHtml(threadId)}" aria-label="打开需求拆解会话" title="在 Codex 中打开需求拆解会话">${conversationIcon()}</button>`;
 }
 
+function intakeImagePreviews(references) {
+  return `<div class="intake-saved-images">${(references || []).flatMap(reference => {
+    if (!reference.artifact_id?.startsWith("artifact://visuals/")) return [];
+    try {
+      const url = escapeHtml(managedImageUrl(reference.artifact_id));
+      return [`<a href="${url}" target="_blank" rel="noopener noreferrer" title="查看原图"><img src="${url}" alt="${escapeHtml(reference.filename || "图片")}" loading="lazy" /></a>`];
+    } catch { return []; }
+  }).join("")}</div>`;
+}
+
 function requirementCard(requirement, tasks) {
   const status = requirementStatusLabels[requirement.status] || requirement.status;
   const summary = requirement.goal || requirement.description || requirement.original_content || "";
@@ -335,7 +353,7 @@ function requirementCard(requirement, tasks) {
         ? "重新拆解需求"
         : "已有拆分任务进入执行，不能重新拆解";
   const requirementActions = `<button class="small" type="button" data-redecompose-requirement="${escapeHtml(requirement.id)}" title="${redecomposeReason}"${canRedecompose ? "" : " disabled"}>重新拆解</button><button class="small danger" type="button" data-delete-requirement="${escapeHtml(requirement.id)}">删除</button>`;
-  return `<article class="requirement-card"><div class="requirement-summary"><div class="card-top"><span>${escapeHtml(requirement.id)}</span><span>${escapeHtml(status)}</span></div><h2 title="${escapeHtml(requirement.title)}">${escapeHtml(requirement.title)}</h2><p>${escapeHtml(summary)}</p>${failure}<div class="card-meta"><span class="tag priority-${escapeHtml(requirement.priority)}">${escapeHtml(requirement.priority)}</span>${requirement.project ? `<span class="tag">${escapeHtml(projectLabel(requirement.project))}</span>` : ""}${(requirement.modules || []).slice(0, 2).map(module => `<span class="tag">${escapeHtml(module)}</span>`).join("")}${autoDispatchTag}<span class="tag">拆解 ${Number(requirement.decomposition_attempts) || 0} 次</span>${requirementConversationControl(requirement)}${requirementActions}</div></div><section class="requirement-tasks"><div class="requirement-tasks-head"><h3>拆分任务</h3><span>${childTasks.length}</span></div><div class="requirement-task-list">${childTasks.length ? childTasks.map(requirementTaskItem).join("") : '<div class="empty requirement-task-empty">尚未拆分任务</div>'}</div></section></article>`;
+  return `<article class="requirement-card"><div class="requirement-summary"><div class="card-top"><span>${escapeHtml(requirement.id)}</span><span>${escapeHtml(status)}</span></div><h2 title="${escapeHtml(requirement.title)}">${escapeHtml(requirement.title)}</h2><p>${escapeHtml(summary)}</p>${intakeImagePreviews(requirement.visual_references)}${failure}<div class="card-meta"><span class="tag priority-${escapeHtml(requirement.priority)}">${escapeHtml(requirement.priority)}</span>${requirement.project ? `<span class="tag">${escapeHtml(projectLabel(requirement.project))}</span>` : ""}${(requirement.modules || []).slice(0, 2).map(module => `<span class="tag">${escapeHtml(module)}</span>`).join("")}${autoDispatchTag}<span class="tag">拆解 ${Number(requirement.decomposition_attempts) || 0} 次</span>${requirementConversationControl(requirement)}${requirementActions}</div></div><section class="requirement-tasks"><div class="requirement-tasks-head"><h3>拆分任务</h3><span>${childTasks.length}</span></div><div class="requirement-task-list">${childTasks.length ? childTasks.map(requirementTaskItem).join("") : '<div class="empty requirement-task-empty">尚未拆分任务</div>'}</div></section></article>`;
 }
 
 function traceSection(title, items, renderItem) {
@@ -373,7 +391,8 @@ async function showTaskDetails(taskId) {
   const acceptanceChecks = traceSection("历史验收检查", details.acceptance_checks || [], item => `<article class="trace-item"><div><strong>${escapeHtml(item.criterion)}</strong><span>${escapeHtml(item.status)} · ${item.duration_ms}ms</span></div><code>${escapeHtml(item.command)}</code>${item.output ? `<p>${escapeHtml(item.output)}</p>` : ""}</article>`);
   const revisions = traceSection("需求修订", details.revisions || [], item => `<article class="trace-item"><div><strong>v${item.version} · ${escapeHtml(item.after_snapshot?.title || details.task.title)}</strong><span>${escapeHtml(item.created_at)}</span></div><p>${escapeHtml(item.reason || "需求已调整")}</p></article>`);
   const events = traceSection("异常与状态记录", (details.events || []).filter(item => ["execution_failed", "review_interrupted", "review_preparation_failed", "context_build_failed", "lease_expired"].includes(item.event_type) || (item.event_type === "transitioned" && item.payload?.reason)), item => `<article class="trace-item"><div><strong>${escapeHtml(item.event_type)}</strong><span>${escapeHtml(item.created_at)}</span></div><p>${escapeHtml(item.payload?.reason || item.payload?.error || "")}</p></article>`);
-  setContent("#task-detail-content", (dispatchBlockers + conflicts + targets + revisions + reviews + acceptanceChecks + events + conversations + runs + relations) || '<div class="trace-empty">暂无任务记录</div>');
+  const content = `<section class="trace-section"><h3>任务内容</h3><p>${escapeHtml(details.task.goal || "")}</p>${intakeImagePreviews(details.task.visual_references)}</section>`;
+  setContent("#task-detail-content", (content + dispatchBlockers + conflicts + targets + revisions + reviews + acceptanceChecks + events + conversations + runs + relations) || '<div class="trace-empty">暂无任务记录</div>');
 }
 
 function renderBoard() {
@@ -426,6 +445,9 @@ function renderSettings() {
 function render() {
   syncSidebar();
   syncHeader();
+  document.querySelector("#content").hidden = state.view === "team";
+  document.dispatchEvent(new CustomEvent("workspace-view-change", {detail: state.view}));
+  if (state.view === "team") return;
   if (state.view === "logs") renderExecutionLog();
   else if (state.view === "tokens") renderTokenPanel(state.board, state.tokenView, tokenStages);
   else if (state.view === "requirements") renderRequirementsBoard();
@@ -458,6 +480,12 @@ document.addEventListener("account-action", async event => {
 });
 
 async function handleViewNavigation(event) {
+  if (event.target.closest("#team-nav")) {
+    state.view = "team";
+    persistNavigationState();
+    render();
+    return true;
+  }
   if (event.target.closest("#execution-log-nav")) {
     state.view = "logs";
     persistNavigationState();
@@ -789,11 +817,13 @@ function fileAsBase64(file) {
 
 async function uploadVisualReferences(values) {
   const files = values.getAll("visual_references").filter(file => file instanceof File && file.size);
-  if (files.length > 8) throw new Error("一次最多上传 8 个附件");
+  const uploaded = JSON.parse(values.get("uploaded_visual_references") || "[]");
+  if (!Array.isArray(uploaded) || uploaded.some(item => !imageArtifactId(managedImageUrl(item.artifact_id)))) throw new Error("图片引用无效");
+  if (files.length + uploaded.length > 8) throw new Error("一次最多上传 8 个附件");
   for (const file of files) {
     if (file.size > 10 * 1024 * 1024) throw new Error(`${file.name} 超过 10 MiB`);
   }
-  return Promise.all(files.map(async file => api("/api/visual-artifacts", {
+  const attachments = await Promise.all(files.map(async file => api("/api/visual-artifacts", {
     method: "POST",
     body: JSON.stringify({
       filename: file.name,
@@ -802,6 +832,7 @@ async function uploadVisualReferences(values) {
       kind: "attachment",
     }),
   })));
+  return [...uploaded, ...attachments];
 }
 
 document.addEventListener("submit", async event => {
@@ -813,6 +844,7 @@ document.addEventListener("submit", async event => {
     const project = selectedProjectPath(values);
     button.disabled = true;
     try {
+      if (values.get("intake_error")) throw new Error(values.get("intake_error"));
       if (!String(values.get("goal") || "").trim()) throw new Error("请填写内容或添加附件");
       const visualReferences = await uploadVisualReferences(values);
       const result = await api("/api/task-intakes/enqueue", {
@@ -851,6 +883,7 @@ document.addEventListener("submit", async event => {
     const project = selectedProjectPath(values);
     button.disabled = true;
     try {
+      if (values.get("intake_error")) throw new Error(values.get("intake_error"));
       if (!String(values.get("goal") || "").trim()) throw new Error("请填写内容或添加附件");
       const visualReferences = await uploadVisualReferences(values);
       const result = await api("/api/task-intakes/finalize", {
@@ -934,6 +967,8 @@ document.addEventListener("submit", async event => {
 });
 
 restoreNavigationState();
+if (window.location.pathname === "/team" && document.querySelector("#team-nav")) state.view = "team";
+if (state.view === "team") render();
 void load().then(connectBoardEvents);
 const stageTimerInterval = setInterval(refreshStageTimers, 1000);
 window.addEventListener("beforeunload", () => {

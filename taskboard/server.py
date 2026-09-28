@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import re
 import time
@@ -85,6 +86,23 @@ class TaskboardHandler(BaseDoTasksHandler):
                         "dispatcher": self._dispatcher_status(),
                     },
                 )
+            elif parsed.path == "/api/visual-artifacts/content":
+                artifact_id = parse_qs(parsed.query).get("artifact_id", [""])[0]
+                # Only managed raster images can be served inline, within the
+                # same authenticated/tenant service used by the upload route.
+                if not re.fullmatch(r"artifact://visuals/[0-9a-f]{64}\.(png|jpg|gif|webp)", artifact_id):
+                    raise ValueError("Only managed image artifacts can be previewed")
+                artifact = self.service.read_visual_artifact(artifact_id)
+                content = base64.b64decode(artifact["content_base64"], validate=True)
+                content_type, _ = TaskboardService._detect_image(content)
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Security-Policy", "default-src 'none'")
+                self.end_headers()
+                self.wfile.write(content)
             elif parsed.path == "/api/workflow":
                 self._json(HTTPStatus.OK, workflow_metadata())
             elif parsed.path == "/api/settings":

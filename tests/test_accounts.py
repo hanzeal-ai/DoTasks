@@ -56,6 +56,30 @@ class AccountHTTPTest(unittest.TestCase):
         self.assertEqual(200, status, body)
         return headers['Set-Cookie'].split(';')[0]
 
+    def test_browser_task_dispatches_directly_with_tenant_isolation(self):
+        alice, bob = self.register(), self.register('bob', 'b' * 32)
+        status, _, intake = self.request('POST', '/api/task-intakes/enqueue', {
+            'title': 'Implement feature', 'goal': 'Add the requested feature',
+            'project': '/Users/alice/project', 'auto_dispatch': True,
+        }, Cookie=self.login('alice'), Origin='https://dotasks.test')
+        self.assertEqual(201, status, intake)
+        self.assertEqual('ready', intake['task_status'])
+        self.assertIsNone(intake['requirement_id'])
+        status, _, cycle = self.request('POST', '/_agent/v1/tools/call', {
+            'agent_id': alice['agent_id'], 'name': 'claim_schedule_cycle',
+            'arguments': {'worker_id': 'agent'},
+        }, Authorization='Bearer ' + alice['agent_token'])
+        self.assertEqual(200, status, cycle)
+        dispatch = cycle['result']['development']['dispatches'][0]
+        self.assertEqual(intake['task_id'], dispatch['entity_id'])
+        self.assertEqual('execution', dispatch['role'])
+        self.assertEqual('/Users/alice/project', dispatch['project_path'])
+        status, _, board = self.request('POST', '/_agent/v1/tools/call', {
+            'agent_id': bob['agent_id'], 'name': 'list_board', 'arguments': {},
+        }, Authorization='Bearer ' + bob['agent_token'])
+        self.assertEqual(200, status)
+        self.assertEqual([], board['result']['tasks'])
+
     def test_init_is_idempotent_and_does_not_unpause_or_store_plaintext_secrets(self):
         first = self.register()
         _, service = self.server.runtime(first['agent_id'])
@@ -68,6 +92,27 @@ class AccountHTTPTest(unittest.TestCase):
         self.assertNotIn(first['agent_token'], repr(row))
         self.assertNotIn('correct horse battery staple', repr(row))
         self.assertEqual(0o600, self.server.accounts.path.stat().st_mode & 0o777)
+
+    def test_image_preview_is_tenant_scoped(self):
+        alice, bob = self.register(), self.register('bob', 'b' * 32)
+        ca, cb = self.login('alice'), self.login('bob')
+        _, service = self.server.runtime(alice['agent_id'])
+        content = b"\x89PNG\r\n\x1a\nprivate-image"
+        artifact = service.upload_visual_artifact({'filename': 'private.png',
+            'content_base64': base64.b64encode(content).decode()})
+        from urllib.parse import quote
+        path = '/api/visual-artifacts/content?artifact_id=' + quote(artifact['artifact_id'], safe='')
+        for cookie, expected in [(ca, 200), (cb, 400), ('', 401)]:
+            connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=5)
+            connection.request('GET', path, headers={'Host': 'dotasks.test', 'Cookie': cookie})
+            response = connection.getresponse()
+            body = response.read()
+            self.assertEqual(expected, response.status)
+            if expected == 200:
+                self.assertEqual(content, body)
+            else:
+                self.assertNotIn(b'private-image', body)
+            connection.close()
 
     def test_browser_and_agent_data_are_isolated_and_identity_cannot_be_supplied(self):
         alice, bob = self.register(), self.register('bob', 'b' * 32)

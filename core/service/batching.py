@@ -7,7 +7,7 @@ import uuid
 from typing import Any
 
 from ..run_context import group_verification_checks
-from .domain import decode_row
+from .domain import decode_row, has_project_target_scope
 
 
 def _review_check_label(check: Any) -> str:
@@ -94,6 +94,8 @@ class TaskBatchMixin:
             or not int(task["auto_dispatch"])
         ):
             return ""
+        if has_project_target_scope(decode_row(task)):
+            return ""
         try:
             dependency = json.loads(task["dependency_analysis"] or "{}")
             review = json.loads(task["review_contract"] or "{}")
@@ -120,6 +122,9 @@ class TaskBatchMixin:
             (task["project"],),
         ).fetchone()
         if not batch:
+            return ""
+        owner = connection.execute("SELECT * FROM tasks WHERE id=?", (batch["owner_task_id"],)).fetchone()
+        if has_project_target_scope(decode_row(owner)):
             return ""
         revision = int(batch["revision"]) + 1
         join_order = int(batch["appended_count"]) + 1

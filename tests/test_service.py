@@ -620,13 +620,13 @@ class TaskboardServiceTest(unittest.TestCase):
         self.assertFalse(result["controller_kickoff_required"])
         self.assertEqual([], self.service.board()["projects"])
 
-    def test_file_task_enters_queue_and_inherits_attachment_after_location(self):
+    def test_file_task_dispatches_directly_with_attachment(self):
         self._assert_page_task_attachment({
             "filename": "scope.md", "kind": "attachment",
             "content_base64": base64.b64encode(b"# Scope\n**Acceptance**").decode(),
         })
 
-    def test_page_task_enters_queue_and_reuses_its_id_after_location(self):
+    def test_page_task_dispatches_directly_without_analysis(self):
         self._assert_page_task_attachment()
 
     def _assert_page_task_attachment(self, upload=None):
@@ -646,70 +646,142 @@ class TaskboardServiceTest(unittest.TestCase):
             "auto_dispatch": True,
         })
         task_id = queued["task_id"]
-        requirement_id = queued["requirement_id"]
         task = self.service.get_task(task_id)
-        self.assertEqual("draft", task["status"])
-        self.assertEqual(requirement_id, task["requirement_id"])
+        self.assertEqual("ready", task["status"])
+        self.assertIsNone(task["requirement_id"])
+        self.assertIsNone(queued["requirement_id"])
         self.assertEqual([], self.service.board()["requirements"])
-        self.assertEqual([task_id], [item["id"] for item in self.service.board()["tasks"]])
         self.assertTrue(queued["controller_kickoff_required"])
-
-        claim = self.service.claim_next_task("planner", str(self.example_project))
-        self.assertEqual(requirement_id, claim["requirement"]["id"])
-        self.assertEqual("web_task", claim["requirement"]["source_type"])
-        self.assertEqual(
-            visual["artifact_id"],
-            claim["requirement"]["visual_references"][0]["artifact_id"],
+        self.assertTrue(task["auto_dispatch"])
+        self.assertEqual("project", task["implementation_contract"]["target_scope"])
+        with self.service.db.connection() as connection:
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM requirements").fetchone()[0])
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM location_analyses").fetchone()[0])
+        cycle = self.service.claim_schedule_cycle("worker")
+        dispatch = cycle["development"]["dispatches"][0]
+        self.assertEqual(task_id, dispatch["entity_id"])
+        self.assertEqual("execution", dispatch["role"])
+        self.assertIn("修改前先读取项目规则", dispatch["dispatch_prompt"])
+        self.assertIn(visual["artifact_id"], dispatch["dispatch_prompt"])
+        self.service.bind_native_dispatch(
+            dispatch["run_id"], "direct-thread",
+            dispatch_attempt_id=dispatch["dispatch_attempt_id"],
         )
-        analysis = self.service.prepare_location_analysis({
-            "title": "页面新增任务",
-            "goal": "从页面加入任务队列",
-            "project": str(self.example_project),
-            "modules": [],
+        self.service.transition_task(task_id, "implementing")
+        for invalid in ("../outside.py", "/tmp/outside.py"):
+            with self.assertRaises(ValueError):
+                self.service.submit_delivery(
+                    dispatch["run_id"], "完成", "验证通过",
+                    [{"file": invalid}],
+                    [{"criterion": task["goal"], "status": "passed", "evidence": "验证通过"}],
+                )
+        delivered = self.service.submit_delivery(
+            dispatch["run_id"], "完成", "验证通过",
+            [{"file": "src/new-page.tsx", "summary": "按目标实现"}],
+            [{"criterion": task["goal"], "status": "passed", "evidence": "验证通过"}],
+        )
+        self.assertEqual("code_review", delivered["task"]["status"])
+        review = self.service.claim_next_code_review_task("reviewer")
+        self.service.bind_conversation(task_id, "code_review", "review-thread", review["run"]["id"])
+        checks = [item["id"] for item in task["review_contract"]["checks"]]
+        self.service.review_code(
+            task_id, review["run"]["id"], "fail", reasons=["需要修复质量问题"],
+            passed_items=checks[1:], failed_criteria=checks[:1],
+        )
+        self.assertEqual("rework", self.service.get_task(task_id)["status"])
+
+    def test_direct_project_task_respects_pause_and_project_lock(self):
+        payload = {"title": "直接任务", "goal": "实现需求", "project": str(self.example_project)}
+        first = self.service.enqueue_task_intake({**payload, "auto_dispatch": False})
+        self.assertIsNone(self.service.claim_next_task("paused"))
+        second = self.service.enqueue_task_intake(payload)
+        claim = self.service.claim_next_task("worker")
+        self.assertEqual(second["task_id"], claim["task"]["id"])
+        third = self.service.enqueue_task_intake(payload)
+        precise = self.create_ready_task()
+        for task_id in (third["task_id"], precise["id"]):
+            task = self.service.get_task(task_id)
+            with self.service.db.connection() as connection:
+                blockers = self.service._development_dispatch_blockers(
+                    connection, task,
+                    policy={"capacity": 3, "execution_environment": "local"},
+                )
+            self.assertIn("project_exclusive_lock", [b["code"] for b in blockers])
+        self.assertFalse(self.service.get_task(first["task_id"])["auto_dispatch"])
+
+
+    def test_direct_project_tasks_do_not_join_execution_batches(self):
+        self.service.update_task_settings({"task_token_budget": 60000, "parallel_development_enabled": False})
+        owner = self.create_ready_task()
+        self.service.claim_next_task("owner")
+        direct = self.service.enqueue_task_intake({
+            "title": "直接任务", "goal": "实现需求", "project": str(self.example_project),
         })
-        completed = self.service.submit_requirement_decomposition(
-            requirement_id,
-            claim["run"]["id"],
-            [{
-                "key": "direct",
-                "title": "模型不得改写此标题",
-                "goal": "模型不得改写此目标",
-                "analysis_id": analysis["analysis_id"],
-                "location_evidence": {
-                    "tool": "codegraph_explore",
-                    "query": "页面新增任务",
-                    "files": ["src/APage.tsx"],
-                    "symbols": ["APage"],
-                },
-                "targets": [{
-                    "file": "src/APage.tsx",
-                    "mode": "modify",
-                    "symbols": ["APage"],
-                    "tasks": [{"symbol": "APage", "action": "实现页面新增任务"}],
-                }],
-                "quality_gates": {
-                    "code_review": {"required": True, "reason": "code change"},
-                },
-                "acceptance_plan": [{
-                    "criterion": "页面任务可执行",
-                    "file": "src/APage.tsx",
-                    "symbol": "APage",
-                    "method": "focused test",
-                    "expected": "页面任务可执行",
-                }],
-            }],
-        )
+        with self.service.db.transaction() as connection:
+            self.assertEqual("", self.service._try_join_open_batch(connection, direct["task_id"]))
+            blockers = self.service._development_dispatch_blockers(
+                connection, self.service.get_task(direct["task_id"]),
+                policy={"capacity": 3, "execution_environment": "local"},
+            )
+        self.assertIn("project_exclusive_lock", [b["code"] for b in blockers])
 
-        self.assertEqual([task_id], [item["id"] for item in completed["tasks"]])
-        ready = self.service.get_task(task_id)
-        self.assertEqual("ready", ready["status"])
-        self.assertEqual("页面新增任务", ready["title"])
-        self.assertEqual("从页面加入任务队列", ready["goal"])
-        self.assertTrue(ready["auto_dispatch"])
-        self.assertEqual(
-            visual["artifact_id"],
-            ready["implementation_contract"]["visual_references"][0]["artifact_id"],
-        )
+        with tempfile.TemporaryDirectory() as home:
+            service = TaskboardService(home)
+            service.set_dispatcher_enabled(True)
+            service.update_task_settings({"task_token_budget": 60000, "parallel_development_enabled": False})
+            direct = service.enqueue_task_intake({
+                "title": "直接任务", "goal": "实现需求", "project": str(self.example_project),
+            })
+            service.claim_next_task("direct")
+            # A located task arriving through the existing intake must not join this owner.
+            with service.db.transaction() as connection:
+                connection.execute(
+                    "INSERT INTO tasks(id,title,goal,project,status,auto_dispatch,dependency_analysis,review_contract) "
+                    "VALUES('TASK-9999','located','located',?,'ready',1,?,?)",
+                    (str(self.example_project), json.dumps(owner["dependency_analysis"]), json.dumps(owner["review_contract"])),
+                )
+                self.assertEqual("", service._try_join_open_batch(connection, "TASK-9999"))
+
+    def test_direct_project_delivery_checks_git_delta_and_review(self):
+        project = self.example_project
+        (project / "existing.txt").write_text("original")
+        subprocess.run(["git", "init", "-q", str(project)], check=True)
+        subprocess.run(["git", "-C", str(project), "add", "."], check=True)
+        subprocess.run([
+            "git", "-C", str(project), "-c", "user.name=Test",
+            "-c", "user.email=test@example.invalid", "commit", "-qm", "base",
+        ], check=True)
+        self.service.update_task_settings({"task_token_budget": 60000, "parallel_development_enabled": False})
+        (project / "existing.txt").write_text("user work")
+        queued = self.service.enqueue_task_intake({
+            "title": "新增文件", "goal": "实现新增文件", "project": str(project),
+        })
+        claim = self.service.claim_next_task("direct")
+        task_id, run_id = queued["task_id"], claim["run"]["id"]
+        self.service.bind_conversation(task_id, "execution", "direct-git", run_id)
+        self.service.transition_task(task_id, "implementing")
+        (project / "new.txt").write_text("implementation")
+        (project / "test.txt").write_text("verification")
+        evidence = [{"criterion": "实现新增文件", "status": "passed", "evidence": "实际文件已验证"}]
+        with self.assertRaisesRegex(ValueError, "were not reported"):
+            self.service.submit_delivery(run_id, "完成", "验证通过", [{"file": "new.txt"}], evidence)
+        with self.assertRaisesRegex(ValueError, "no Git workspace delta"):
+            self.service.submit_delivery(run_id, "完成", "验证通过", [
+                {"file": "new.txt"}, {"file": "test.txt"}, {"file": "fake.txt"},
+            ], evidence)
+        delivered = self.service.submit_delivery(run_id, "完成", "验证通过", [
+            {"file": "new.txt"}, {"file": "test.txt"},
+        ], evidence)
+        self.assertEqual("code_review", delivered["task"]["status"])
+        self.assertEqual("user work", (project / "existing.txt").read_text())
+        review = self.service.claim_next_code_review_task("reviewer")
+        review_run = review["run"]["id"]
+        self.service.bind_conversation(task_id, "code_review", "direct-review", review_run)
+        with self.assertRaisesRegex(ValueError, "exactly cover"):
+            self.service.review_code(task_id, review_run, "pass", passed_items=[])
+        checks = self.service.get_task(task_id)["review_contract"]["checks"]
+        result = self.service.review_code(task_id, review_run, "pass", passed_items=checks)
+        self.assertEqual("done", self.service.get_task(task_id)["status"])
 
     def test_page_task_without_project_dispatches_as_projectless_codex_task(self):
         queued = self.service.enqueue_task_intake({

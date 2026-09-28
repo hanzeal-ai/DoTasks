@@ -1137,7 +1137,7 @@ class TaskPlanningMixin:
         }
 
     def enqueue_task_intake(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Place a page-created task in the queue while its location is prepared."""
+        """Queue the user goal directly; the execution worker locates its changes."""
         title = str(payload.get("title") or "").strip()
         goal = str(payload.get("goal") or "").strip()
         if not title:
@@ -1159,123 +1159,73 @@ class TaskPlanningMixin:
         visual_references = self._manage_visual_references(
             "web-task", payload.get("visual_references")
         )
-        if project is None:
-            acceptance_criteria = [goal]
-            acceptance_plan = [
-                {
-                    "criterion": goal,
-                    "method": "Codex response",
-                    "expected": goal,
-                    "required": True,
-                    "check_type": "static_review",
-                }
-            ]
-            dependency_analysis = self._normalize_dependency_analysis(
-                {"decision": "independent"}
-            )
-            review_contract = {
-                "checks": [],
-                "quality_gates": {
-                    "code_review": {
-                        "required": False,
-                        "reason": "Projectless tasks do not modify a repository",
-                    },
-                },
+        acceptance_criteria = [goal]
+        acceptance_plan = [
+            {
+                "criterion": goal,
+                "method": "项目现有验证与实际改动检查" if project else "Codex response",
+                "expected": goal,
+                "required": True,
+                "check_type": "static_review",
             }
-            with self.db.transaction() as connection:
-                task_id = self.db.next_id(
-                    connection, "BUG" if task_type == "bug" else "TASK"
-                )
-                connection.execute(
-                    """INSERT INTO tasks(
-                           id, title, type, project, modules, status, priority,
-                           goal, scope, out_of_scope, acceptance_criteria,
-                           location_context, acceptance_plan, dependency_analysis,
-                           implementation_contract, review_contract, auto_dispatch
-                       ) VALUES(?, ?, ?, NULL, ?, 'ready', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        task_id, title, task_type,
-                        json.dumps(modules, ensure_ascii=False), priority, goal,
-                        json.dumps(scope, ensure_ascii=False),
-                        json.dumps(out_of_scope, ensure_ascii=False),
-                        json.dumps(acceptance_criteria, ensure_ascii=False),
-                        json.dumps(
-                            {"mode": "projectless", "targets": []},
-                            ensure_ascii=False,
-                        ),
-                        json.dumps(acceptance_plan, ensure_ascii=False),
-                        json.dumps(dependency_analysis, ensure_ascii=False),
-                        json.dumps({
-                            "targets": [],
-                            "visual_references": visual_references,
-                        }, ensure_ascii=False),
-                        json.dumps(review_contract, ensure_ascii=False),
-                        int(auto_dispatch),
+        ]
+        dependency_analysis = self._normalize_dependency_analysis(
+            {"decision": "independent"}
+        )
+        review_contract = self._normalize_review_contract({
+            "quality_gates": {
+                "code_review": {
+                    "required": bool(project),
+                    "reason": (
+                        "Project task requires code review" if project
+                        else "Projectless tasks do not modify a repository"
                     ),
-                )
-                self._event(
-                    connection, "task", task_id, "intake_queued",
-                    {"projectless": True, "auto_dispatch": auto_dispatch},
-                )
-            return {
-                "status": "queued",
-                "intake_kind": "task",
-                "task_id": task_id,
-                "task_status": "ready",
-                "requirement_id": None,
-                "projectless": True,
-                **self._controller_kickoff_contract(auto_dispatch),
-            }
-
-        auto_dispatch = auto_dispatch and bool(project)
+                },
+            },
+        })
         with self.db.transaction() as connection:
-            requirement_id = self.db.next_id(connection, "REQ")
             task_id = self.db.next_id(
                 connection, "BUG" if task_type == "bug" else "TASK"
             )
             connection.execute(
-                """INSERT INTO requirements(
-                       id, title, original_content, description, source_type,
-                       project, status, priority, goal, modules, scope,
-                       out_of_scope, acceptance_criteria, auto_dispatch,
-                       decomposition_plan, visual_references
-                   ) VALUES(?, ?, ?, ?, 'web_task', ?, 'ready', ?, ?, ?, ?, ?,
-                            '[]', ?, ?, ?)""",
-                (
-                    requirement_id, title, goal, goal, project, priority, goal,
-                    json.dumps(modules, ensure_ascii=False),
-                    json.dumps(scope, ensure_ascii=False),
-                    json.dumps(out_of_scope, ensure_ascii=False),
-                    int(auto_dispatch),
-                    json.dumps([{"key": "direct", "title": title, "goal": goal}], ensure_ascii=False),
-                    json.dumps(visual_references, ensure_ascii=False),
-                ),
-            )
-            connection.execute(
                 """INSERT INTO tasks(
-                       id, requirement_id, requirement_task_key, title, type,
-                       project, modules, status, priority, goal, scope,
-                       out_of_scope, acceptance_criteria, auto_dispatch
-                   ) VALUES(?, ?, 'direct', ?, ?, ?, ?, 'draft', ?, ?, ?, ?,
-                            '[]', 0)""",
+                       id, title, type, project, modules, status, priority,
+                       goal, scope, out_of_scope, acceptance_criteria,
+                       location_context, acceptance_plan, dependency_analysis,
+                       implementation_contract, review_contract, auto_dispatch
+                   ) VALUES(?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    task_id, requirement_id, title, task_type, project,
+                    task_id, title, task_type, project,
                     json.dumps(modules, ensure_ascii=False), priority, goal,
                     json.dumps(scope, ensure_ascii=False),
                     json.dumps(out_of_scope, ensure_ascii=False),
+                    json.dumps(acceptance_criteria, ensure_ascii=False),
+                    json.dumps(
+                        {"mode": "execution" if project else "projectless", "targets": []},
+                        ensure_ascii=False,
+                    ),
+                    json.dumps(acceptance_plan, ensure_ascii=False),
+                    json.dumps(dependency_analysis, ensure_ascii=False),
+                    json.dumps({
+                        "targets": [],
+                        **({"target_scope": "project"} if project else {}),
+                        "visual_references": visual_references,
+                    }, ensure_ascii=False),
+                    json.dumps(review_contract, ensure_ascii=False),
+                    int(auto_dispatch),
                 ),
             )
             self._event(
                 connection, "task", task_id, "intake_queued",
-                {"requirement_id": requirement_id, "auto_dispatch": auto_dispatch},
-            )
-            self._event(
-                connection, "requirement", requirement_id, "created",
-                {"intake_kind": "task", "task_id": task_id},
+                {"projectless": project is None, "auto_dispatch": auto_dispatch},
             )
         return {
-            "status": "queued", "intake_kind": "task", "task_id": task_id,
-            "task_status": "draft", "requirement_id": requirement_id,
+            "status": "queued",
+            "intake_kind": "task",
+            "task_id": task_id,
+            "task_status": "ready",
+            "requirement_id": None,
+            "projectless": project is None,
             **self._controller_kickoff_contract(auto_dispatch),
         }
 

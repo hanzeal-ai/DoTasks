@@ -220,3 +220,10 @@ def insert_relation(connection: Any, source: str, target: str, relation_type: st
         "INSERT OR IGNORE INTO task_relations(source_task_id, target_task_id, relation_type, description) VALUES(?, ?, ?, ?)",
         (source, target, relation_type, description),
     )
+
+
+def has_project_target_scope(task: dict[str, Any]) -> bool:
+    """A direct project task locates files during its exclusive execution."""
+    return bool(task.get("project")) and (
+        task.get("implementation_contract") or {}
+    ).get("target_scope") == "project"
