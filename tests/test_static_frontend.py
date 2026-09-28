@@ -182,7 +182,7 @@ if (calls.join(",") !== "view,thread") throw new Error(`unexpected routing order
         self.assertEqual("0", content["min-height"])
         self.assertEqual("hidden", content["overflow"])
         board = declarations("#content.board-columns > .board")
-        self.assertEqual("repeat(4, minmax(250px, 1fr))", board["grid-template-columns"])
+        self.assertEqual("repeat(3, minmax(250px, 1fr))", board["grid-template-columns"])
         self.assertEqual("1 1 auto", board["flex"])
         self.assertEqual("0", board["min-height"])
         self.assertEqual("stretch", board["align-items"])

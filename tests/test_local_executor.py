@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import tempfile
+import threading
 import subprocess
 import unittest
 from pathlib import Path
@@ -26,6 +27,7 @@ class FakeService:
         self.bindings: list[tuple[str, str]] = []
         self.failures: list[tuple[str, str]] = []
         self.visual_artifacts: dict[str, dict] = {}
+        self.usage_reports = []
 
     def claim_schedule_cycle(self, worker_id, lease_seconds, force=False):
         self.assert_worker = (worker_id, lease_seconds, force)
@@ -54,6 +56,10 @@ class FakeService:
 
     def renew_native_dispatch(self, run_id, lease_seconds):
         raise AssertionError("short test must not renew its lease")
+
+    def record_execution_usage(self, **payload):
+        self.usage_reports.append(payload)
+        return {"usage_status": "reported"}
 
     def read_visual_artifact(self, artifact_id):
         return self.visual_artifacts[artifact_id]
@@ -139,6 +145,90 @@ class LocalCodexExecutorTest(unittest.TestCase):
         self.assertEqual((WORKER_ID, 7), service.completed_cycles[0])
         self.assertEqual([("RUN-0001", "cli-thread-1")], service.bindings)
         self.assertEqual([], service.failures)
+
+    def test_review_waits_for_execution_turn_and_retries_after_idle_cycle(self):
+        started = threading.Event()
+        finish = threading.Event()
+        service = FakeService(make_dispatch())
+        executor = self.build_executor(service, close_lifecycle=True)
+
+        class DelayedClient(FakeClient):
+            def wait_notification(self, timeout):
+                started.set()
+                if not finish.wait(5):
+                    raise AssertionError("execution turn was not released")
+                return super().wait_notification(timeout)
+
+        executor.client_factory = lambda **kwargs: DelayedClient(service, True, **kwargs)
+        self.assertEqual(1, executor.dispatch_once())
+        self.assertTrue(started.wait(5))
+        review = make_dispatch(run_id="RUN-review", role="code_review", resume_thread_id="cli-thread-1")
+        service.dispatch = review
+        service.get_native_dispatch = lambda run_id: {
+            "run_id": run_id,
+            "status": "claimed" if run_id == "RUN-review" else "completed",
+        }
+        try:
+            self.assertEqual(0, executor.dispatch_once())
+            self.assertEqual([("RUN-0001", "cli-thread-1")], service.bindings)
+            self.assertIn("RUN-review", executor._deferred_dispatches)
+        finally:
+            finish.set()
+            executor.wait_for_workers()
+        service.claim_schedule_cycle = lambda *args, **kwargs: {"status": "idle"}
+        executor.client_factory = lambda **kwargs: FakeClient(service, True, **kwargs)
+        self.assertEqual(1, executor.dispatch_once())
+        executor.wait_for_workers()
+        self.assertEqual(("RUN-review", "cli-thread-1"), service.bindings[-1])
+        self.assertFalse(executor._deferred_dispatches)
+
+    def test_cancelled_deferred_review_is_not_started(self):
+        service = FakeService(None)
+        executor = self.build_executor(service, close_lifecycle=True)
+        executor._deferred_dispatches["RUN-review"] = make_dispatch(run_id="RUN-review")
+        service.get_native_dispatch = lambda run_id: {"status": "failed"}
+        self.assertEqual(0, executor.dispatch_once())
+        self.assertFalse(service.bindings)
+        self.assertFalse(executor._deferred_dispatches)
+
+    def test_deferred_review_obeys_pause_and_is_deduplicated_on_resume(self):
+        dispatch = make_dispatch(run_id="RUN-review")
+        service = FakeService(dispatch)
+        executor = self.build_executor(service, close_lifecycle=True)
+        executor._deferred_dispatches["RUN-review"] = dispatch
+        original_claim = service.claim_schedule_cycle
+        service.claim_schedule_cycle = lambda *args, **kwargs: {"status": "paused"}
+        self.assertEqual(0, executor.dispatch_once())
+        self.assertIn("RUN-review", executor._deferred_dispatches)
+        service.claim_schedule_cycle = original_claim
+        launched = []
+        executor._launch = lambda item: launched.append(item["run_id"]) or True
+        self.assertEqual(1, executor.dispatch_once())
+        self.assertEqual(["RUN-review"], launched)
+
+    def test_usage_tracking_continues_across_recovery_turns(self):
+        from taskboard.execution_usage import FIELDS
+        from tests.test_manager_reliability import counters, provider
+        service = FakeService(None)
+        executor = self.build_executor(service, close_lifecycle=True)
+        client = FakeClient(service, True)
+        client.usage_baselines = {"dev": dict.fromkeys(FIELDS, 0)}
+        for turn, total, last in (("turn1", 10, 10), ("turn2", 15, 5)):
+            events = iter([
+                {"method": "thread/tokenUsage/updated", "params": {
+                    "threadId": "dev", "turnId": turn,
+                    "tokenUsage": {"total": provider(total), "last": provider(last)},
+                }},
+                {"method": "turn/completed", "params": {"threadId": "dev", "turn": {"id": turn, "status": "completed"}}},
+            ])
+            client.wait_notification = lambda **kwargs: next(events)
+            self.assertEqual(("completed", ""), executor._wait_for_turn(client, "dev", turn, "RUN-1"))
+            self.assertTrue(executor._usage_outbox.upload_lock.acquire(timeout=5))
+            executor._usage_outbox.upload_lock.release()
+            executor._usage_outbox.flush()
+        reports = {item["turn_id"]: item["usage"] for item in service.usage_reports}
+        self.assertEqual(counters(10), reports["turn1"])
+        self.assertEqual(counters(5), reports["turn2"])
 
     def test_dispatch_removes_legacy_skill_and_localizes_callback_path(self):
         service = FakeService(None)

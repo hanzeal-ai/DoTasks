@@ -68,9 +68,13 @@ class AccountStore:
             if row:
                 if not hmac.compare_digest(self.password_hash(password, row['salt']), row['password_hash']):
                     raise HTTPRequestError(HTTPStatus.UNAUTHORIZED, "账号不可注册或凭据不正确")
-                if row['device_id'] != device_id:
+                if not row['device_id']:
+                    # Only an offline operator recovery can arm this one-time binding.
+                    db.execute('UPDATE accounts SET device_id=?,token_hash=? WHERE id=?',
+                               (device_id, self.digest(device_token), row['id']))
+                elif row['device_id'] != device_id:
                     raise HTTPRequestError(HTTPStatus.CONFLICT, "该账号已绑定其他安装，请使用原设备；暂不支持自动更换设备")
-                if not hmac.compare_digest(row['token_hash'], self.digest(device_token)):
+                if row['device_id'] and not hmac.compare_digest(row['token_hash'], self.digest(device_token)):
                     raise HTTPRequestError(HTTPStatus.UNAUTHORIZED, "本机初始化凭证不匹配")
                 account_id = row['id']
             else:

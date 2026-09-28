@@ -48,11 +48,15 @@ class LocalCodexExecutor:
         )
         self.service = service or TaskboardService(self.data_home)
         self.client_factory = client_factory
+        from .execution_usage import UsageOutbox
+        self._usage_outbox = UsageOutbox(self.data_home, self.service)
         self._wake_event = threading.Event()
         self._stop_event = threading.Event()
         self._scheduler_thread: threading.Thread | None = None
         self._active_lock = threading.Lock()
         self._active_runs: set[str] = set()
+        self._active_dispatches: dict[str, dict[str, Any]] = {}
+        self._deferred_dispatches: dict[str, dict[str, Any]] = {}
         self._workers: set[threading.Thread] = set()
         self._clients: set[CodexAppServerClient] = set()
 
@@ -88,7 +92,10 @@ class LocalCodexExecutor:
 
     def _event_loop(self) -> None:
         while not self._stop_event.is_set():
-            self._wake_event.wait()
+            notified = self._wake_event.wait(30)
+            if not notified:
+                self._usage_outbox.flush_async()
+                continue
             self._wake_event.clear()
             if self._stop_event.is_set():
                 return
@@ -98,22 +105,34 @@ class LocalCodexExecutor:
                 print(f"[dotasks-executor] schedule failed: {exc}", file=sys.stderr)
 
     def dispatch_once(self) -> int:
+        self._usage_outbox.service = self.service
+        self._usage_outbox.flush_async()
         cycle = self.service.claim_schedule_cycle(
             WORKER_ID, lease_seconds=LEASE_SECONDS, force=False
         )
-        if cycle.get("status") != "claimed":
+        if cycle.get("status") not in {"claimed", "idle"}:
             return 0
-        try:
-            dispatches = [
-                *(cycle.get("code_review", {}).get("dispatches") or []),
-                *(cycle.get("development", {}).get("dispatches") or []),
-            ]
-        finally:
-            self.service.complete_schedule_cycle(
-                WORKER_ID, int(cycle.get("cycle_generation") or 0)
-            )
+        with self._active_lock:
+            deferred = list(self._deferred_dispatches.values())
+            self._deferred_dispatches.clear()
+        dispatches = []
+        for dispatch in deferred:
+            current = self.service.get_native_dispatch(dispatch["run_id"])
+            if current.get("status") in {"claimed", "pending_thread", "bound"}:
+                dispatches.append(dispatch)
+        if cycle.get("status") == "claimed":
+            try:
+                dispatches.extend([
+                    *(cycle.get("code_review", {}).get("dispatches") or []),
+                    *(cycle.get("development", {}).get("dispatches") or []),
+                ])
+            finally:
+                self.service.complete_schedule_cycle(
+                    WORKER_ID, int(cycle.get("cycle_generation") or 0)
+                )
         launched = 0
-        for dispatch in dispatches:
+        dispatches_by_run = {str(item.get("run_id") or ""): item for item in dispatches}
+        for dispatch in dispatches_by_run.values():
             run_id = str(dispatch.get("run_id") or "")
             with self._active_lock:
                 if run_id and run_id in self._active_runs:
@@ -282,7 +301,16 @@ class LocalCodexExecutor:
         with self._active_lock:
             if run_id in self._active_runs:
                 return False
+            thread_id = dispatch.get("thread_id") or dispatch.get("resume_thread_id")
+            if any(
+                (dispatch.get("entity_id") and dispatch.get("entity_id") == active.get("entity_id"))
+                or (thread_id and thread_id == (active.get("thread_id") or active.get("resume_thread_id")))
+                for active in self._active_dispatches.values()
+            ):
+                self._deferred_dispatches[run_id] = dispatch
+                return False
             self._active_runs.add(run_id)
+            self._active_dispatches[run_id] = dict(dispatch)
         worker = threading.Thread(
             target=self._run_worker,
             args=(dispatch,),
@@ -306,6 +334,9 @@ class LocalCodexExecutor:
                 self._clients.add(client)
             client.start()
             thread_id, fallback_reason = self._prepare_thread(client, dispatch)
+            with self._active_lock:
+                if run_id in self._active_dispatches:
+                    self._active_dispatches[run_id]["thread_id"] = thread_id
             self.service.bind_native_dispatch(
                 run_id,
                 thread_id,
@@ -423,6 +454,7 @@ class LocalCodexExecutor:
                 if client is not None:
                     self._clients.discard(client)
                 self._active_runs.discard(run_id)
+                self._active_dispatches.pop(run_id, None)
                 self._workers.discard(threading.current_thread())
             if not self._stop_event.is_set():
                 self.wake()
@@ -519,6 +551,14 @@ class LocalCodexExecutor:
         turn_id: str,
         run_id: str,
     ) -> tuple[str, str]:
+        from .execution_usage import TurnUsage
+        observer = TurnUsage(getattr(client, "usage_baselines", {}).get(thread_id))
+        usage_observed = False
+        track_usage = run_id.startswith("RUN-")
+        if track_usage:
+            self._usage_outbox.record(run_id, thread_id, turn_id, None)
+            self._usage_outbox.service = self.service
+            self._usage_outbox.flush_async()
         renewed_at = time.monotonic()
         while not self._stop_event.is_set():
             notification = client.wait_notification(timeout=30)
@@ -529,6 +569,21 @@ class LocalCodexExecutor:
                 )
             ):
                 return PERMISSION_DRIFT_STATUS, "worker sandbox policy changed"
+            if notification is not None and notification.get("method") == "thread/tokenUsage/updated":
+                params = notification.get("params") or {}
+                if track_usage and params.get("threadId") == thread_id and params.get("turnId") == turn_id:
+                    try:
+                        usage = observer.observe(params.get("tokenUsage") or {})
+                        if not hasattr(client, "usage_baselines"):
+                            client.usage_baselines = {}
+                        client.usage_baselines[thread_id] = observer.current
+                        if usage is not None:
+                            self._usage_outbox.record(run_id, thread_id, turn_id, usage)
+                            self._usage_outbox.service = self.service
+                            self._usage_outbox.flush_async()
+                            usage_observed = True
+                    except ValueError:
+                        self._log_worker_event("usage_unavailable", run_id=run_id, turn_id=turn_id)
             if notification is not None and notification.get("method") == "turn/completed":
                 params = notification.get("params") or {}
                 turn = params.get("turn") or {}
@@ -536,6 +591,10 @@ class LocalCodexExecutor:
                     continue
                 if str(turn.get("id") or "") != turn_id:
                     continue
+                if track_usage and not usage_observed:
+                    self._usage_outbox.record(run_id, thread_id, turn_id, None)
+                    self._usage_outbox.service = self.service
+                    self._usage_outbox.flush_async()
                 error = turn.get("error") or {}
                 error_message = str(error.get("message") or error or "")
                 return str(turn.get("status") or "completed"), error_message

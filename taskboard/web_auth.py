@@ -15,21 +15,33 @@ SESSION_TTL = 12 * 60 * 60
 class WebSessions:
     def __init__(self) -> None:
         self._sessions: dict[str, float] = {}
-        self._attempts: deque[float] = deque()
+        self._attempts: dict[str, deque[float]] = {}
         self._lock = threading.Lock()
 
     @staticmethod
     def _key(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
 
-    def allow_login(self) -> bool:
+    def allow_login(self, source: str = "local", username: str = "") -> bool:
+        # Never trust a caller-supplied forwarded IP. Separate credentials behind
+        # the same proxy, with a larger source cap to bound username spraying.
+        source_key = "source:" + self._key(str(source))
+        account_key = "login:" + self._key(str(source) + "\0" + str(username).strip().lower()[:128])
         with self._lock:
             now = time.monotonic()
-            while self._attempts and self._attempts[0] <= now - 60:
-                self._attempts.popleft()
-            if len(self._attempts) >= 20:
+            for key in list(self._attempts):
+                attempts = self._attempts[key]
+                while attempts and attempts[0] <= now - 60:
+                    attempts.popleft()
+                if not attempts:
+                    del self._attempts[key]
+            keys = ((account_key, 20), (source_key, 200))
+            if any(len(self._attempts.get(key, ())) >= limit for key, limit in keys):
                 return False
-            self._attempts.append(now)
+            if len(self._attempts) + sum(key not in self._attempts for key, _ in keys) > 10000:
+                return False
+            for key, _ in keys:
+                self._attempts.setdefault(key, deque()).append(now)
             return True
 
     def create(self) -> str:

@@ -122,7 +122,7 @@ class BaseDoTasksHandler(BaseHTTPRequestHandler):
         if not enabled:
             raise HTTPRequestError(HTTPStatus.BAD_REQUEST, "本地模式无需登录")
         if path == "/api/auth/login":
-            if not sessions.allow_login():
+            if not sessions.allow_login(self.client_address[0], payload.get("username", "")):
                 raise HTTPRequestError(HTTPStatus.TOO_MANY_REQUESTS, "登录尝试过于频繁，请稍后重试", {"Retry-After": "60"})
             username, password = payload.get("username"), payload.get("password")
             if not isinstance(username, str) or not isinstance(password, str) or not security.valid_credentials(username, password):

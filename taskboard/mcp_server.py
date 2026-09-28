@@ -680,6 +680,9 @@ def tool_handlers_for(
         "report_dispatch_failed": lambda arguments: service.fail_native_dispatch(
             arguments["run_id"], arguments["reason"]
         ),
+        "record_execution_usage": lambda arguments: service.record_execution_usage(
+            arguments["run_id"], arguments["thread_id"], arguments["turn_id"], arguments.get("usage"),
+        ),
         "submit_task_delivery": lambda arguments: service.submit_delivery(
             arguments["run_id"],
             arguments["delivery_summary"],
@@ -717,7 +720,10 @@ def tool_handlers_for(
     }
 
 
-TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = tool_handlers_for(SERVICE)
+TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
+    name: handler for name, handler in tool_handlers_for(SERVICE).items()
+    if name in {tool["name"] for tool in TOOLS}
+}
 
 
 def _visible_tools() -> list[dict[str, Any]]:

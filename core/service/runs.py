@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 from typing import Any
@@ -263,6 +264,48 @@ class TaskRunMixin:
             ).fetchall()
         return [decode_row(row, RUN_JSON_FIELDS) for row in rows]
 
+    def record_execution_usage(self, run_id: str, thread_id: str, turn_id: str,
+                               usage: dict[str, int] | None = None) -> dict[str, Any]:
+        """Machine callback: deduplicate provider totals by bound conversation/turn."""
+        from taskboard.execution_usage import FIELDS
+        if not isinstance(turn_id, str) or not turn_id.strip() or len(turn_id) > 200:
+            raise ValueError("Invalid turn_id")
+        if usage is not None and (
+            not isinstance(usage, dict) or set(usage) != set(FIELDS)
+            or any(type(value) is not int or value < 0 for value in usage.values())
+            or usage["cached_input_tokens"] > usage["input_tokens"]
+            or usage["reasoning_output_tokens"] > usage["output_tokens"]
+        ):
+            raise ValueError("Invalid execution usage")
+        with self.db.transaction() as connection:
+            row = connection.execute("SELECT * FROM task_runs WHERE id=?", (run_id,)).fetchone()
+            if not row:
+                raise KeyError("Run not found")
+            bound = connection.execute(
+                "SELECT 1 FROM task_run_conversations WHERE run_id=? AND thread_id=?",
+                (run_id, thread_id),
+            ).fetchone()
+            if not bound:
+                raise ValueError("Usage must belong to the bound execution conversation")
+            snapshot = json.loads(row["context_snapshot"] or "{}")
+            turns = snapshot.setdefault("execution_usage", {})
+            key = thread_id + ":" + turn_id
+            previous = turns.get(key)
+            if key not in turns and len(turns) >= 1000:
+                raise ValueError("Too many usage turns for one run")
+            if usage is not None:
+                if previous and any(usage[field] < previous[field] for field in FIELDS):
+                    raise ValueError("Usage must be monotonic")
+                turns[key] = usage
+            elif key not in turns:
+                turns[key] = None
+            totals = {field: sum(item[field] for item in turns.values() if item) for field in FIELDS}
+            self._record_run_token_usage(connection, run_id, totals["token_used"], totals)
+            connection.execute("UPDATE task_runs SET context_snapshot=? WHERE id=?",
+                               (json.dumps(snapshot, ensure_ascii=False), run_id))
+        return {"run_id": run_id, "token_used": totals["token_used"],
+                "usage_status": "partial" if any(item is None for item in turns.values()) else "reported"}
+
     def record_run_token_usage(
         self, run_id: str, token_used: int, usage: dict[str, int] | None = None,
     ) -> dict[str, Any]:
@@ -357,8 +400,6 @@ class TaskRunMixin:
         if not task_row:
             raise KeyError(f"Task not found: {task_id}")
         task = decode_row(task_row)
-        if role == "code_review" and task.get("codex_thread_id") and thread_id == task.get("codex_thread_id"):
-            raise ValueError("Review must use a conversation independent from the execution thread")
         if run_id:
             run_row = connection.execute(
                 "SELECT * FROM task_runs WHERE id=?", (run_id,),

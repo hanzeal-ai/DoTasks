@@ -56,6 +56,19 @@ class AccountHTTPTest(unittest.TestCase):
         self.assertEqual(200, status, body)
         return headers['Set-Cookie'].split(';')[0]
 
+    def test_failed_logins_do_not_exhaust_another_accounts_limit(self):
+        self.register('bob', 'b' * 32)
+        for _ in range(20):
+            status, _, _ = self.request('POST', '/api/auth/login', {
+                'username': 'alice', 'password': 'incorrect-password',
+            }, Origin='https://dotasks.test')
+            self.assertEqual(401, status)
+        status, _, _ = self.request('POST', '/api/auth/login', {
+            'username': 'alice', 'password': 'incorrect-password',
+        }, Origin='https://dotasks.test')
+        self.assertEqual(429, status)
+        self.assertTrue(self.login('bob'))
+
     def test_browser_task_dispatches_directly_with_tenant_isolation(self):
         alice, bob = self.register(), self.register('bob', 'b' * 32)
         status, _, intake = self.request('POST', '/api/task-intakes/enqueue', {

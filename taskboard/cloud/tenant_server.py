@@ -96,7 +96,7 @@ class AccountHandler(RelayHandler):
             accounts.revoke_session(cookie)
             self._json(HTTPStatus.OK, {'authenticated': False}, {'Set-Cookie': session_cookie('signed-out', secure=True)})
             return True
-        if not self.server.web_sessions.allow_login():
+        if not self.server.web_sessions.allow_login(self.client_address[0], payload.get("username", "")):
             raise HTTPRequestError(HTTPStatus.TOO_MANY_REQUESTS, '请求过于频繁，请稍后重试', {'Retry-After': '60'})
         if path == '/api/cli/init':
             account, token = accounts.initialize(payload.get('username'), payload.get('password'), payload.get('device_id'), payload.get('device_token'))

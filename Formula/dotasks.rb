@@ -2,9 +2,9 @@
 class Dotasks < Formula
   desc "Local Codex task execution client"
   homepage "https://dotasks.hanzeal.com"
-  url "https://dotasks.hanzeal.com/downloads/cli/0.4.1-04e33a56ab0a/DoTasksCLI.zip"
-  version "0.4.1-04e33a56ab0a"
-  sha256 "858f09ea41c04604a9ae403ac4107a4f88f456e05ece1c85207237573a5ba02a"
+  url "https://dotasks.hanzeal.com/downloads/cli/0.4.1-177413ba9dae/DoTasksCLI.zip"
+  version "0.4.1-177413ba9dae"
+  sha256 "b319531c44279f6f416ba86e12c0e488e7c54e1a504a1bde6d60f1b403a22d64"
 
   depends_on :macos
   depends_on "python@3.14"

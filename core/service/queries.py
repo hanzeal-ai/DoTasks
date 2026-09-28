@@ -115,11 +115,18 @@ class TaskQueryMixin:
             conversation_rows = connection.execute(
                 "SELECT * FROM task_conversations ORDER BY task_id, created_at"
             ).fetchall()
+            usage_rows = connection.execute(
+                "SELECT task_id, json_extract(context_snapshot, '$.execution_usage') AS execution_usage FROM task_runs"
+            ).fetchall()
             mapping_rows = connection.execute(
                 """SELECT task_id, run_id, role, thread_id, title, summary, status, created_at, updated_at
                    FROM task_run_conversations ORDER BY task_id, created_at"""
             ).fetchall()
         tasks = [decode_row(row) for row in rows]
+        usage_statuses: dict[str, list[tuple[bool, bool]]] = {}
+        for row in usage_rows:
+            receipts = json.loads(row["execution_usage"] or "{}")
+            usage_statuses.setdefault(row["task_id"], []).append((bool(receipts) and all(item is not None for item in receipts.values()), any(item is not None for item in receipts.values())))
         metrics: dict[str, dict[str, dict[str, int]]] = {}
         for row in metric_rows:
             metrics.setdefault(row["task_id"], {})[row["run_type"]] = {
@@ -158,6 +165,8 @@ class TaskQueryMixin:
             policy_cache: dict[str, dict[str, Any]] = {}
             for task in tasks:
                 task["token_by_stage"] = metrics.get(task["id"], {})
+                statuses = usage_statuses.get(task["id"], [])
+                task["token_usage_status"] = "reported" if statuses and all(complete for complete, _ in statuses) else "partial" if any(reported for _, reported in statuses) else "unavailable"
                 task["target_conflicts"] = target_conflicts(connection, task["id"])
                 task["dispatch_blockers"] = self._development_dispatch_blockers(
                     connection,

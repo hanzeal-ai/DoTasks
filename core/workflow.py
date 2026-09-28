@@ -99,12 +99,7 @@ BOARD_COLUMNS = (
     {
         "key": "implementing",
         "title": "开发中",
-        "statuses": ("investigating", "implementing", "rework"),
-    },
-    {
-        "key": "code-review",
-        "title": "Code Review",
-        "statuses": ("code_review",),
+        "statuses": ("investigating", "implementing", "rework", "code_review"),
     },
     {
         "key": "attention",

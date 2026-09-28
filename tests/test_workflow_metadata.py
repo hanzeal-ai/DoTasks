@@ -28,6 +28,8 @@ class WorkflowMetadataTest(unittest.TestCase):
 
     def test_frontend_metadata_matches_domain_vocabulary(self) -> None:
         metadata = workflow_metadata()
+        self.assertEqual(["ready", "implementing", "attention"], [c["key"] for c in metadata["columns"]])
+        self.assertIn("code_review", metadata["columns"][1]["statuses"])
         self.assertEqual(TASK_STATUSES, frozenset(STATUS_LABELS))
         self.assertTrue({status for column in metadata["columns"] for status in column["statuses"]} <= TASK_STATUSES)
         self.assertEqual(RUN_TYPES, frozenset(stage["key"] for stage in TOKEN_STAGES))

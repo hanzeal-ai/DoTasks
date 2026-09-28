@@ -479,6 +479,10 @@ class CodexAppServerClient:
             raise AppServerError("thread/start did not return a thread id")
         self.request("thread/name/set", {"threadId": thread_id, "name": title})
         self._threads_to_sync[thread_id] = title
+        from .execution_usage import FIELDS
+        if not hasattr(self, "usage_baselines"):
+            self.usage_baselines = {}
+        self.usage_baselines[thread_id] = dict.fromkeys(FIELDS, 0)
         return thread_id
 
     def resume_thread(self, thread_id: str, title: str = "") -> str:
@@ -495,6 +499,13 @@ class CodexAppServerClient:
         if title:
             self.request("thread/name/set", {"threadId": resumed_id, "name": title})
         self._threads_to_sync[resumed_id] = title
+        from .mobile_worker import rollout_usage
+        if not hasattr(self, "usage_baselines"):
+            self.usage_baselines = {}
+        try:
+            self.usage_baselines[resumed_id] = rollout_usage((result.get("thread") or {}).get("path"))
+        except (OSError, ValueError):
+            self.usage_baselines[resumed_id] = None
         return resumed_id
 
     def _sync_completed_threads(self) -> None:

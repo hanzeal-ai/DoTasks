@@ -450,33 +450,51 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual("original-dev", retry["resume_thread_id"])
         self.assertEqual("ready", self.service.get_task(queued["id"])["status"])
 
-    def test_code_quality_review_stops_after_three_rework_rounds(self):
+    def test_code_quality_review_stops_after_two_failures(self):
         task = self.task("review-rework-limit")
-        self.deliver(task, "original-dev")
-        with self.service.db.transaction() as connection:
-            connection.execute(
-                "UPDATE tasks SET review_rework_count=3 WHERE id=?", (task["id"],),
+        for attempt, expected in ((1, "rework"), (2, "waiting_confirmation")):
+            self.deliver(task, "original-dev")
+            review = self.service.claim_next_code_review_task("reviewer")
+            self.assertEqual("original-dev", review["resume_thread_id"])
+            self.assertIn("独立子 agent", review["dispatch_prompt"])
+            self.assertIn("通知回执行会话", review["dispatch_prompt"])
+            self.service.bind_conversation(
+                task["id"], "code_review", "original-dev", review["run"]["id"],
             )
-        review = self.service.claim_next_code_review_task("reviewer")
-        self.service.bind_conversation(
-            task["id"], "code_review", "review-thread", review["run"]["id"],
-        )
-
-        result = self.service.review_code(
-            task["id"], review["run"]["id"], "fail",
-            reasons=["代码职责仍然混杂"], passed_items=[],
-            failed_criteria=["project-rules"],
-        )
-
-        self.assertEqual("waiting_confirmation", result["status"])
+            result = self.service.review_code(
+                task["id"], review["run"]["id"], "fail",
+                reasons=["代码职责仍然混杂"], passed_items=[],
+                failed_criteria=["project-rules"],
+            )
+            self.assertEqual(expected, result["status"])
+            self.assertEqual(attempt, result["review_rework_count"])
         self.assertFalse(result["auto_dispatch"])
-        self.assertEqual(4, result["review_rework_count"])
+        self.assertIsNone(self.service.claim_next_task("worker"))
+        with self.assertRaises(ValueError):
+            self.service.review_code(task["id"], review["run"]["id"], "fail",
+                                     reasons=["重复回调"], failed_criteria=["project-rules"])
         event = next(
             item for item in reversed(self.service.list_events("task", task["id"]))
             if item["event_type"] == "code_reviewed"
         )
         self.assertTrue(event["payload"]["review_rework_exhausted"])
-        self.assertEqual(3, event["payload"]["review_rework_limit"])
+        self.assertEqual(1, event["payload"]["review_rework_limit"])
+
+    def test_second_environment_review_failure_does_not_schedule_self_heal(self):
+        task = self.task("review-environment-limit")
+        for attempt in (1, 2):
+            self.deliver(task, "original-dev")
+            review = self.service.claim_next_code_review_task("reviewer")
+            self.service.bind_conversation(task["id"], "code_review", "original-dev", review["run"]["id"])
+            result = self.service.review_code(
+                task["id"], review["run"]["id"], "fail",
+                reasons=["module not found"], failed_criteria=["project-rules"],
+                failure_category="environment",
+                failure_locations=[{"file": "src/APage.tsx", "symbols": ["APage"]}],
+            )
+            self.assertEqual("rework" if attempt == 1 else "waiting_confirmation", result["status"])
+        self.assertFalse(result["implementation_contract"]["self_heal"]["scheduled"])
+        self.assertFalse(result["auto_dispatch"])
 
     def test_result_partition_is_strict(self):
         task = self.task("strict")
@@ -927,7 +945,7 @@ class WorkflowTest(unittest.TestCase):
         second = self.service._claim_next_native_dispatch(
             "codex-native-controller", stage="code_review"
         )
-        self.assertEqual("review-thread-1", second["resume_thread_id"])
+        self.assertEqual("dev-thread", second["resume_thread_id"])
         self.service.bind_native_dispatch(
             second["run_id"], "review-thread-2",
             resume_fallback_reason="review-thread-1 archived",

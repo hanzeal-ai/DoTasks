@@ -172,6 +172,11 @@ class RemoteTaskboardService:
             {"run_id": run_id, "lease_seconds": lease_seconds},
         )
 
+    def record_execution_usage(self, run_id, thread_id, turn_id, usage=None):
+        return self.client.call("record_execution_usage", {
+            "run_id": run_id, "thread_id": thread_id, "turn_id": turn_id, "usage": usage,
+        })
+
     def read_visual_artifact(self, artifact_id: str) -> dict[str, Any]:
         return self.client.call(
             "read_visual_artifact", {"artifact_id": artifact_id}

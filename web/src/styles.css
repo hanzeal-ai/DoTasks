@@ -97,7 +97,7 @@ h2 { font-size: 16px; font-weight: 600; }
 .small.danger:hover { border-color: var(--red); background: var(--red-soft); color: var(--red); }
 
 #content.board-columns { display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; overflow: hidden; }
-#content.board-columns > .board { display: grid; flex: 1 1 auto; width: 100%; grid-template-columns: repeat(4, minmax(250px, 1fr)); align-items: stretch; min-width: 0; min-height: 0; gap: 14px; padding: 18px; overflow-x: auto; overflow-y: hidden; }
+#content.board-columns > .board { display: grid; flex: 1 1 auto; width: 100%; grid-template-columns: repeat(3, minmax(250px, 1fr)); align-items: stretch; min-width: 0; min-height: 0; gap: 14px; padding: 18px; overflow-x: auto; overflow-y: hidden; }
 .column { display: flex; flex-direction: column; min-width: 250px; min-height: 0; background: transparent; }
 .column-head { position: relative; display: flex; flex: 0 0 36px; align-items: center; justify-content: space-between; height: 36px; margin-bottom: 8px; padding: 0 13px; border-radius: 999px; color: var(--text-secondary); font-size: 12px; font-weight: 500; }
 .column-head::after { position: absolute; left: 13px; width: 7px; height: 7px; border: 1.5px solid currentColor; border-radius: 50%; content: ""; }
@@ -106,7 +106,6 @@ h2 { font-size: 16px; font-weight: 600; }
 .column-head span { color: var(--text-tertiary); font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .column-ready .column-head { background: var(--amber-soft); color: var(--amber); }
 .column-implementing .column-head { background: var(--green-soft); color: var(--green); }
-.column-review .column-head, .column-code-review .column-head { background: var(--info-soft); color: var(--info); }
 .column-acceptance .column-head { background: var(--info-soft); color: var(--info); }
 .column-rework .column-head { background: var(--red-soft); color: var(--red); }
 .column-done .column-head { background: var(--green-soft); color: var(--green); }

@@ -77,6 +77,7 @@ class TeamAgent:
         self.executors={}
         self.analysis_client=None
         self.analysis_thread=None
+        self.usage_outboxes={}
 
     def start(self):
         self.thread=threading.Thread(target=self.loop,name='dotasks-team-agent',daemon=True)
@@ -115,6 +116,18 @@ class TeamAgent:
             if self.stopped.is_set():
                 return
             client=TeamClient(self.config.cloud_url,self.config.agent_id,self.config.agent_token,team_id=team['id'])
+            from .execution_usage import UsageOutbox
+            for path in (self.home/'team-workers'/team['id']).glob('*/cloud-agent.json'):
+                stored = json.loads(path.read_text())
+                context = stored.get('team_context') or {}
+                if stored.get('agent_id') != self.config.agent_id or stored.get('cloud_url') != self.config.cloud_url or context.get('team_id') != team['id']:
+                    continue
+                key = str(path.parent)
+                if key not in self.usage_outboxes:
+                    scoped = TeamClient(self.config.cloud_url, self.config.agent_id, self.config.agent_token, **context)
+                    self.usage_outboxes[key] = UsageOutbox(path.parent, RemoteTaskboardService(scoped))
+                self.usage_outboxes[key].flush_async()
+
             # Resend a persisted completed response before claiming any new work.
             receipts=self.home/'team-analysis'/team['id']
             if receipts.exists():
@@ -164,6 +177,11 @@ class TeamAgent:
                 save_json(worker_home/'cloud-agent.json',{'cloud_url':self.config.cloud_url,'agent_id':self.config.agent_id,
                     'agent_token':self.config.agent_token,'team_context':{'team_id':team['id'],'task_id':task['id'],'revision':task['revision']}})
                 executor=TeamExecutor(worker_home,service=RemoteTaskboardService(scoped),on_finished=self.wake)
+                outbox_key = str(worker_home)
+                if outbox_key in self.usage_outboxes:
+                    executor._usage_outbox = self.usage_outboxes[outbox_key]
+                else:
+                    self.usage_outboxes[outbox_key] = executor._usage_outbox
                 self.executors[key]=executor
                 dispatch['project_path']=workspace
                 dispatch['dispatch_prompt']=dispatch['dispatch_prompt'].replace(task['project'],workspace)

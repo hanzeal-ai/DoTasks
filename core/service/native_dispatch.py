@@ -322,7 +322,7 @@ class NativeDispatchMixin:
                     connection, dispatch["entity_id"], dispatch["role"],
                     thread_id, run_id, dispatch["dispatch_title"],
                 )
-                if fallback_reason and dispatch["role"] in {"execution", "rework", "bugfix"}:
+                if fallback_reason and dispatch["role"] in {"execution", "rework", "bugfix", "code_review"}:
                     connection.execute(
                         "UPDATE tasks SET codex_thread_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
                         (thread_id, dispatch["entity_id"]),

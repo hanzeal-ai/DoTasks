@@ -58,6 +58,21 @@ class TeamLifecycleTest(unittest.TestCase):
     def tool(self,tid,name,**args):
         return self.b.execution_tool({'task_id':tid,'revision':2,'name':name,'arguments':args})
 
+    def test_interrupted_execution_can_report_historical_usage_with_bound_identity(self):
+        from tests.test_manager_reliability import counters
+        rid, tid = self.analyzed_owner()
+        dispatch = self.b.execution_claim({'task_id': tid, 'revision': 2})
+        run_id = dispatch['run_id']
+        self.tool(tid, 'bind_native_dispatch', run_id=run_id, thread_id='usage-dev',
+                  dispatch_attempt_id=dispatch['dispatch_attempt_id'])
+        with self.b.db.transaction() as db:
+            db.execute("UPDATE tasks SET active_run_id=NULL WHERE id=?", (tid,))
+            db.execute("UPDATE task_runs SET status='interrupted',lease_expires_at=datetime('now','-1 day') WHERE id=?", (run_id,))
+        self.tool(tid, 'record_execution_usage', run_id=run_id, thread_id='usage-dev', turn_id='turn1', usage=counters(12))
+        self.assertEqual(24, self.b.get_run(run_id)['token_used'])
+        with self.assertRaises(ValueError):
+            self.tool(tid, 'record_execution_usage', run_id=run_id, thread_id='another-thread', turn_id='turn1', usage=counters(13))
+
     def test_complete_delivery_uses_real_git_and_verification(self):
         rid,tid=self.analyzed_owner()
         dispatch=self.b.execution_claim({'task_id':tid,'revision':2})
@@ -80,7 +95,7 @@ class TeamLifecycleTest(unittest.TestCase):
         self.assertEqual('done',self.a.snapshot()['requirements'][0]['status'])
         self.assertEqual(output,self.a.snapshot()['tasks'][0]['delivery']['output_revision'])
 
-    def test_code_review_cannot_bind_the_development_session(self):
+    def test_code_review_resumes_development_session_for_subagent_review(self):
         rid,tid=self.analyzed_owner()
         dispatch=self.b.execution_claim({'task_id':tid,'revision':2})
         self.tool(tid,'bind_native_dispatch',run_id=dispatch['run_id'],thread_id='dev-only',dispatch_attempt_id=dispatch['dispatch_attempt_id'])
@@ -89,8 +104,8 @@ class TeamLifecycleTest(unittest.TestCase):
         self.git('add','.',root=workspace);self.git('commit','-qm','implementation',root=workspace)
         self.tool(tid,'submit_task_delivery',run_id=dispatch['run_id'],delivery_summary='已实现',verification_result='断言通过',changed_locations=[{'file':'feature.py','symbols':['feature']}],acceptance_evidence=[{'criterion':'可以使用 api','evidence':'断言'}])
         review=self.b.execution_claim({'task_id':tid,'revision':2})
-        with self.assertRaisesRegex(ValueError,'独立'):
-            self.tool(tid,'bind_native_dispatch',run_id=review['run_id'],thread_id='dev-only',dispatch_attempt_id=review['dispatch_attempt_id'])
+        self.assertEqual('dev-only', review['resume_thread_id'])
+        self.tool(tid,'bind_native_dispatch',run_id=review['run_id'],thread_id='dev-only',dispatch_attempt_id=review['dispatch_attempt_id'])
 
     def test_stop_requires_local_confirmation_and_old_run_cannot_deliver(self):
         rid,tid=self.analyzed_owner()

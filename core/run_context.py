@@ -123,6 +123,7 @@ def model_run_context(snapshot: dict[str, Any]) -> dict[str, Any]:
     """Return the model-facing snapshot without server-only validation state."""
     public = dict(snapshot)
     public.pop("workspace_baseline", None)
+    public.pop("execution_usage", None)
     public.pop("retry_chain_root_run_id", None)
     public.pop("execution_profile", None)
     public.pop("cache_metadata", None)

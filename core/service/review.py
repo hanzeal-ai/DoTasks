@@ -485,6 +485,41 @@ class TaskReviewMixin:
         failure_category: str | None = None,
         failure_locations: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        # Serialize retries before artifact integration or any other side effect.
+        submission = {
+            "verdict": verdict, "reasons": reasons or [],
+            "passed_items": passed_items or [], "failed_criteria": failed_criteria or [],
+            "failure_category": failure_category, "failure_locations": failure_locations or [],
+        }
+        with self._native_dispatch_worker_lock("review-result:" + task_id):
+            self._execution_admission(task_id, "review", run_id)
+            with self.db.connection() as connection:
+                receipt = connection.execute(
+                    """SELECT payload FROM events WHERE entity_type='task' AND entity_id=?
+                       AND event_type='code_reviewed' AND json_extract(payload, '$.run_id')=?
+                       ORDER BY id DESC LIMIT 1""", (task_id, run_id),
+                ).fetchone()
+            if receipt:
+                if json.loads(receipt["payload"]).get("submission") != submission:
+                    raise ValueError("Review run already has a different result")
+                return self.get_task(task_id)
+            return self._review_code_once(
+                task_id, run_id, verdict, reasons, passed_items, failed_criteria,
+                failure_category, failure_locations, submission=submission,
+            )
+
+    def _review_code_once(
+        self,
+        task_id: str,
+        run_id: str,
+        verdict: str,
+        reasons: list[str] | None = None,
+        passed_items: list[str] | None = None,
+        failed_criteria: list[str] | None = None,
+        failure_category: str | None = None,
+        failure_locations: list[dict[str, Any]] | None = None,
+        *, submission: dict[str, Any],
+    ) -> dict[str, Any]:
         task = self.get_task(task_id)
         run = self.get_run(run_id)
         self._execution_admission(task_id, "review", run_id)
@@ -608,6 +643,12 @@ class TaskReviewMixin:
             )
         completed_batch_task_ids: list[str] = []
         with self.db.transaction() as connection:
+            current = connection.execute(
+                "SELECT status, active_run_id FROM tasks WHERE id=?", (task_id,),
+            ).fetchone()
+            active = connection.execute("SELECT status FROM task_runs WHERE id=?", (run_id,)).fetchone()
+            if current["status"] != "code_review" or current["active_run_id"] != run_id or active["status"] != "running":
+                raise ValueError("Review run changed before its result was recorded")
             round_no = connection.execute(
                 "SELECT COALESCE(MAX(round),0)+1 value FROM reviews WHERE task_id=?",
                 (task_id,),
@@ -648,18 +689,21 @@ class TaskReviewMixin:
                 int(task.get("review_rework_count") or 0) + 1
                 if verdict == "fail" else 0
             )
-            implementation_rework_allowed = (
-                self_heal["category"] != "implementation"
-                or review_rework_attempt <= REVIEW_REWORK_LIMIT
+            review_rework_allowed = (
+                review_rework_attempt <= REVIEW_REWORK_LIMIT
             )
+            if verdict == "fail" and not review_rework_allowed:
+                self_heal["scheduled"] = False
+                if self_heal["contract"].get("self_heal"):
+                    self_heal["contract"]["self_heal"]["scheduled"] = False
             next_status = (
                 (
                     "rework"
                     if (
                         self_heal["category"] == "implementation"
-                        and implementation_rework_allowed
+                        and review_rework_allowed
                     )
-                    or self_heal["scheduled"]
+                    or (self_heal["scheduled"] and review_rework_allowed)
                     else "waiting_confirmation"
                 )
                 if verdict == "fail"
@@ -717,6 +761,7 @@ class TaskReviewMixin:
                 "code_reviewed",
                 {
                     "run_id": run_id,
+                    "submission": submission,
                     "verdict": verdict,
                     "reasons": reasons,
                     "next_stage": next_status,
@@ -725,8 +770,7 @@ class TaskReviewMixin:
                     "review_rework_limit": REVIEW_REWORK_LIMIT,
                     "review_rework_exhausted": bool(
                         verdict == "fail"
-                        and self_heal["category"] == "implementation"
-                        and not implementation_rework_allowed
+                        and not review_rework_allowed
                     ),
                     "self_heal_scheduled": bool(
                         verdict == "fail" and self_heal["scheduled"]

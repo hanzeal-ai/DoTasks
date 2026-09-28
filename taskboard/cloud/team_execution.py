@@ -116,7 +116,7 @@ class TeamExecutionMixin:
         name, arguments = p.get('name'), p.get('arguments',{})
         allowed = {'get_task_details','get_dispatch_status','bind_native_dispatch',
                    'renew_dispatch_lease','report_dispatch_failed','report_run_blocked','submit_task_delivery',
-                   'review_code'}
+                   'review_code','record_execution_usage'}
         if name not in allowed or not isinstance(arguments,dict):
             denied()
         if arguments.get('workspace_path'):
@@ -135,13 +135,7 @@ class TeamExecutionMixin:
                 binding = db.execute('SELECT * FROM team_run_versions WHERE run_id=?',(run_id,)).fetchone()
                 if not binding or binding['task_id']!=task['id'] or binding['revision']!=task['revision'] or binding['actor_id']!=self.actor:
                     denied()
-                if name=='bind_native_dispatch':
-                    run=db.execute('SELECT run_type FROM task_runs WHERE id=?',(run_id,)).fetchone()
-                    if run['run_type']=='code_review' and db.execute('''SELECT 1 FROM task_run_conversations c
-                        JOIN task_runs r ON r.id=c.run_id WHERE r.task_id=? AND r.run_type!='code_review' AND c.thread_id=?''',
-                        (task['id'],arguments.get('thread_id'))).fetchone():
-                        raise ValueError('代码审查必须使用独立于开发的会话')
-        if name not in {'get_task_details','get_dispatch_status'}:
+        if name not in {'get_task_details','get_dispatch_status','record_execution_usage'}:
             self._execution_admission(task['id'],'callback',run_id)
         handler = tool_handlers_for(self).get(name)
         if handler is None:
